@@ -185,16 +185,16 @@ def test_food_settled_after_market_sale():
     现在它的含义变成："先把货卖出去拿到钱，再谈居民吃饭"。
     顺序反了会让玩家用还没到手的钱买粮。
     """
-    cfg = cfg_with_example_elasticity()
+    cfg = load_config()
     st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
     pipeline.advance(
-        st, {"p1": plain_plan("p1", "0,0", u=1.0, purchases={"A": 1.0, "B": 0.5})}, cfg
+        st, {"p1": plain_plan("p1", "0,0", u=1.0, food={"A": 1.0, "B": 0.5})}, cfg
     )
     r = st.raw_reports["p1"]
 
-    # 口粮买入计入 B_t（需求侧），说明它在求价时已经存在
+    # 口粮缺口计入 B_t（需求侧），说明它在求价时已经存在
     assert r.bought == {"A": 1.0, "B": 0.5}
-    # 且确实被消费了
+    # 且确实进了粮食结算的"可用量"
     assert r.food.available == {"A": 1.0, "B": 0.5, "C": 0.0, "D": 0.0}
 
 
@@ -337,58 +337,72 @@ def test_contract_would_reduce_supply():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 七、★ 口粮只能来自买入（产出已全部是供给）
+# 七、★ 居民口粮：自产先顶，缺口才买（2026-10-16 用户口径）
 # ══════════════════════════════════════════════════════════════════
+#
+# 用户原话："首先玩家会决定这期的粮食供给。然后缺了的话会在购入环节购入
+#           （此时仍然是上期价格，然后这期市场的需发生变化了呀），不然扣除"
 
 
-def test_food_must_be_purchased_not_from_production():
-    """★ 产出不能拿来吃 —— 产出已全部是市场供给。
+def test_food_comes_from_own_production_first():
+    """★ 自产先顶：种出来的粮先喂居民，**顶上部分不进公开市场**。
 
-    所以种 A 的玩家若想喂居民，必须在 `purchases` 里报口粮。
+    产出**默认**全部是供给；玩家唯一能截留的就是这份"指定给居民的口粮"。
     """
-    cfg = cfg_with_example_elasticity()
-    plot = mature("0,0", PlotType.AGRICULTURE, 1, product="A")
-
-    # 只种地、不买口粮 → 居民没得吃
-    st = make_state(cfg, "p1", deepcopy(plot))
-    r = pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg).raw_reports["p1"]
-    assert r.food.deducted == {}, "产出全部是供给，不该有粮可吃"
-    assert r.food.happiness == 0.0, "没口粮 → H = 0"
-
-    # 买了口粮 → 居民吃得上
-    st2 = make_state(cfg, "p1", deepcopy(plot))
-    r2 = pipeline.advance(
-        st2, {"p1": plain_plan("p1", "0,0", u=1.0, purchases={"A": 5.0, "B": 3.0})}, cfg
-    ).raw_reports["p1"]
-    assert r2.food.deducted, "买了口粮就该被扣掉"
-    assert r2.food.happiness > 0.0, "有口粮 → H > 0"
-
-
-def test_food_purchase_enters_supply_and_demand():
-    """口粮买入同时是 `B_t` 的一部分（需求侧），会把价格顶高。"""
-    cfg = cfg_with_example_elasticity()
-    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.AGRICULTURE, 1, product="A"))
     pipeline.advance(
-        st, {"p1": plain_plan("p1", "0,0", u=1.0, purchases={"A": 10.0})}, cfg
+        st, {"p1": plain_plan("p1", "0,0", u=1.0, food={"A": 1.2, "B": 0.6})}, cfg
     )
     r = st.raw_reports["p1"]
 
-    assert r.bought == {"A": 10.0}, "口粮买入应计入 B_t"
-    assert r.bought_breakdown["household_food"] == {"A": 10.0}
+    produced_a = r.production[0].output_qty          # A × 5
+    assert r.bought_breakdown["household_food_from_own"] == {"A": 1.2}, "A 由自产顶上"
+    assert r.bought_breakdown["household_food_shortfall"] == {"B": 0.6}, "B 自家没有 → 缺口"
+    assert abs(r.sold["A"] - (produced_a - 1.2)) < TOL, (
+        "★ 只有余量进公开市场：X_t = 产出 − 自产顶上"
+    )
+    assert r.food.happiness > 0.0, "有口粮 → H > 0"
 
 
-def test_leftover_food_is_discarded_not_stored():
-    """买了吃不完的口粮 → **丢弃**（没有仓库），不产生收入、不结转。"""
-    cfg = cfg_with_example_elasticity()
-    plot = mature("0,0", PlotType.RESOURCE, 1)
-    st = make_state(cfg, "p1", plot)
-
-    # 买一大堆 A/B（远超 F_基准），居民吃不完
-    # N=6 → F_基准=1.2、F_优秀=1.8；买 A5/B3 远够优秀档，必有剩
+def test_food_shortfall_is_bought_and_pushes_price():
+    """★ 缺口在购入环节买入：按**上季价**记账，并计入本季 `B_t`（顶高本期价）。"""
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))   # 不产 A/B
     pipeline.advance(
-        st,
-        {"p1": plain_plan("p1", "0,0", u=1.0, purchases={"A": 5.0, "B": 3.0})},
-        cfg,
+        st, {"p1": plain_plan("p1", "0,0", u=1.0, food={"A": 10.0})}, cfg
+    )
+    r = st.raw_reports["p1"]
+
+    assert r.bought == {"A": 10.0}, "缺口应计入 B_t"
+    assert r.bought_breakdown["household_food_shortfall"] == {"A": 10.0}
+    assert r.bought_breakdown["household_food_from_own"] == {}, "没种 → 自产顶不上"
+    assert r.buy_bill.unit_prices["A"] == cfg.market["A"].P0, "首季按参考价（= 上季价兜底）"
+
+    # 买入把 A 的本季价顶高
+    q1 = st.world.price_history["A"][-1]
+    assert q1 > cfg.market["A"].P0, "★ 买入 10 单位 A 应把本季价顶到 P0 以上"
+
+
+def test_food_no_declaration_means_residents_starve():
+    """不申报口粮 → 居民没得吃 → H = 0（产出全部进了市场，不能拿来吃）。"""
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.AGRICULTURE, 1, product="A"))
+    r = pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg).raw_reports["p1"]
+
+    assert r.food.deducted == {}
+    assert r.food.happiness == 0.0
+    assert abs(r.sold["A"] - r.production[0].output_qty) < TOL, "不申报 → 产出全部进市场"
+
+
+def test_food_declared_beyond_need_is_discarded():
+    """申报的口粮远超需求 → 吃不完的部分**丢弃**（没有仓库）。"""
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+
+    # N=6 → F_基准=1.2、F_优秀=1.8；申报 A5/B3 远超优秀档，必有剩
+    pipeline.advance(
+        st, {"p1": plain_plan("p1", "0,0", u=1.0, food={"A": 5.0, "B": 3.0})}, cfg
     )
     r = st.raw_reports["p1"]
 

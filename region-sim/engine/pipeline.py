@@ -211,21 +211,43 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
     # ★ B_t = 生产原料 + 建设物资 + 居民口粮（三段全计入，§4.1）
     bought_by_player: dict[str, dict[str, float]] = {}
     breakdown_by_player: dict[str, dict[str, dict]] = {}
+    # 口粮的两个去向：自产顶上的（不进市场）+ 缺口买入的（进 B_t）
+    food_covered_by_player: dict[str, dict[str, float]] = {}
+    food_shortfall_by_player: dict[str, dict[str, float]] = {}
 
     for player_id, plan in plans.items():
         production_inputs = P.merge_inputs(outcomes[player_id])
         construction = _construction_materials(plan)          # 建设物资
-        # 口粮：玩家在 purchases 里申报的、且属于 A/B/C/D 的部分算口粮；
-        # 其余 purchases 视为额外自购原料。两者都计入 B_t。
-        household_food = {
-            g: q for g, q in plan.purchases.items() if g in S.FOOD_GOODS
-        }
-        other_purchases = {
-            g: q for g, q in plan.purchases.items() if g not in S.FOOD_GOODS
-        }
+
+        # ══════════════════════════════════════════════════════════
+        # ★ 居民口粮：自产先顶，缺口才买（2026-10-16 用户口径）
+        # ══════════════════════════════════════════════════════════
+        #
+        # 用户原话："首先玩家会决定这期的粮食供给。然后缺了的话会在购入
+        #           环节购入（此时仍然是上期价格，然后这期市场的需发生
+        #           变化了呀），不然扣除"
+        #
+        #   ① 玩家申报 `plan.food`（要给居民吃多少）
+        #   ② 自产先顶   = min(本季产出, 申报量)
+        #   ③ 缺口       = 申报量 − 自产顶上      ← 这笔去市场买，计入 B_t
+        #   ④ 自产顶上那部分**不进公开市场**      ← 从 X_t 扣掉（见下）
+        produced = P.merge_outputs(outcomes[player_id])
+        food_want = {g: q for g, q in plan.food.items() if q > 0}
+        food_from_own: dict[str, float] = {}
+        food_shortfall: dict[str, float] = {}
+        for g, want in food_want.items():
+            own = min(produced.get(g, 0.0), want)
+            if own > 0:
+                food_from_own[g] = own
+            gap = want - own
+            if gap > 1e-12:
+                food_shortfall[g] = gap
+
+        food_covered_by_player[player_id] = food_from_own
+        food_shortfall_by_player[player_id] = food_shortfall
 
         total: dict[str, float] = {}
-        for part in (production_inputs, construction, household_food, other_purchases):
+        for part in (production_inputs, construction, plan.purchases, food_shortfall):
             for g, q in part.items():
                 total[g] = total.get(g, 0.0) + q
 
@@ -233,8 +255,9 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
         breakdown_by_player[player_id] = {
             "production_input": production_inputs,
             "construction": construction,
-            "household_food": household_food,
-            "other_purchases": other_purchases,
+            "household_food_shortfall": food_shortfall,   # ← 口粮缺口（买入）
+            "household_food_from_own": food_from_own,     # ← 自产顶上（不买入）
+            "other_purchases": dict(plan.purchases),
         }
 
     # ══ 本季供给 X_t：**产出本身就是供** ═══════════════════
@@ -260,12 +283,15 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
         # 合同交付：不进公开市场（口子已留，第一期返回空）
         contracted = _contract_deliveries(plan)
         supply = dict(produced)
-        for g, q in contracted.items():
-            left = supply.get(g, 0.0) - q
-            if left > 1e-12:
-                supply[g] = left
-            else:
-                supply.pop(g, None)
+        # ★ 扣掉两样东西：合同交付 + 自产顶上居民口粮的那部分
+        #   （口粮那部分已经"给居民了"，不再进公开市场）
+        for source in (contracted, food_covered_by_player[player_id]):
+            for g, q in source.items():
+                left = supply.get(g, 0.0) - q
+                if left > 1e-12:
+                    supply[g] = left
+                else:
+                    supply.pop(g, None)
 
         sold_by_player[player_id] = supply
         contracted_by_player[player_id] = contracted
@@ -321,19 +347,17 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
         )
 
         # ══════════════════════════════════════════════════════════
-        # ★ 产出**直接就是供给**，不进库存（没有仓库）
+        # ★ 产出**默认全部是供给**，不进库存（没有仓库）
         # ══════════════════════════════════════════════════════════
         # 买进来的东西分三类，**只有口粮进库存**：
         #   · 生产原料   → 第 4 步生产时**当场消耗**，不是库存
         #   · 建设物资   → 进工程项目，不是库存
         #   · 居民口粮   → 落到库存，等第 7.5 步被吃掉
         #
-        # ⚠️ 这里曾经把 `bought_by_player` **全部**入库，导致一个隐蔽的 bug：
-        #    G 工厂买的 C×2 / D×1（生产原料）躺在库存里，
-        #    第 7.5 步粮食结算把它们当成"居民能吃的"给吃掉了
-        #    —— 增加值因此从 110 掉到 52。
-        #    原料必须在生产时就消耗掉，不能留到粮食结算。
-        for g, q in (breakdown_by_player[player_id]["household_food"] or {}).items():
+        # 口粮 = 自产顶上的 + 缺口买入的（两者合起来正好是玩家申报的 `food`）
+        for g, q in (breakdown_by_player[player_id]["household_food_from_own"] or {}).items():
+            player.add_inventory(g, q)
+        for g, q in (breakdown_by_player[player_id]["household_food_shortfall"] or {}).items():
             player.add_inventory(g, q)
 
     # ══ 第 6 步：产品分配与工程投入 ════════════════════════

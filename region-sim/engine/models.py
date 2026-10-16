@@ -827,7 +827,37 @@ class Plan:
 
     player_id: str
     plot_plans: dict[str, PlotPlan] = field(default_factory=dict)
+
+    # 生产原料 + 建设物资的采购（**不含口粮** —— 口粮走下面的 `food`）
     purchases: dict[str, float] = field(default_factory=dict)
+
+    # ══════════════════════════════════════════════════════════════
+    # ★ 居民口粮：玩家**决定这期给居民吃多少**（2026-10-16 用户口径）
+    # ══════════════════════════════════════════════════════════════
+    #
+    # 用户原话："首先玩家会决定这期的粮食供给。然后缺了的话会在购入环节
+    #           购入（此时仍然是上期价格，然后这期市场的需发生变化了呀），
+    #           不然扣除"
+    #
+    # 结算顺序（**这就是本节的全部内容**）：
+    #
+    #   ① 玩家申报本季要供应给居民的口粮 `food`（A/B/C/D）
+    #   ② **自产先顶**：`自产顶上[g] = min(本季产出[g], food[g])`
+    #   ③ **缺口去市场买**：`缺口[g] = food[g] − 自产顶上[g]`
+    #         · 按【上季结算价】记账
+    #         · 并且**计入本季 `B_t`** → 会把本季价格顶高
+    #   ④ 自产顶上的那部分**不进公开市场** → 从 `X_t` 里扣掉
+    #   ⑤ 最后按 `food` 走粮食结算，判定两档 → 得 H
+    #
+    # 与"产出就是供本身"的关系（两条不矛盾）：
+    #
+    #   产出**默认**全部是公开市场供给；
+    #   玩家唯一能"截留"的，就是这份**指定给居民的口粮**（以及合同交付）。
+    #   所以：`X_t = 产出 − 自产顶上 − 合同交付`
+    #
+    # ⚠️ 缺口是**自动买**的（用户："会在购入环节购入"）：
+    #    如果钱不够，第 5 步一次性扣款时**明确报错**（§11.3 不允许部分执行）。
+    food: dict[str, float] = field(default_factory=dict)
 
     # ══════════════════════════════════════════════════════════════
     # ★ 没有"申报卖出"这个字段（2026-10-16 用户拍板）
@@ -835,13 +865,11 @@ class Plan:
     #
     # 用户原话："玩家不需要申报要卖，因为没有仓库，生产出来的就是'供'本身。"
     #
-    # 含义：
-    #   · **没有仓库** → 不存在"囤货待售"，本季产出**自动全部**成为市场供给
-    #   · 所以 `X_t`（本季卖出量）= **本季全部产出**，玩家不用填任何东西
+    #   · **没有仓库** → 不存在"囤货待售"，本季产出**默认全部**成为市场供给
+    #   · 所以 `X_t` 不需要玩家填 —— 只有"口粮"与"合同"两处例外
     #   · 也因此**没有"季末清仓"这个动作** —— 没有库存可清
     #
     # ⚠️ 这里原先有个 `sales: dict[str, float]` 字段，已删除。
-    #    它与"没有仓库"直接冲突：有仓库才需要申报"我留多少、卖多少"。
 
     builds: list[BuildOrder] = field(default_factory=list)
 
@@ -872,6 +900,7 @@ class Plan:
             "player_id": self.player_id,
             "plot_plans": {pid: pp.to_dict() for pid, pp in self.plot_plans.items()},
             "purchases": dict(self.purchases),
+            "food": dict(self.food),
             "builds": [b.to_dict() for b in self.builds],
             "contracts": [c.to_dict() for c in self.contracts],
         }
@@ -882,6 +911,7 @@ class Plan:
             player_id=data["player_id"],
             plot_plans={pid: PlotPlan.from_dict(pp) for pid, pp in data.get("plot_plans", {}).items()},
             purchases=dict(data.get("purchases", {})),
+            food=dict(data.get("food", {})),
             builds=[BuildOrder.from_dict(b) for b in data.get("builds", [])],
             contracts=[ContractAction.from_dict(c) for c in data.get("contracts", [])],
         )
