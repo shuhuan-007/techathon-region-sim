@@ -49,6 +49,10 @@
 
 `kind` 是机器可读的分类（`conflict` / `plan_rejected` / `not_found` / ...），
 `issues` 只在计划校验失败时出现（§11.3 的五要素就在里面）。
+
+⚠️ **一个例外**：`POST /api/ai/advise` 的「AI 不可用」**不走 kind**，
+   而是 200 + `ok: false` + `error`/`detail`（见 advise 端点的 docstring）——
+   模型没起来是**常态不是异常**，不该让前端把它当成一次"请求失败"。
 """
 
 from __future__ import annotations
@@ -88,6 +92,7 @@ from server.session import Conflict  # noqa: E402
 from storage import GameNotFound, JsonFileStorage, StorageError  # noqa: E402
 
 from engine.models import SessionPhase  # noqa: E402
+from server import ai_host  # noqa: E402  (AI 主机层：本文件只做转发)
 
 # 前端根目录（region-sim/web）
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
@@ -331,6 +336,29 @@ class App:
             "sections": sections,
         }
 
+    def advise(self, body: dict) -> dict:
+        """AI 建议（§11.4）：把局面递给主机层，拿回一份**只读建议**。
+
+        ⚠️ **只转发**：数字与措辞全部由 `server.ai_host.advise` 给出，
+           本方法不改写、不补全、不把失败包装成建议。
+
+        ⚠️ **AI 不可用 / 拒绝 / 试算失败 → HTTP 200 + `{ok: false}`**：
+           「网关没起」是常态不是异常，不该让前端把它当成一次"请求失败"
+           （500/503 会触发前端的重试与错误弹层，而这事玩家点一下重发
+           就能好）。只有**请求本身不齐**（缺 game/player、局不存在）
+           才按老规矩走 kind（400/404）。
+
+        返回形状（成功与失败同一形状，前端只查 `ok`）：
+
+            成功：{ok: true, advice: {ok: true, summary, suggested_plan,
+                                       evidence, model, ...}}
+            失败：{ok: false, advice: {ok: false, error, detail, ...}}
+        """
+        session = self.registry.get(_need(body, "game"))
+        player_id = _need(body, "player")
+        advice = ai_host.advise(session, player_id, body.get("question") or None)
+        return {"ok": bool(advice.get("ok")), "advice": advice}
+
     def end_quarter(self, body: dict) -> dict:
         session = self.registry.get(_need(body, "game"))
         player_id = _need(body, "player")
@@ -429,6 +457,7 @@ ROUTES: dict[str, tuple[str, bool, str]] = {
     "/api/simulate":      ("POST", True,  "simulate"),
     "/api/validate":      ("POST", True,  "validate"),
     "/api/rules":         ("GET",  False, "rules"),
+    "/api/ai/advise":     ("POST", True,  "advise"),
     "/api/end_quarter":   ("POST", True,  "end_quarter"),
     "/api/next_quarter":  ("POST", True,  "next_quarter"),
 }

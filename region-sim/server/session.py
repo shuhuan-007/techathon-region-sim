@@ -46,7 +46,7 @@ if TYPE_CHECKING:                       # 只为类型标注，运行时不 impo
 
 from engine import report, validate
 from engine.loader import Config
-from engine.models import GameState, Plan, SessionPhase
+from engine.models import GameState, Plan, PlotType, SessionPhase
 from engine.pipeline import QuarterReport, SettlementError, advance, preview
 
 # ⚠️ `PlanRejected` 在这里**故意显式重导出**：调用方只需要 import
@@ -115,6 +115,63 @@ class GameSession:
         """整张地图（含别人的格子）—— 前端画地图用。**只读。**"""
         with self.lock:
             return report.build_map(self.state, player_id)
+
+    def build_quote(self, player_id: str, builds: list) -> dict:
+        """一组**未提交**建设指令的报价（引擎公式真算 → 前端零计算）。
+
+        原则：前端只发形状（`plan.builds` 的原生 dict），**一切判定都在引擎**：
+        能报价 = 引擎 `build_cash_plan` 真跑；报不了 = 原样
+        转发异常消息（缺产出/在建中……），前端只显示、再也不拦。
+
+        ⚠️ 这是**试算**，与结算第 5 步**不是同一次扣款**，不登记名额、
+           不扣任何钱。真实额度仍以结算时 `pipeline` 算的为准（基线 §11.3）。
+        """
+        from engine import construction as _C
+        from engine.models import BuildOrder
+
+        with self.lock:
+            player = self.state.player(player_id)
+            orders: list[BuildOrder] = []
+            for b in builds or []:
+                orders.append(BuildOrder(
+                    plot_id=b["plot_id"],
+                    plot_type=PlotType(b["plot_type"]),
+                    target_level=int(b["target_level"]),
+                    product=b.get("product"),
+                ))
+            plan = Plan(player_id=player_id, builds=orders)
+
+            quote_rows: list[dict] = []
+            total = 0.0
+            error: Optional[str] = None
+            discounted_any = False
+            try:
+                rows = _C.build_cash_plan(plan, player, self.cfg)
+                for r in rows:
+                    this_cash = float(r["cash"])
+                    quote_rows.append({
+                        "plot_id": r["plot_id"],
+                        "plot_type": r["plot_type"].value,
+                        "list_cash": float(r["list_cash"]),
+                        "cash": this_cash,
+                        "discounted": bool(r["discounted"]),
+                        "consumed_after": int(r["consumed_after"]),
+                    })
+                    total += this_cash
+                    if r["discounted"]:
+                        discounted_any = True
+            except Exception as e:  # noqa: BLE001
+                # 引擎抛什么就原样转给玩家（不能屏蔽真原因）；到这里
+                # 的都是**业务错误**（缺产出、在建中、没这工程……）
+                error = f"{type(e).__name__}: {e}"
+
+            return {
+                "rows": quote_rows,
+                "total": round(total, 6),
+                "discount_rate": _C._discount_rate(self.cfg),
+                "discounted_any": discounted_any,
+                "error": error,
+            }
 
     def validate_only(self, plan: Plan, player_id: str) -> list:
         """只校验，不试算、不落任何状态（给 `POST /api/validate`）。

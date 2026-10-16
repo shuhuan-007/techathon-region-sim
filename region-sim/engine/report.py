@@ -55,7 +55,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from engine import finance, production, validate
+from engine import finance, news, production, validate
 from engine.loader import Config
 from engine.models import GameState, Plan, PlotType
 from engine.pipeline import QuarterReport, SettlementError, preview
@@ -259,9 +259,32 @@ def build_state(
         # ── 上季报告（原样给，前端零计算）──
         "report": last_report,
 
+        # ── ★ 新闻/财报**留位**（2026-10-17，engine/news.py）。
+        #    今天 = 纯事实搬运（news_facts）；明天接 AI 叙事（narrate）。
+        "news": _news(state, player_id, cfg),
+
+        # ── ★ 开局减免名额速览（2026-10-17，§5.3）—— 已用/总数/剩余
+        #    都是引擎给的，前端零计算。
+        "opening_quota": _opening_quota(player, cfg),
+
         # ── 本季收支预览 ──
         "projection": _projection(trial, trial_error, cfg),
     }
+
+    # ── ★ 本季草稿里**未提交**建设指令的**折后现金报价**（2026-10-17）──
+    #   ⚠️ 不是 /state 的固定字段：只在玩家真的提交了带 builds 的计划
+    #      时才挂这个键。数字全部来自 `build_cash_plan`（纯函数），与第
+    #      5 步扣款**同一套公式**；不记名额、不扣钱。
+    if plan is not None and plan.builds:
+        out["build_quote"] = build_quote(
+            state, player_id, cfg,
+            builds=[{
+                "plot_id": b.plot_id,
+                "plot_type": b.plot_type.value,
+                "target_level": b.target_level,
+                "product": b.product,
+            } for b in plan.builds],
+        )
 
     # ── 能不能推进（口径见模块头）──
     out.update(_settle_blockers(state, player, cfg, plan, issues, trial_error))
@@ -474,6 +497,117 @@ def _projection(
         out[key] = fin[key]
 
     return out
+
+
+def _news(state: GameState, player_id: str, cfg: Config) -> Optional[dict]:
+    """新闻/财报事实包（引擎口 `news_facts`）+ AI 叙事**空位**。
+
+    返回::
+
+        {
+          "facts":  news_facts(...)  | None,   # 还没结算过 = None（不编造）
+          "narrative": None,                    # ★ 留位：接 narrate()，
+                                                #   今天**恒 None**，明天给正文
+        }
+
+    ⚠️ 这里**不调 narrate()**——它尚未实现且**绝不**偷偷返回编造文本
+       （§11.4）。今天 `narrative` 恒为 `None`，前端 `#ai-panel` 显示
+       「AI 建议（待接）」即可；明天只在 `_news()` 这一处换成
+       `narrate(facts, cfg)`，调用方与前端**一行不改**。
+
+    状态层两个数（上季 H、合同账本）在这一层递，理由见 news.py docstring：
+    财报只记本季，缺这两个就**诚实缺席**。
+    """
+    report = None
+    if state.raw_reports and player_id in state.raw_reports:
+        report = state.raw_reports[player_id]
+    if report is None:
+        return {"facts": None, "narrative": None}
+
+    # 上季 H：状态层 `player.last_happiness` 在**结算后**就是本季 H，
+    # 没有独立的"上季"位 → 诚实给 None（不臆造）。
+    previous_happiness: Optional[float] = None
+
+    facts = news.news_facts(
+        report,
+        cfg,
+        contracts=list(state.contracts.values()) if state.contracts else None,
+        previous_happiness=previous_happiness,
+    )
+    return {"facts": facts, "narrative": None}
+
+
+def build_quote(state: GameState, player_id: str, cfg: Config, builds: list) -> dict:
+    """一组**未提交**建设指令的报价（**引擎公式真算** → 前端零计算）。
+
+    ⚠️ **只读**：`build_cash_plan` 本就是纯函数，不扣钱、不登记名额、
+       不改状态。报的价以**结算第 5 步**为准（`pipeline` 用的是同一公式）。
+    """
+    from engine import construction as _C
+    from engine.models import BuildOrder
+
+    player = state.player(player_id)
+    orders = []
+    for b in builds or []:
+        orders.append(BuildOrder(
+            plot_id=b["plot_id"],
+            plot_type=PlotType(b["plot_type"]),
+            target_level=int(b["target_level"]),
+            product=b.get("product"),
+        ))
+    plan = Plan(player_id=player_id, builds=orders)
+
+    rows: list[dict] = []
+    total = 0.0
+    error: Optional[str] = None
+    discounted_any = False
+    try:
+        for r in _C.build_cash_plan(plan, player, cfg):
+            this_cash = float(r["cash"])
+            rows.append({
+                "plot_id": r["plot_id"],
+                "plot_type": r["plot_type"].value,
+                "list_cash": float(r["list_cash"]),
+                "cash": this_cash,
+                "discounted": bool(r["discounted"]),
+                "consumed_after": int(r["consumed_after"]),
+            })
+            total += this_cash
+            if r["discounted"]:
+                discounted_any = True
+    except Exception as e:  # noqa: BLE001
+        # 引擎抛什么 -> 原样告诉玩家。到这里都是业务错误
+        # （缺产出 / 在建中 / 没这工程 / 不存在这格……）。
+        error = f"{type(e).__name__}: {e}"
+
+    return {
+        "rows": rows,
+        "total": round(total, 6),
+        "discount_rate": _C._discount_rate(cfg),
+        "discounted_any": discounted_any,
+        "error": error,
+    }
+
+
+def _opening_quota(player, cfg: Config) -> dict:
+    """开局减免名额速览（§5.3）。**数字全来自引擎函数，不自算。**
+
+        {"rate": 0.5,
+         "types": {"agriculture": {"used": n, "total": 3, "remaining": m}, ...}}
+    """
+    from engine import construction as _C
+
+    used_map = getattr(player, "opening_quota_used", None) or {}
+    rows: dict[str, dict] = {}
+    for ptype in PlotType:
+        used = int(used_map.get(ptype.value, 0))
+        total = int(_C._quota_of(cfg, ptype) or 0)
+        rows[ptype.value] = {
+            "used": used,
+            "total": total,
+            "remaining": max(0, total - used),
+        }
+    return {"rate": _C._discount_rate(cfg), "types": rows}
 
 
 def _settle_blockers(

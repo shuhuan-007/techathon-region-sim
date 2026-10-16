@@ -145,6 +145,7 @@
 
         <div class="panel" id="build-panel">
           <h2>建造 / 升级 <span class="muted" id="build-at"></span></h2>
+          <p class="muted" id="quota-strip" style="margin:0 0 8px;font-size:12px"></p>
           <div class="row" style="margin-bottom:8px">
             <select id="sel-work"></select>
           </div>
@@ -153,6 +154,7 @@
             <select id="sel-product"></select>
           </div>
           <p class="muted" id="work-info" style="margin:8px 0"></p>
+          <p class="muted" id="quote-info" style="margin:8px 0;font-size:12px"></p>
           <div class="row">
             <button id="btn-build" class="primary" disabled>下达建设指令</button>
             <button id="btn-cancel">取消</button>
@@ -204,6 +206,16 @@
           <p class="muted" style="margin:8px 0 0" id="proj-note">—</p>
         </div>
 
+        <!-- ★ AI 建议（待接）—— 另一路（AI 路由）填它。今天只留可见空位。 -->
+        <div class="panel" id="ai-panel" style="border-style:dashed;">
+          <h2>🤖 AI 建议（待接）</h2>
+          <p class="muted" style="margin:0">
+            提示词将由用户于 <b>2026-10-18</b> 提供，
+            届时接在 <code>server/ai_host.py</code> 的同一条模型通道上。
+            今天的事实包已就位（<code>/state.news.facts</code>）。
+          </p>
+        </div>
+
         <div class="panel">
           <h2>上季报告</h2>
           <div id="report-body" class="muted">还没有结算过。</div>
@@ -227,6 +239,10 @@ let GAME = null, PLAYER = "p1";
 let STATE = null, MAP = null, WORKS = [];
 let selected = null;          // 选中的格子
 let plan = emptyPlan();
+
+/* 类型短码（显示层常量，不参与任何计算） */
+const TYPE_CN = {agriculture:"农", resource:"资", industry:"工",
+                 service:"服", research:"研"};
 
 function emptyPlan(){
   return { plot_plans:{}, purchases:{}, food:{}, builds:[], contracts:[] };
@@ -329,6 +345,7 @@ async function refresh(){
 function renderAll(){
   renderTop(); renderMap(); renderPlots(); renderMarket();
   renderFood(); renderProj(); renderReport(); renderBuildPanel();
+  renderQuota(); renderQuote();
 }
 
 /* ── 顶栏 ─────────────────────────────────────────────── */
@@ -352,8 +369,6 @@ function renderTop(){
 }
 
 /* ── 地图 ─────────────────────────────────────────────── */
-const TYPE_CN = {agriculture:"农", resource:"资", industry:"工",
-                 service:"服", research:"研"};
 function renderMap(){
   const el = $("map");
   el.style.gridTemplateColumns = `repeat(${MAP.cols}, minmax(0,1fr))`;
@@ -488,6 +503,30 @@ function renderFood(){
   }
 }
 
+/* ── 开局减免名额速览（引擎给数，前端只显示，绝不算折扣）── */
+function renderQuota(){
+  const q = STATE.opening_quota;
+  const el = $("quota-strip");
+  if (!q){ el.textContent = ""; return; }
+  const order = ["agriculture","resource","industry","service","research"];
+  const pieces = [];
+  for (const t of order){
+    const r = q.types && q.types[t];
+    if (!r) continue;
+    if (!(r.total > 0)) continue;   // 没配名额的类型不占位
+    const off = r.remaining > 0;
+    pieces.push(
+      `<span class="tag" style="${off?'':'opacity:.5'}">` +
+      `${TYPE_CN[t] || t} ${r.used}/${r.total}` +
+      `${off ? "·下块减" : ""}</span>`
+    );
+  }
+  el.innerHTML = pieces.length
+    ? `开局减免名额（§5.3，每类独立）：${pieces.join("　")}` +
+      `<span class="muted">　· 折后现金以「一次性扣款」为准</span>`
+    : "";
+}
+
 /* ── 收支预览 ─────────────────────────────────────────── */
 function renderProj(){
   const p = STATE.projection;
@@ -589,7 +628,7 @@ function renderBuildPanel(){
 function renderWorkDetail(){
   const wid = $("sel-work").value;
   const w = WORKS.find(x => x.work_id === wid);
-  if (!w){ $("btn-build").disabled = true; return; }
+  if (!w){ $("btn-build").disabled = true; $("quote-info").textContent = ""; return; }
 
   const opts = w.products || [];
   if (opts.length){
@@ -600,12 +639,36 @@ function renderWorkDetail(){
     $("sel-product").innerHTML = "";
   }
   $("work-info").textContent =
-    `${w.label}　现金 ${w.cash}　物资 ${
+    `${w.label}　现金 ${w.cash}（**原价**）　物资 ${
       Object.entries(w.materials).map(([g,q])=>`${g}×${q}`).join(" + ")}　工期 ${w.quarters} 季`;
   $("btn-build").disabled = false;
+  renderQuote();
 }
 
-$("btn-build").onclick = () => {
+/* ★ 折后现金报价 —— 引擎 `/state.build_quote` 给数，前端只显示。 */
+function renderQuote(){
+  const el = $("quote-info");
+  const q = STATE.build_quote;
+  if (!q){ el.textContent = ""; return; }
+  if (q.error){
+    el.innerHTML = `<span style="color:var(--bad)">报价失败：${q.error}</span>`;
+    return;
+  }
+  const rows = (q.rows || []).map(r => {
+    if (!r.discounted) return `${r.plot_id}：现金 ${fmt(r.cash)}（原价）`;
+    return `${r.plot_id}：现金 ${fmt(r.cash)}　` +
+           `<span style="color:var(--good)">↓ 减免 · 原价 ${fmt(r.list_cash)}</span>`;
+  });
+  el.innerHTML =
+    `本季建设报价（引擎真算）：` +
+    (rows.length ? `${rows.join("　·　")}　` : "") +
+    `<b>合计 ${fmt(q.total)}</b>` +
+    (q.discounted_any
+      ? `　<span style="color:var(--good)">含减免</span>`
+      : "");
+}
+
+$("btn-build").onclick = async () => {
   const wid = $("sel-work").value;
   const w = WORKS.find(x => x.work_id === wid);
   if (!w || !selected) return;
@@ -616,9 +679,21 @@ $("btn-build").onclick = () => {
     target_level: w.to_level,
     product,
   });
-  toast(`已加入建设指令：${selected} ${w.label}${product ? "（" + product + "）" : ""}\n` +
-        `点「▶ 推进本季度」生效。`, "ok");
+  /* ★ 点完即提交（试算走真引擎）：让 /state 立刻带上
+     opening_quota（能用名额减少）与 build_quote（这条是不是打折）。
+     不报"提交失败"——试算里允许资金不够，折后现金仍会显示；
+     真正要拦是「推进本季度」那一刻的结算。 */
+  try{
+    await api("POST", "/api/submit", {game:GAME, player:PLAYER, plan: publicPlan()});
+    await refresh();
+    toast(`已加入建设指令：${selected} ${w.label}${product ? "（" + product + "）" : ""}\n` +
+          `（报价与名额已刷新，点「▶ 推进本季度」生效。）`, "ok");
+  }catch(e){
+    toast(`建设指令已记下，但预览失败：${e.message}`, "warn");
+  }
   $("btn-build").disabled = true;
+  selected = null;
+  renderMap(); renderBuildPanel();
 };
 $("btn-cancel").onclick = () => { selected = null; renderMap(); renderBuildPanel(); };
 
