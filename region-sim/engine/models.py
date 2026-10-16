@@ -695,6 +695,77 @@ class PlayerState:
 
 
 @dataclass
+class Contract:
+    """★ 合同账本的一条记录（§7.2）—— 挂在 `GameState` 上（不是 PlayerState：
+       它天然跨两个玩家，放任何一边都表达不了"谁欠谁"）。
+
+    一条 = 一对玩家在某季度对一种商品达成的**供货约定**，含履约进度：
+
+        contract_id  稳定键（`"{卖家}>{买家}>{商品}>q{季度}"`，由 pipeline 生成）
+        seller_id    供货方（交货、收钱）
+        buyer_id     受货方（收货、付钱）
+        goods        商品
+        qty          约定交付总量
+        price        协商单价（§7.2：双方协商、一般低于市场价；**不走 P_t**）
+        quarter      该交的季度（游戏季度编号）
+        delivered    已累计交付量（≤ qty）
+        settled_cash 已累计按合同价转的钱（= Σ 交付量×price）
+        fulfilled    是否已足额履约（delivered ≥ qty）
+        shortfall    未履约量（qty − delivered；§7.3 的"未履约义务"就是它）
+
+    ⚠️ §7.3 的完整流程（受损方接受/协商/上报 → 赔偿 → 信用状态）
+       **本次只做到"记录未履约义务"这一步**（即把 shortfall 留在账上）；
+       赔偿与信用扣分**尚未实现**，缺口已按基线登记，见 pipeline 注释与
+       `待裁定` 标记。
+    """
+
+    contract_id: str
+    seller_id: str
+    buyer_id: str
+    goods: str
+    qty: float
+    price: float
+    quarter: int
+    delivered: float = 0.0
+    settled_cash: float = 0.0
+    fulfilled: bool = False
+
+    @property
+    def shortfall(self) -> float:
+        """未履约义务量（§7.3）。已足额履约时为 0。"""
+        return max(0.0, self.qty - self.delivered)
+
+    def to_dict(self) -> dict:
+        return {
+            "contract_id": self.contract_id,
+            "seller_id": self.seller_id,
+            "buyer_id": self.buyer_id,
+            "goods": self.goods,
+            "qty": self.qty,
+            "price": self.price,
+            "quarter": self.quarter,
+            "delivered": self.delivered,
+            "settled_cash": self.settled_cash,
+            "fulfilled": self.fulfilled,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Contract":
+        return cls(
+            contract_id=data["contract_id"],
+            seller_id=data["seller_id"],
+            buyer_id=data["buyer_id"],
+            goods=data["goods"],
+            qty=data["qty"],
+            price=data["price"],
+            quarter=data["quarter"],
+            delivered=data.get("delivered", 0.0),
+            settled_cash=data.get("settled_cash", 0.0),
+            fulfilled=data.get("fulfilled", False),
+        )
+
+
+@dataclass
 class GameState:
     """整个游戏状态 = 共享层 + 私有层（红线 2 的分层在这里体现）。
 
@@ -704,6 +775,11 @@ class GameState:
 
     world: WorldState = field(default_factory=WorldState)
     players: dict[str, PlayerState] = field(default_factory=dict)
+
+    # ★ 合同账本（§7.2）：天然跨两个玩家，所以挂在 GameState 而不是
+    #   PlayerState。键 = `Contract.contract_id`。
+    #   ⚠️ **进存档**（to_dict/from_dict 同步），单人局里它恒为空。
+    contracts: dict[str, Contract] = field(default_factory=dict)
 
     # 最近一季的财报（**机器可读**，前端只显示、AI 只解读，都读这个）。
     # `report` 是序列化后的字典；`raw_reports` 挂着运行时对象（不进存档）。
@@ -754,6 +830,8 @@ class GameState:
         return {
             "world": self.world.to_dict(),
             "players": {pid: p.to_dict() for pid, p in self.players.items()},
+            # ★ 合同账本**进存档**（§7.2）：未履约义务不能因存档/读档丢失。
+            "contracts": {cid: c.to_dict() for cid, c in self.contracts.items()},
         }
 
     @classmethod
@@ -761,6 +839,8 @@ class GameState:
         return cls(
             world=WorldState.from_dict(data.get("world", {})),
             players={pid: PlayerState.from_dict(p) for pid, p in data.get("players", {}).items()},
+            # ⚠️ 兼容旧存档：没有 "contracts" 键 → 空账本（单人局本就为空）。
+            contracts={cid: Contract.from_dict(c) for cid, c in data.get("contracts", {}).items()},
         )
 
 
@@ -831,29 +911,48 @@ class BuildOrder:
 
 @dataclass
 class ContractAction:
-    """合同动作（起草 / 接受 / 履约 / 违约）。
+    """合同动作 —— 一方在**自己计划里**提交的供货/受货意图（§7.2）。
 
-    ⚠️ 第一期留桩：合同的执行逻辑（§10）尚不完整，
-       这里只保证 Plan 的形状稳定、可序列化。
+    ★ 玩家对玩家（2026-10-16 用户裁定，**A 方案**）：
+       双方各自提交、**互相确认才生效**。`side` 区分这一方是供货还是受货：
+
+         side="sell"  我供货给对方（我交货、我收钱）
+         side="buy"   我从对方收货（对方交货、我付钱）
+
+       **双方都提交了、且 商品/数量/单价/季度 完全一致，合同才成立**
+       （pipeline 把两份意图对账、写进 `GameState.contracts`）。
+       只有一方提交 → 不生效（第一期就是这种情况，见 pipeline 注释 `待裁定`）。
+
+    ⚠️ `from_dict` 用显式字段（不用 `**data`）：旧数据没有 `side` 键也能读。
     """
 
-    action: str                 # draft / accept / deliver / breach
-    counterparty: str = ""
+    action: str                 # draft / accept / deliver / breach（保留枚举位）
+    counterparty: str = ""      # 对手方玩家 ID
     goods: str = ""
     qty: float = 0.0
     price: float = 0.0
     quarter: int = 0
+    side: str = "sell"          # "sell"=我方供货 / "buy"=我方受货
 
     def to_dict(self) -> dict:
         return {
             "action": self.action, "counterparty": self.counterparty,
             "goods": self.goods, "qty": self.qty,
             "price": self.price, "quarter": self.quarter,
+            "side": self.side,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "ContractAction":
-        return cls(**data)
+        return cls(
+            action=data.get("action", "deliver"),
+            counterparty=data.get("counterparty", ""),
+            goods=data.get("goods", ""),
+            qty=data.get("qty", 0.0),
+            price=data.get("price", 0.0),
+            quarter=data.get("quarter", 0),
+            side=data.get("side", "sell"),
+        )
 
 
 @dataclass
@@ -915,20 +1014,22 @@ class Plan:
     builds: list[BuildOrder] = field(default_factory=list)
 
     # ══════════════════════════════════════════════════════════════
-    # ★ 合同通道（**保留口子**，第一期不实现交付）
+    # ★ 合同通道（**已实现**，玩家对玩家 A 方案）
     # ══════════════════════════════════════════════════════════════
     #
     # 用户原话："要保留一个额外的通道，之后玩家间可以通过协议低于市场价提供，
     #           这个需要到时候能实现。"
     #
-    # 口子怎么留的（主流程已经按这个写好，接合同时只填一个函数）：
+    # 2026-10-16 用户裁定：**玩家对玩家**，双方各自提交 `ContractAction`、
+    #   互相确认（商品/数量/单价/季度一致）才成立 → 写入 `GameState.contracts`。
     #   · 合同交付的货**不进公开市场** → 求价时从 `X_t` 里扣掉
-    #   · 合同价**低于市场价**，由双方协商（不是程序定价）
+    #   · 合同价**低于市场价**，由双方协商（不是程序定价），转账**不走 P_t**
     #   · 卖方：`X_t = 本季产出 − 合同交付量`
     #   · 买方：`B_t = 采购量 − 合同收货量`（收到的货不算"从公开市场买入"）
     #
-    # ⚠️ 第一期 `pipeline._contract_deliveries()` 返回空 dict，
-    #    但求价与入库两处都已经写成"扣掉合同量"的形状。
+    # ⚠️ 单人局里没有第二个玩家 → 双方永远对不上账 → **合同自然不生效**
+    #    （不是靠报错挡着，是机制上达不成——这正是被保留的 A，被否掉的
+    #    B"跟外部对手方签"不做）。
     contracts: list[ContractAction] = field(default_factory=list)
 
     def u_for(self, plot_id: str) -> float:

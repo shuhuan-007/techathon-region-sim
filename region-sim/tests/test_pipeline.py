@@ -299,10 +299,18 @@ def test_no_inventory_carries_over():
     assert st.raw_reports["p1"].clearing_revenue == 0.0, "清仓概念已取消"
 
 
-def test_contract_channel_is_reserved():
-    """★ 合同通道：口子留着，第一期**明确报错**而不是静默忽略。
+def test_single_player_contract_is_mechanically_impossible():
+    """★ 合同通道（§7.2 A 方案）：**单人局里合同机制上签不成**，不是报错。
 
-    用户："要保留一个额外的通道，之后玩家间可以通过协议低于市场价提供。"
+    用户 2026-10-16 深夜裁定：
+      选 A（**玩家对玩家**：双方各自提交、互相确认才生效），
+      并且**第一期合同实现不了** —— 现在就是单人局，永远没有第二个玩家去提交镜像。
+    ⇒ 所以单人局的正解是：**照常结算、账本一字不留、不转账不扣货**，
+      而不是像旧版那样 raise（旧版是"功能未实现"的占位，本轮已换成真机制）。
+
+    ⚠️ 这条测试**同时钉住三件事**：不报错、`state.contracts` 为空、现金与库存都没动。
+       （多人局里"单方提交"是另一条路径：整季报错，见 `_settle_contracts` 的说明。
+         本文件是单人局夹具，验的是单人局那条。）
     """
     from engine.models import ContractAction
 
@@ -310,14 +318,25 @@ def test_contract_channel_is_reserved():
     st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
     plan = plain_plan("p1", "0,0", u=1.0)
     plan.contracts.append(
-        ContractAction(action="deliver", counterparty="p2", goods="F", qty=1.0, price=20.0)
+        ContractAction(action="deliver", side="sell", counterparty="p2",
+                       goods="F", qty=1.0, price=20.0, quarter=1)
     )
-    try:
-        pipeline.advance(st, {"p1": plan}, cfg)
-    except SettlementError as e:
-        assert "合同" in str(e), "应明确报出合同功能未实现"
-    else:
-        raise AssertionError("合同功能未实现时必须报错，不能静默忽略")
+
+    cash_before = st.players["p1"].cash
+    inv_before = dict(st.players["p1"].inventory)
+
+    # ① 不报错：单人局签不成合同不是"计划有问题"
+    pipeline.advance(st, {"p1": plan}, cfg)
+
+    # ② 账本一字不留
+    assert st.contracts == {}, f"单人局不该落任何合同账：{st.contracts}"
+
+    # ③ 没有货物往来；货照旧全部进公开市场
+    assert dict(st.players["p1"].inventory) == inv_before, (
+        "合同签不成 → 不该有任何货物往来"
+    )
+    rep = st.raw_reports["p1"]
+    assert rep.contracted_out == {}, f"不该有合同交付量：{rep.contracted_out}"
 
 
 def test_contract_would_reduce_supply():

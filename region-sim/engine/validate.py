@@ -524,25 +524,88 @@ def _check_build_product(order: BuildOrder, idx: int) -> list[PlanIssue]:
 
 
 def _check_contracts(plan: Plan, cfg: Config) -> list[PlanIssue]:
-    """合同通道：**第一期明确报错**，不静默忽略。
+    """合同通道（§7.2，玩家对玩家 A 方案）：**形状校验**。
 
-    《规则基线》§7.2 保留了这个通道（玩家间可以低于市场价交易），
-    但第一期不实现交付。`pipeline._contract_deliveries()` 会在结算时抛错；
-    这里提前拦一道，让玩家在**提交时**就知道。
+    2026-10-16 用户裁定（A 方案）：**双方各自提交、互相确认才生效**。
+    本函数只做**单份计划自己**能判的事（§11.3 五要素）：
+
+      ① 数量 ≤ 0      → `contract_qty_not_positive`
+      ② 单价 < 0      → `contract_price_negative`
+      ③ 商品不在市场表 → `unknown_goods`（与采购共用同一码）
+      ④ 对手方为空    → `contract_no_counterparty`
+      ⑤ 对手方是自己  → `contract_self_deal`（自合同不构成交易，§7.2）
+
+    ⚠️ **"单方提交（对手方没跟上）"在这里查不到** —— validate 只收**一份**计划，
+       看不到全局对账。这条校验在 `pipeline._settle_contracts` 的失败路径里做：
+       **待裁定**（2026-10-16）：**多人局**单方提交**按整季报错**（§11.3「不产生
+       部分状态变更」），不是挂起——容忍挂起等于让脏声明随存档滚进下一季继续扰
+       动对账；正确修法是**让对家在他自己的 Plan 里补一条镜像**。**单人局**例外
+       放行（不落账、不报错）：A 方案下合同**机制上不可达**（永远没有第二个玩家），
+       不是"计划有问题"。以后要改（比如引入"挂起等待一整个季度"），**改 pipeline
+       不动 validate**。
+
+    ⚠️ **本函数只读 `plan`**、不改也不访问 `GameState`（与其他 `_check_*` 一致）。
     """
     if not plan.contracts:
         return []
-    return [
-        PlanIssue(
-            code="contracts_not_implemented",
-            target=f"{len(plan.contracts)} 条合同动作",
-            message=(
-                "合同交付功能尚未实现（第一期只留口子）。\n"
-                "    → 规则见《规则基线》§7.2；接口形状见 `Plan.contracts`。\n"
-                "    ⚠️ **不静默忽略**：忽略会让你以为货已交付，实际没有。"
-            ),
-        )
-    ]
+    issues: list[PlanIssue] = []
+    known = set(cfg.market)
+
+    for idx, act in enumerate(plan.contracts):
+        target = act.goods or f"合同 #{idx + 1}"
+        if act.goods not in known:
+            issues.append(PlanIssue(
+                code="unknown_goods",
+                target=act.goods,
+                message=(
+                    f"合同 #{idx + 1} 的商品 {act.goods!r} 不在市场表，不能作为合同标的。\n"
+                    f"    市场里的商品：{sorted(known)}"
+                ),
+            ))
+        if act.qty <= 0:
+            issues.append(PlanIssue(
+                code="contract_qty_not_positive",
+                target=target,
+                message=(
+                    f"合同 #{idx + 1} 的数量必须为正（当前 {act.qty:g}）。\n"
+                    f"    ⚠️ 想取消合同：双方协商解除（§7.2），不是报 0。"
+                ),
+                requested=act.qty,
+                available=0.0,
+            ))
+        if act.price < 0:
+            issues.append(PlanIssue(
+                code="contract_price_negative",
+                target=target,
+                message=(
+                    f"合同 #{idx + 1} 的单价不能为负（当前 {act.price:g}）。\n"
+                    f"    ⚠️ 合同价由双方协商；想表达「对方倒贴」请另立补偿条款，"
+                    f"不是负价。"
+                ),
+                requested=act.price,
+                available=0.0,
+            ))
+        if not act.counterparty:
+            issues.append(PlanIssue(
+                code="contract_no_counterparty",
+                target=f"合同 #{idx + 1}",
+                message=(
+                    f"合同 #{idx + 1} 缺对手方（counterparty 为空）。\n"
+                    f"    ⚠️ A 方案的合同是**玩家对玩家**，没有「外部对手方」"
+                    f"这个选项——counterparty 必须填另一个玩家 ID。"
+                ),
+            ))
+        elif act.counterparty == plan.player_id:
+            issues.append(PlanIssue(
+                code="contract_self_deal",
+                target=plan.player_id,
+                message=(
+                    f"合同 #{idx + 1} 的对手方是自己（{plan.player_id!r}）。\n"
+                    f"    ⚠️ 自己跟自己成交不构成合同（§7.2 玩家对玩家）。"
+                ),
+            ))
+
+    return issues
 
 
 def _check_cash(

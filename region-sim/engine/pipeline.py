@@ -77,7 +77,7 @@ from engine import production as P
 from engine import settlement as S
 from engine.efficiency import EfficiencyBreakdown, compute_efficiency
 from engine.loader import Config
-from engine.models import GameState, Plan, Plot, PlotStatus
+from engine.models import Contract, GameState, Plan, Plot, PlotStatus
 from engine.population import PopulationResult, compute_population
 
 
@@ -320,8 +320,53 @@ def _run_body(
             ))
         outcomes[player_id] = outs
 
+    # ══ 第 4.5 步前：★ 合同对账（§7.2，玩家对玩家、双方确认才成立） ══════
+    #
+    # 这一洞**集中一次做完**，不是逐人各做：
+    #
+    #   · 合同天然跨两个玩家，单边循环里"卖方还没见到买方的声明"就成立不了
+    #     （对不上账就报错或者静默放过，都不对）；
+    #   · 所以先把 `plan.contracts` 全部收齐，按 (卖家,买家,商品,qty,price,季度)
+    #     做对账；**双方都提交了、且 商品/数量/单价/季度完全一致** 的合同才成立，
+    #     写进 `state.contracts` 并在此算出两笔扣减：
+    #
+    #         contracted_out_by_player  卖方要从 X_t 扣掉的量（货没进公开市场）
+    #         contracted_in_by_player   买方要从 B_t 扣掉的量（货不是从公开市场买的）
+    #
+    #   · **单人局天然不可达**：没有第二个玩家来提交对家，对账永远凑不齐一对，
+    #     所以两个字典恒为空 → 求价、扣款、销售与无合同时**逐字节相同**。
+    #
+    # ⚠️ 合同价与交付现金**在这里不结** —— 钱要等第 5 步一次性扣款成功之后才转
+    #   （合同现金是市场外的对方对价，不是市场买卖，**不走 P_t、不进公开价**），
+    #   落到 `_contract_cash_transfers()`；收货落到买方 `inventory` 在第 6 步之前
+    #   （`_deliver_contracted_goods()`）—— 因为收到的货**只能用于**：
+    #     ① 本季**尚未执行的工程**（扣实物、不重复收采购费），或
+    #     ② 本季销售（第 7 步按 P_t 卖出）
+    #   **不能**喂给本季已完成的生产（§7.2 时间约束），也**不自动保留到下季**
+    #   （没有仓库 → 用不完的当季丢弃，见第 7.7 步）。
+    contracted_out_by_player: dict[str, dict[str, float]] = {}
+    contracted_in_by_player: dict[str, dict[str, float]] = {}
+    pending_contract_cash: list[tuple[str, str, float]] = []   # (买家, 卖家, 金额)
+    pending_contract_goods: list[tuple[str, str, float]] = []  # (买家, 商品, 数量)
+    # ★ **先给每个玩家建好空桶**，再进 `_settle_contracts` ——
+    #   它在登记交付时是 `contracted_out_by_player[seller_id][goods] = ...` 的写法，
+    #   桶不存在就会 `KeyError`（2026-10-16 深夜实测：两人局带合同一跑就抛
+    #   `KeyError: 'p1'`）。**顺序不能反**：下面的 setdefault 只保证"跑完之后"有键，
+    #   救不了 settle 内部的第一次下标写入。
+    for player_id in plans:
+        contracted_out_by_player.setdefault(player_id, {})
+        contracted_in_by_player.setdefault(player_id, {})
+    if any(p.contracts for p in plans.values()):
+        _settle_contracts(
+            state, plans, outcomes, cfg,
+            contracted_out_by_player=contracted_out_by_player,
+            contracted_in_by_player=contracted_in_by_player,
+            pending_cash=pending_contract_cash,
+            pending_goods=pending_contract_goods,
+        )
+
     # ══ 第 4.5 步：买入汇总与求价 ══════════════════════════
-    # ★ B_t = 生产原料 + 建设物资 + 居民口粮（三段全计入，§4.1）
+    # ★ B_t = 生产原料 + 建设物资 + 居民口粮 + （合同已扣）合同外的市场采购（§4.1）
     bought_by_player: dict[str, dict[str, float]] = {}
     breakdown_by_player: dict[str, dict[str, dict]] = {}
     # 口粮的两个去向：自产顶上的（不进市场）+ 缺口买入的（进 B_t）
@@ -365,6 +410,15 @@ def _run_body(
             for g, q in part.items():
                 total[g] = total.get(g, 0.0) + q
 
+        # ★ 买方：合同已收货那部分**不是从公开市场买的** → 从 B_t 扣掉（§4.1）。
+        #   不扣的话合同会凭空抬市价：货其实没在市场上成交，需求侧却被记了一笔。
+        for g, q in contracted_in_by_player[player_id].items():
+            left = total.get(g, 0.0) - q
+            if left > 1e-12:
+                total[g] = left
+            else:
+                total.pop(g, None)
+
         bought_by_player[player_id] = total
         breakdown_by_player[player_id] = {
             "production_input": production_inputs,
@@ -394,8 +448,9 @@ def _run_body(
     for player_id, plan in plans.items():
         produced = P.merge_outputs(outcomes[player_id])
 
-        # 合同交付：不进公开市场（口子已留，第一期返回空）
-        contracted = _contract_deliveries(plan)
+        # 合同交付：不进公开市场（§7.2；双方对账一致才成立 → 已由 `_settle_contracts` 填进
+        # `contracted_out_by_player` / `contract_in_by_player`，见第 4.5 步前的集中对账）
+        contracted = contracted_out_by_player[player_id]
         supply = dict(produced)
         # ★ 扣掉两样东西：合同交付 + 自产顶上居民口粮的那部分
         #   （口粮那部分已经"给居民了"，不再进公开市场）
@@ -445,6 +500,27 @@ def _run_body(
     #   ⚠️ 第 0 步只"临时挂"了 `world.policies`，**`policy_state` 到这一刻才写**。
     if drawn_now and pending_policy is not None:
         POL.commit_season_policy(state.world, pending_policy)
+
+    # ══ 第 5.5 步：★ 合同现金转账（§7.2）══════════
+    # ★ 放在**扣款成功之后** 与 第 0 步政策提交之后：
+    #   · 买家此时已经付清了公开市场那一单，账上还剩多少是确定的；
+    #   · 合同货款是**对方对价**，不是市场扣款，但同样要求买家**钱够** —
+    #     这里**复用**第 5 步"资金不足即整单作废"的语义（§11.3：不产生部分状态变更）。
+    #     换言之：合同转账本身也可能成为失败点 → 抛错时第 0 步挂载已撤，
+    #     与"资金不足"同一条回滚路径。
+    _settle_contract_cash(state, pending_contract_cash, reports)
+
+    # ══ 第 5.6 步：★ 合同货交付（落到买方 inventory，§7.2）══════════
+    # ★ 放在第 6 步工程投入**之前**：合同货**只能用于本季尚未执行的工程**（§7.2
+    #   明写的两个出口之一），落到 `inventory` 后由 `_invest_construction` 扣实物
+    #   （不再重复收一次市场采购费，§11.2/§5.1 口径）。
+    #   ⚠️ §7.2 写的另一个出口"**或进入本季销售**"——我们没有把合同货**回补**到
+    #   买方 X_t：4.5 步已经从 B_t 扣过它，如果第 7 步再把它加进公开市场供给
+    #   就是同一批货**压价两次**（一次是卖方 X_t 扣掉、一次是买方 X_t 回补），
+    #   会凭空扰动 P_t。所以这里留给买家的出路**只有"自用本季工程（扣实物）"**；
+    #   未用掉的部分没有仓库可放 → 第 7.7 步统一当季丢弃（§7.2："用不完丢弃"）。
+    #   ★ 这是"没有仓库 + 不重复扰动市场"两条基线同时约束下的落点，注释已标记。
+    _deliver_contracted_goods(state, pending_contract_goods)
 
     # ══ 第 6 步：产品分配与工程投入 ════════════════════════
     for player_id, plan in plans.items():
@@ -729,43 +805,187 @@ class _ScaledEfficiency(EfficiencyBreakdown):
         return self._effective
 
 
-def _contract_deliveries(plan: Plan) -> dict[str, float]:
-    """★ **合同通道**：本季通过合同直接交付给别的玩家、**不进公开市场**的量。
+def _settle_contracts(
+    state: GameState,
+    plans: dict[str, Plan],
+    outcomes: dict[str, list[P.PlotOutcome]],
+    cfg: Config,
+    *,
+    contracted_out_by_player: dict[str, dict[str, float]],
+    contracted_in_by_player: dict[str, dict[str, float]],
+    pending_cash: list[tuple[str, str, float]],
+    pending_goods: list[tuple[str, str, float]],
+) -> None:
+    """★ 第 4.5 步前：合同对账 + 账本落到 `state.contracts`（§7.2 玩家对玩家）。
 
-    用户 2026-10-16："要保留一个额外的通道，之后玩家间可以通过协议低于市场价
-    提供，这个需要到时候能实现。"
+    用户 2026-10-16 裁定（A 方案）：**双方各自提交 `ContractAction`，商品/数量/单价/
+    季度完全一致才成立**。本函数做的事就是把双方声明凑成一对、在同一个原子步骤里：
 
-    为什么需要这个口子
-    ------------------
-    没有仓库之后，**产出 100% 自动进公开市场**（`X_t` = 产出）。
-    于是"我想把货便宜卖给隔壁老王"这件事**没有地方表达**。
-    合同就是这个唯一的例外通道。
+      ① **对账**：以卖家视角把 (seller, buyer, goods, qty, price, quarter) 归一化后
+         逐个查买家是否有镜像记录（`side` 相反、四项一致）。**凑不齐一对 → 不成立**，
+         不写账本、不扣任何货/钱。
+      ② **落账**：成立的合同新建一条 `Contract` 进 `state.contracts`，
+         并当场把"**本季能真交的**"记成 `delivered`（产出封顶值），
+         货价记成 `settled_cash`；超额部分留在 `Contract.shortfall`（§7.3 记录位）。
+      ③ **按实际产出封顶交付**（§7.2 时间约束 + §11.3 不允许部分执行 → **只做记录，
+         不改产量**）：
+           卖方本季产出 `produced[g]` 是上限；超出部分**不交付**、**不重复扣货**，
+           差额留在 `Contract.shortfall`（即 `qty − delivered`）——
+           这是 §7.3「未履约义务」的记录位。**赔偿/信用扣分尚未实现**，
+           缺口已在注释里写明（见 `Contract` docstring 与 `_deliver_contracted_goods`）。
+      ④ **填写两份扣减表**（调用方已先 `setdefault` 空字典）：
+           `contracted_out_by_player[seller][goods] += 实际交付量`（从卖方 X_t 扣）
+           `contracted_in_by_player[buyer][goods]   += 实际收货量`（从买方 B_t 扣）
+         以及两条"待后处理"清单：
+           `pending_cash`  — 合同货价（= 单价 × 实际交付量），第 5 步后转账
+           `pending_goods` — 实际交付的商品量，第 5.6 步落到买方 inventory
 
-    对求价的影响（两条都要扣，否则合同会凭空扰动市场）
-    --------------------------------------------------
-        卖方：`X_t = 本季产出 − 合同交付量`     ← 货没进公开市场，不该压价
-        买方：`B_t = 采购量 − 合同收货量`       ← 货不是从公开市场买的，不该抬价
-
-    ⚠️ **第一期返回空 dict**（`builds` 为空时同理，不报错）。
-       但主流程**已经按"扣掉合同量"的形状写好**：
-       以后接合同只需要在这里解析 `plan.contracts`，**不动 `_run` 一行**。
-
-    实现时要做的事（留给以后）
-    --------------------------
-      · `ContractAction` 已有 action / counterparty / goods / qty / price 字段
-      · 需要一个"合同账本"（谁欠谁多少货），挂在 GameState 上
-      · 交货要校验：卖方本季确实产得出这么多（否则违约，走 §7.3 流程）
-      · 合同价由双方协商，**低于市场价**；结算时按合同价转账，不走 `P_t`
+    ⚠️ 本函数**就地修改** `state.contracts`（写账本）与 `contracted_*_by_player`
+       （写扣减表）。这两个集合都是本季新建的，不与 `state` 既有数据共享引用。
+       ★ 任何一条合同交不出（产出不够）**不会**在这里抛错——§7.3「记录未履约」
+       是**记账动作**而不是失败；整季作废的语义只保留给"资金不足"这类 §11.3
+       真正的失败点（见第 5 步）。
     """
-    if not plan.contracts:
-        return {}
-    # 第一期：合同交付尚未实现。**明确报错**而不是静默忽略 ——
-    # 静默忽略会让玩家以为货交出去了，其实还在自己账上。
-    raise SettlementError(
-        "合同交付功能尚未实现（第一期留口子）。\n"
-        "  → 规则见《规则基线》§7.2；接口形状见 Plan.contracts。\n"
-        "  ⚠️ 不静默忽略：忽略会让玩家以为货已交付，实际没有。"
-    )
+    # ── ① 把双方的 ContractAction 都化成"卖家视角"的标准元组 ──
+    #   key = (seller_id, buyer_id, goods, qty, price, quarter)
+    #   side="sell" 表示发这条的就是卖家；side="buy" 表示对方是卖家、自己是买家。
+    declared: dict[tuple, list[str]] = {}   # key → [提交方 player_id, ...]
+    for player_id, plan in plans.items():
+        for act in plan.contracts:
+            if act.side == "sell":
+                key = (player_id, act.counterparty, act.goods, act.qty, act.price, act.quarter)
+            else:
+                key = (act.counterparty, player_id, act.goods, act.qty, act.price, act.quarter)
+            declared.setdefault(key, []).append(player_id)
+
+    # ── ② 逐个凑对：恰好双方各提交了一次才算成立 ──
+    #   （一方重复提交两条相同声明 → 视为一次；双方若同时漏一项 → 不成立。）
+    for key in sorted(declared):
+        seller_id, buyer_id, goods, qty, price, quarter = key
+        parties = set(declared[key])
+
+        # 卖家与买家必须是**两个不同的**玩家，且这两人都声明了同一条
+        if seller_id == buyer_id:
+            continue   # 自合同：validate 已拦；防御性再跳一次，不报错
+        if parties != {seller_id, buyer_id}:
+            # 单方提交（对家没跟上，或对手条目对不上账）。
+            #
+            # ⚠️ **单人局**里这条是"必然路径"（A 方案下合同**机制上不可达**：
+            #    永远不会有第二个玩家去提交镜像）。所以**单人局不报错**——
+            #    那不是"计划有问题"，是"机制上签不成"；走报表透明、账本一字不留。
+            # ⚠️ **多人局**里这条按**整季报错**处理（§11.3「不产生部分状态变更」）。
+            #    **待裁定**（2026-10-16）：选"报错"而非"挂起"。理由：容忍挂起
+            #    等于让脏声明随存档滚进下一季继续扰动对账；正确修法是**让对家在
+            #    他自己的 Plan 里补一条镜像**（validate 已各自过形状关），而不是
+            #    让系统容忍一份半成品跑进结算。以后要改（比如引入"挂起等待一整个
+            #    季度"），改**这里**不动 validate。
+            if len(plans) == 1:
+                continue   # 单人局：合同机制上不可达，不落账、不扣钱/货
+            missing = sorted({seller_id, buyer_id} - parties) or ["对家镜像声明"]
+            raise SettlementError(
+                f"合同对账不齐（§7.2 A 方案）：卖家 {seller_id} / 买家 {buyer_id} / "
+                f"商品 {goods} / 数量 {qty:g} / 单价 {price:g} / 第 {quarter} 季，\n"
+                f"  目前只收到 {sorted(parties)} 一方的提交；缺 {missing} 的镜像声明\n"
+                f"  （商品/数量/单价/季度完全一致，`side` 取反）。\n"
+                f"  ⚠️ A 方案的合同**双方提交才生效**；任意一方缺位即不成立、不交付、不转账。\n"
+                f"  ⚠️ 待裁定（2026-10-16）：多人局单方提交按整季报错；单人局是机制上"
+                f"签不成合同（A 方案不可达，非计划错）→ 放行、不落账。"
+            )
+
+        # 季度必须落在本季（§7.2：本季生产后的交货，不能支持接收方本季已完的生产；
+        #   更早的季度已经过账作废，更晚的季度本季还没到——都当作"不成立"，
+        #   不跨季结转。**没有仓库**这条贯穿全线。）
+        if quarter != state.world.quarter:
+            continue
+
+        # ── ③ 产出封顶交付（§7.2 时间约束 + §11.3 不允许部分执行）──
+        produced = P.merge_outputs(outcomes.get(seller_id, []))
+        available = produced.get(goods, 0.0)
+        delivered = min(qty, available)
+        if delivered <= 1e-12:
+            # 完全交不出来 → 合同成立但本季零交付；差额整笔进 shortfall
+            # （§7.3 只记录）。不要在账上留"已交货 0"的噪声。
+            fulfilled = False
+            settled_cash = 0.0
+        else:
+            fulfilled = delivered >= qty - 1e-12
+            settled_cash = delivered * price
+
+        # ── ④ 落账 ──
+        cid = f"{seller_id}>{buyer_id}>{goods}>q{quarter}"
+        state.contracts[cid] = Contract(
+            contract_id=cid,
+            seller_id=seller_id,
+            buyer_id=buyer_id,
+            goods=goods,
+            qty=qty,
+            price=price,
+            quarter=quarter,
+            delivered=delivered,
+            settled_cash=settled_cash,
+            fulfilled=fulfilled,
+        )
+
+        # ── ⑤ 登记两份扣减 + 两条后处理清单 ── 交付量为 0 时**不登记**，
+        #   让"完全交不出"的合同在市场上完全透明（不扰动 X_t/B_t）。
+        if delivered > 1e-12:
+            contracted_out_by_player[seller_id][goods] = (
+                contracted_out_by_player[seller_id].get(goods, 0.0) + delivered
+            )
+            contracted_in_by_player[buyer_id][goods] = (
+                contracted_in_by_player[buyer_id].get(goods, 0.0) + delivered
+            )
+            pending_cash.append((buyer_id, seller_id, settled_cash))
+            pending_goods.append((buyer_id, goods, delivered))
+
+
+def _settle_contract_cash(
+    state: GameState,
+    pending_cash: list[tuple[str, str, float]],
+    reports: dict[str, QuarterReport],
+) -> None:
+    """★ 第 5.5 步：合同货款逐笔转账（§7.2；**不走 P_t、不进公开价**）。
+
+    放在**扣款成功之后**：买家此时已经付清了公开市场那一单，账上还剩多少是
+    确定的。合同货款是**对方对价**（买家付、卖家收），**不是**市场扣款、
+    也不是市场求价的一部分——所以不动 `world.price_history`、不进 `P_t`。
+
+    ⚠️ 同样要求买家**钱够**：钱不够时**整笔合同货款都不转**（§11.3 不允许部分
+       执行）。抛错会让本季回到"调用前逐字节相同"（第 0 步挂载已撤，
+       合同账本还没建，见 `_settle_contracts` 的失败边界）。
+    """
+    for buyer_id, seller_id, amount in pending_cash:
+        buyer = state.players[buyer_id]
+        seller = state.players[seller_id]
+        if amount > buyer.cash + 1e-9:
+            raise SettlementError(
+                f"合同货款不足：{buyer_id} 应付 {amount:.2f} 给 {seller_id}，"
+                f"手上只有 {buyer.cash:.2f}。\n"
+                f"  ⚠️ 规则不允许透支：合同货款与市场扣款同时在本季结清，"
+                f"合并后现金必须非负。"
+            )
+        buyer.cash -= amount
+        seller.cash += amount
+        # 财务报告上各记一笔（让前端能看到合同流水），不重复改总价
+        if buyer_id in reports:
+            reports[buyer_id].total_deduction += amount
+        if seller_id in reports:
+            reports[seller_id].sales_revenue += amount
+
+
+def _deliver_contracted_goods(
+    state: GameState,
+    pending_goods: list[tuple[str, str, float]],
+) -> None:
+    """★ 第 5.6 步：合同货落到买方 `inventory`（§7.2）。
+
+    出口只有一个：**本季尚未执行的工程**（`_invest_construction` 接着从这里
+    扣实物、不再重复收采购费）。**不喂本季已完成的生产**（§7.2 时间约束），
+    **不补回公开市场**（4.5 步已从 B_t 扣过，再加回 X_t 就是同一批货压价两次），
+    **用不完当季丢弃**（没有仓库 → 第 7.7 步统一清理）。
+    """
+    for buyer_id, goods, qty in pending_goods:
+        state.players[buyer_id].add_inventory(goods, qty)
 
 
 def _construction_cash(plan: Plan, player, cfg: Config) -> tuple[float, list[str]]:

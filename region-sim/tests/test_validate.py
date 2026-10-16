@@ -435,17 +435,64 @@ def test_bad_target_level():
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_contracts_not_implemented():
-    """★ 合同动作在**提交时**就明确报错。
+def test_contract_shape_issues_reported():
+    """★ 合同动作在**提交时**就做形状校验（§7.2 A 方案，2026-10-16 换成真机制）。
 
-    ⚠️ 关键是"**不静默忽略**"：静默忽略会让玩家以为货已交付，实际没有。
+    ⚠️ 旧版这里是 `contracts_not_implemented`（"功能未实现"占位）。
+       本轮合同机制已实现，所以改为核对**真正的形状规则**：
+       数量必须为正、单价不能为负、商品必须在市场表里、对手方不能是自己。
+
+    ⚠️ "单方提交"**不在这里报**：那是结算期的事（单人局=机制上签不成→放行；
+       多人局=整季报错）。validate 只读 plan、看不到 GameState，故不判那一条。
     """
     cfg = load_config()
-    plan = plan_for(contracts=[
-        ContractAction(action="deliver", counterparty="p2", goods="F", qty=2.0),
-    ])
-    issues = validate.validate_plan(plan, make_player(), cfg)
-    assert codes(issues) == {"contracts_not_implemented"}, f"实得：{codes(issues)}"
+    player = make_player()
+
+    # ① 数量 ≤ 0
+    issues = validate.validate_plan(
+        plan_for(contracts=[ContractAction(action="deliver", side="sell",
+                                           counterparty="p2", goods="F", qty=0.0)]),
+        player, cfg,
+    )
+    assert "contract_qty_not_positive" in codes(issues), f"实得：{codes(issues)}"
+
+    # ② 单价为负
+    issues = validate.validate_plan(
+        plan_for(contracts=[ContractAction(action="deliver", side="sell",
+                                           counterparty="p2", goods="F", qty=1.0,
+                                           price=-5.0)]),
+        player, cfg,
+    )
+    assert "contract_price_negative" in codes(issues), f"实得：{codes(issues)}"
+
+    # ③ 商品不在市场表
+    issues = validate.validate_plan(
+        plan_for(contracts=[ContractAction(action="deliver", side="sell",
+                                           counterparty="p2", goods="不存在",
+                                           qty=1.0, price=10.0)]),
+        player, cfg,
+    )
+    assert "unknown_goods" in codes(issues), f"实得：{codes(issues)}"
+
+    # ④ 对手方是自己
+    issues = validate.validate_plan(
+        plan_for(contracts=[ContractAction(action="deliver", side="sell",
+                                           counterparty=player.player_id,
+                                           goods="F", qty=1.0, price=10.0)]),
+        player, cfg,
+    )
+    assert "contract_self_deal" in codes(issues), f"实得：{codes(issues)}"
+
+    # ⑤ 形状全对 → 一条都不报（**签不签得成是结算期的事**，不归 validate 管）
+    issues = validate.validate_plan(
+        plan_for(contracts=[ContractAction(action="deliver", side="sell",
+                                           counterparty="p2", goods="F",
+                                           qty=1.0, price=10.0)]),
+        player, cfg,
+    )
+    assert codes(issues) == set(), (
+        f"形状合法的合同不该在提交期报错（单方提交是结算期的事）。实得：{codes(issues)}"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
