@@ -289,12 +289,32 @@ def _check_plot_plans(
 
 
 def _check_purchases(plan: Plan, cfg: Config) -> list[PlanIssue]:
-    """采购：商品必须在市场里、数量必须为正、**口粮不能混进 purchases**。
+    """采购：商品必须在市场里、数量必须为正。
 
-    ⚠️ 最后一条是 `Plan` 的一条**结构性约定**（见 `models.Plan.purchases` 注释）：
-       `purchases` 只放**生产原料 + 建设物资**，**口粮走 `food`**。
-       两条通道在结算时走**不同的账**（口粮会被"自产顶上"抵掉、且能被吃掉；
-       purchases 不会）。混在一起会让"自产顶上"算不出来。
+    ══════════════════════════════════════════════════════════════
+    ⚠️ 这里**故意不检查**"口粮混进了 purchases"
+    ══════════════════════════════════════════════════════════════
+
+    曾经有过一条 `food_in_purchases` 检查（"A/B/C/D 是口粮，应填在
+    `food` 里"）。**它是错的，已删除**，原因：
+
+        **C 和 D 是双用途商品** —— 既是优秀档口粮，**又是工业 G 的生产原料**
+        （配方 `G_L1: input {C:2, D:1, F:3}`，见《规则基线》§2.3）。
+
+    所以"这个商品是不是口粮"**无法由商品编码判定** ——
+    同一次采购里，C 既可能是拿去喂居民的、也可能是拿去投 G 厂的。
+
+    `purchases` 与 `food` 本来就是**两条独立的通道**：
+
+        `purchases`  → 进 `B_t` 的 `other_purchases` 段，第 5 步扣款
+        `food`       → 走"自产先顶 + 缺口买入"，且**能被居民吃掉**
+
+    两者在流水线里**各算各的**（`pipeline` 第 4.5 步把两者分别汇总），
+    混填**不会**让"自产顶上"算不出来。原来那条检查是基于一个错误的前提，
+    会**误拦合法计划**（例如"买 C×2 投 G 厂"）。
+
+    → 结论：**不做这条检查。** 若将来确实要区分"买来干嘛"，
+      正确的做法是让玩家在**申报时标明用途**，而不是由程序猜。
     """
     issues: list[PlanIssue] = []
     known = set(cfg.market)
@@ -330,21 +350,6 @@ def _check_purchases(plan: Plan, cfg: Config) -> list[PlanIssue]:
                 )
             )
             continue
-
-        # 口粮别混进来（走 `food` 通道）
-        if goods in cfg.food.baseline_quota or goods in cfg.food.good_quota:
-            issues.append(
-                PlanIssue(
-                    code="food_in_purchases",
-                    target=goods,
-                    message=(
-                        f"{goods!r} 是口粮，应填在 `food` 里，不要放进 `purchases`。\n"
-                        f"    ⚠️ 两条通道走不同的账：`food` 会被『自产顶上』抵掉、"
-                        f"并能被居民吃掉；`purchases` 不会。\n"
-                        f"    → 现在混填会让结算算不出『自产顶上多少』。"
-                    ),
-                )
-            )
 
     return issues
 

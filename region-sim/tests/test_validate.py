@@ -245,20 +245,49 @@ def test_negative_purchase():
     assert abs(issues[0].shortfall - (-3.0)) < TOL, "差额 = 申请 − 可用 = −3 − 0"
 
 
-def test_food_in_purchases_is_rejected():
-    """★ 口粮不能混进 `purchases` —— 两条通道走**不同的账**。
+def test_c_and_d_are_allowed_in_purchases():
+    """★ **回归测试**：C / D 放进 `purchases` **必须合法**。
 
-    `food` 会被"自产顶上"抵掉、并能被居民吃掉；`purchases` 不会。
-    混填会让结算**算不出"自产顶上多少"**（§4.1 粮食链）。
+    ══════════════════════════════════════════════════════════════
+    ⚠️ 这条钉住的是一个**真实的 bug**（本轮发现并修掉）
+    ══════════════════════════════════════════════════════════════
+
+    曾经有过一条 `food_in_purchases` 检查，理由是"口粮不能混进采购"。
+    **它是错的** —— 因为：
+
+        **C 和 D 是双用途商品**：
+          · 既是**优秀档口粮**（§3.3.3 的 `good_quota` 含 C/D）
+          · **又是工业 G 的生产原料**（配方 `G_L1: input {C:2, D:1, F:3}`）
+
+    所以"这个商品是不是口粮"**无法由商品编码判定** ——
+    那条检查会**误拦"买 C×2 / D×1 投 G 厂"这种完全正常的计划**。
+
+    实测证据：拿 M1 乙区的正常计划（`purchases={'C':2,'D':1,'F':3}`）
+    走 `session.submit()`，会被那条检查拒掉。**这是它被删掉的直接原因。**
+
+    → 现在 `purchases` 与 `food` 是**两条独立通道**，各算各的，互不干扰。
     """
     cfg = load_config()
-    plan = plan_for(purchases={"A": 10.0})     # A 是口粮
+    plan = plan_for(purchases={"C": 2.0, "D": 1.0, "F": 3.0})   # ← G 厂配方
     issues = validate.validate_plan(plan, make_player(), cfg)
-    assert codes(issues) == {"food_in_purchases"}, f"实得：{codes(issues)}"
+    assert issues == [], (
+        f"★ C/D 是双用途商品（口粮 + G 厂原料），必须允许放进 purchases。\n"
+        f"  实得：{[str(i) for i in issues]}"
+    )
+
+
+def test_food_goods_also_allowed_in_food_channel():
+    """同一次计划里，C 既能进 `purchases`（投厂）也能进 `food`（喂人）。"""
+    cfg = load_config()
+    plan = plan_for(purchases={"C": 2.0}, food={"C": 0.3})
+    issues = validate.validate_plan(plan, make_player(), cfg)
+    assert issues == [], (
+        f"两条通道互不干扰，同一商品可同时出现在两边。实得：{[str(i) for i in issues]}"
+    )
 
 
 def test_non_food_goods_pass_purchases():
-    """非口粮商品（F/G/机械）放 `purchases` 是**对的**。"""
+    """非口粮商品（F/G/机械）放 `purchases` 当然也对。"""
     cfg = load_config()
     plan = plan_for(purchases={"F": 3.0, "G": 2.0})
     issues = validate.validate_plan(plan, make_player(), cfg)

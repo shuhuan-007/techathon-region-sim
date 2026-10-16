@@ -41,7 +41,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
-from engine import validate
+from engine import report, validate
 from engine.loader import Config
 from engine.models import GameState, Plan, SessionPhase
 from engine.pipeline import QuarterReport, SettlementError, advance, preview
@@ -82,20 +82,26 @@ class GameSession:
     def state_for(self, player_id: str) -> dict:
         """给前端的只读状态快照（**已算好的数字**，前端零计算）。
 
+        ✅ 2026-10-16：改为调用 `engine.report.build_state()`。
+        此前这里手搓了一个六字段的小字典，既盖不住《界面要显示的变量清单》
+        要的 40 项，也**绕开了"只转发"的原则**（数字形状写在服务层里）。
+        现在服务层只做一件事：把**已提交的计划**递进去。
+
         ⚠️ 读也要拿锁：否则可能读到"结算到一半"的状态。
         """
         with self.lock:
-            player = self.state.player(player_id)
-            last = self.state.report.get(player_id) if self.state.report else None
-            return {
-                "quarter": self.state.world.quarter,
-                "phase": self.phase.value,
-                "player_id": player_id,
-                "cash": player.cash,
-                "happiness": player.last_happiness,
-                "inventory": dict(player.inventory),
-                "report": last,
-            }
+            return report.build_state(
+                self.state,
+                player_id,
+                self.cfg,
+                plan=self.plans.get(player_id),      # 没提交 → None（不编数字）
+                phase=self.phase.value,
+            )
+
+    def map_for(self, player_id: str) -> dict:
+        """整张地图（含别人的格子）—— 前端画地图用。**只读。**"""
+        with self.lock:
+            return report.build_map(self.state, player_id)
 
     # ── 写（全部串行） ────────────────────────────────────
 
