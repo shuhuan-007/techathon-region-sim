@@ -193,6 +193,49 @@ def test_yi_material_cost_is_130():
     assert abs(total - 157.0) > 1.0, "157 是漏算 C、D 的旧值"
 
 
+def test_market_depth_high_tier_is_shallow():
+    """★ 市场深度：高级商品的市场极浅（结构性事实，供调平衡参考）。
+
+    临界量（价格打到地板所需的净供给）= `0.9 × (Es+|Ed|) × Q0`。
+
+    ⚠️ 这条**不是断言"设计对"**，而是把数值后果**固定下来**：
+    `I` 与 `H+` 只要 18~19 单位就触底（约 5 块满负荷三级地块一季的产量）；
+    而农产品 A 要 1800 单位。这个梯度来自 `Q0` 的设定（10~15 vs 2000）。
+    """
+    cfg = load_config()
+    cases = {
+        "A": 1800.0, "F": 180.0, "G": 324.0,
+        "H-A": 72.9, "I": 18.9, "H-A+": 18.0,
+    }
+    for g, expected in cases.items():
+        c = cfg.market[g]
+        s, d = c.slopes()
+        crit = (c.P0 - c.P_min) * (s + d)
+        assert abs(crit - expected) < 0.1, (
+            f"{g} 的临界供给量应为 {expected}，实得 {crit}"
+        )
+
+    # 高级商品确实比农产品浅得多
+    assert cases["H-A+"] < cases["F"] / 5, "H+ 市场应远浅于资源市场"
+
+
+def test_price_floor_limits_actual_sales():
+    """触底时**按可实现需求量成交，不保证全量收购**（§4.1）。
+
+    ⚠️ 程序不能只把负价格截成正数、然后仍让全部产量成交。
+    """
+    from engine import market as M
+
+    cfg = load_config()
+    curve = cfg.market["H-A+"]
+    r = M.solve_price(curve, bought=0.0, sold=300.0)
+
+    assert r.at_floor
+    assert abs(r.price - curve.P_min) < TOL, "触底时应返回 P_min"
+    assert r.sellable < 300.0, "★ 不能全量成交"
+    assert abs(r.sellable - 19.0) < 0.1, f"实际卖得掉约 19，实得 {r.sellable}"
+
+
 def test_value_added_matches_regenerated_anchor():
     """增加值（GDP）：甲 66 / 乙 110 / **合计 176**（§8.1 重算值）。
 
