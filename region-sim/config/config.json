@@ -238,8 +238,43 @@
   },
 
   "construction": {
-    "_comment": "⚠️ 待填：建设/升级全表（基线 §5.2）。M1 用不到（无工程）。",
-    "works": {}
+    "_comment": [
+      "✅ 2026-10-16 按《规则基线》§5.2 录入全表 14 行（数据源《草稿2》新版）。",
+      "   全表都是【新增投入，不每季重复扣除】。",
+      "   现金费【不含物资】—— 物资另外采购；若用自产或合同获得的商品，",
+      "   扣实物但不再扣一次市场采购费（§5.1 工程现金口径）。",
+      "   ⚠️ 『按参考价合计』只是核对用的派生值，不进本表（程序自己按 P0 算）。",
+      "   ⚠️ 工业 1→2 有【两条】互斥路线（机械 / 研究），2→3 也有两条",
+      "      （研究→I / 机械→H+），靠 product 区分，见 _comment_industry。"
+    ],
+    "_comment_industry": [
+      "工业是唯一需要按【路线】分岔的类型：",
+      "  1→2 选『机械 H-*』→ ind_1_2_machine（2 季）",
+      "  1→2 选『研究线』  → ind_1_2_research（6 季）",
+      "  二级是机械 → 升三级走 ind_2_3_machine（4 季，出 H-*+）",
+      "  二级是研究 → 升三级走 ind_2_3_high（8 季，出 I）",
+      "⚠️ 启动循环例外（§5.1）：建最初的高技术/自动化线【可以用普通 H-G】，",
+      "   不强制先消耗 H-G+ —— 否则『I 需要 H-G+，而 H-G+ 又需要 I』死循环。"
+    ],
+    "works": {
+      "agri_new":         { "label": "新建一级农业",     "plot_type": "agriculture", "from_level": 0, "to_level": 1, "cash": 80,  "materials": { "H-A": 1 }, "quarters": 1 },
+      "agri_1_2":         { "label": "农业 1→2",         "plot_type": "agriculture", "from_level": 1, "to_level": 2, "cash": 80,  "materials": { "H-A": 1 }, "quarters": 2 },
+      "agri_2_3":         { "label": "农业 2→3",         "plot_type": "agriculture", "from_level": 2, "to_level": 3, "cash": 100, "materials": { "H-A+": 1 }, "quarters": 3 },
+
+      "res_new":          { "label": "新建一级资源",     "plot_type": "resource",    "from_level": 0, "to_level": 1, "cash": 100, "materials": { "H-F": 1 }, "quarters": 1 },
+      "res_1_2":          { "label": "资源 1→2",         "plot_type": "resource",    "from_level": 1, "to_level": 2, "cash": 120, "materials": { "H-F": 2 }, "quarters": 2 },
+      "res_2_3":          { "label": "资源 2→3",         "plot_type": "resource",    "from_level": 2, "to_level": 3, "cash": 160, "materials": { "H-F+": 1 }, "quarters": 3 },
+
+      "ind_new":          { "label": "新建一级工业 G",   "plot_type": "industry",    "from_level": 0, "to_level": 1, "cash": 180, "materials": { "H-G": 2 }, "quarters": 2, "product": "G" },
+      "ind_1_2_machine":  { "label": "G→二级机械 H",     "plot_type": "industry",    "from_level": 1, "to_level": 2, "cash": 240, "materials": { "H-G": 3 }, "quarters": 2, "route": "machine" },
+      "ind_1_2_research": { "label": "G→二级研究",       "plot_type": "industry",    "from_level": 1, "to_level": 2, "cash": 300, "materials": { "H-G": 3 }, "quarters": 6, "route": "research" },
+      "ind_2_3_high":     { "label": "二级研究→三级 I",  "plot_type": "industry",    "from_level": 2, "to_level": 3, "cash": 500, "materials": { "H-G": 5 }, "quarters": 8, "route": "research" },
+      "ind_2_3_machine":  { "label": "二级机械→对应 H+", "plot_type": "industry",    "from_level": 2, "to_level": 3, "cash": 360, "materials": { "H-G": 3 }, "quarters": 4, "route": "machine" },
+
+      "srv_new":          { "label": "新建一级服务",     "plot_type": "service",     "from_level": 0, "to_level": 1, "cash": 80,  "materials": { "H-J": 1 }, "quarters": 1 },
+      "srv_1_2":          { "label": "服务 1→2",         "plot_type": "service",     "from_level": 1, "to_level": 2, "cash": 100, "materials": { "H-J": 1 }, "quarters": 2 },
+      "srv_2_3":          { "label": "服务 2→3",         "plot_type": "service",     "from_level": 2, "to_level": 3, "cash": 140, "materials": { "H-J+": 1 }, "quarters": 3 }
+    }
   },
 
   "opening": {

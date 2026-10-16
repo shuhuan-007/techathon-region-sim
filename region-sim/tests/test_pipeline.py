@@ -645,11 +645,16 @@ def test_service_cap_end_to_end():
 
 
 def test_config_ready_no_longer_flags_settled_items():
-    """`validate_config_ready()` 的缺失清单里，**不该再出现**已结清的两项。
+    """`validate_config_ready()` 的缺失清单里，**不该再出现**已结清的三项。
 
-    这是"配置体检报告"的回归标记：
-    开局现金与开局减免名额都会出现在缺失清单里，
-    但两者性质**完全不同** —— 前者已拍板（1200），后者**确实还没设计**。
+    这是"配置体检报告"的回归标记。三项的结清时间不同：
+
+      · **开局现金**（1200）      —— 第 1 步已拍板
+      · **建设表**（14 行）        —— 第 6 步已按基线 §5.2 录入
+      · **开局减免名额**           —— ⚠️ **确实还没设计**，应继续如实报出
+        （用户说 2/2/1 只是举例，不要照抄）
+
+    ⚠️ 前两项一旦在清单里重现，说明配置被改回去了。
     """
     from engine.loader import validate_config_ready
 
@@ -660,8 +665,9 @@ def test_config_ready_no_longer_flags_settled_items():
     assert "开局现金" not in joined, (
         f"开局现金已拍板为 1200，不该再报缺失。当前清单：{problems}"
     )
-    assert "construction" in joined or "建设" in joined, (
-        f"建设表确实还没填（M4 的活），体检报告应如实报出。当前清单：{problems}"
+    assert "construction" not in joined and "建设" not in joined, (
+        f"★ 建设表已按基线 §5.2 录入 14 行，不该再报缺失。当前清单：{problems}\n"
+        f"  ⚠️ 若这里失败，说明 construction.works 又被清空了。"
     )
     assert "减免名额" in joined, (
         f"开局减免名额**确实还没设计**（用户说 2/2/1 只是举例），应如实报出。"

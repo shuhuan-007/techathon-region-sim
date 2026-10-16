@@ -69,13 +69,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from engine import construction as C
 from engine import finance as F
 from engine import market as M
 from engine import production as P
 from engine import settlement as S
 from engine.efficiency import EfficiencyBreakdown, compute_efficiency
 from engine.loader import Config
-from engine.models import GameState, Plan, PlotStatus
+from engine.models import GameState, Plan, Plot, PlotStatus
 from engine.population import PopulationResult, compute_population
 
 
@@ -108,6 +109,10 @@ class QuarterReport:
     materials_cost: float = 0.0
     wages: float = 0.0
     operating: float = 0.0
+    # ★ 工程现金费（§5.1）。**不含物资** —— 物资在 `materials_cost` 里。
+    #   两者相加才是工程表那一行的"按参考价合计"（§5.2）。
+    construction_cash: float = 0.0
+    construction: dict[str, float] = field(default_factory=dict)   # 本季投入的物资
     total_deduction: float = 0.0          # ★ 第 5 步一次性扣款
     wage_tax_refund: float = 0.0
 
@@ -138,6 +143,8 @@ class QuarterReport:
             "materials_cost": self.materials_cost,
             "wages": self.wages,
             "operating": self.operating,
+            "construction_cash": self.construction_cash,
+            "construction": dict(self.construction),
             "total_deduction": self.total_deduction,
             "wage_tax_refund": self.wage_tax_refund,
             "sales_revenue": self.sales_revenue,
@@ -218,7 +225,8 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
 
     for player_id, plan in plans.items():
         production_inputs = P.merge_inputs(outcomes[player_id])
-        construction = _construction_materials(plan)          # 建设物资
+        # ★ 建设物资：按工程表投入（计入 B_t，§5.1 工程现金口径）
+        construction = _construction_materials(plan, state.players[player_id], cfg)
 
         # ══════════════════════════════════════════════════════════
         # ★ 居民口粮：自产先顶，缺口才买（2026-10-16 用户口径）
@@ -309,19 +317,22 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
 
     prices = M.settle_prices(state.world, total_bought, total_sold)
 
-    # ══ 第 5 步：一次性扣款（物资 + 工资 + 经营费） ★ ═════
+    # ══ 第 5 步：一次性扣款（物资 + 工程现金费 + 工资 + 经营费） ★ ═════
     for player_id, plan in plans.items():
         player = state.players[player_id]
         bill = M.buy_bill(state.world, bought_by_player[player_id])
 
         wages = sum(o.wage for o in outcomes[player_id])
         operating = sum(o.operating_cost for o in outcomes[player_id])
-        total = bill.total + wages + operating
+        # ★ 工程现金费：**不含物资**（物资在上面的 bill 里），§5.1 工程现金口径
+        build_cash = _construction_cash(plan, player, cfg)
+        total = bill.total + wages + operating + build_cash
 
         if total > player.cash + 1e-9:
             raise SettlementError(
                 f"资金不足：{player_id} 本季需扣 {total:.2f}，手上只有 {player.cash:.2f}。\n"
-                f"  物资款 {bill.total:.2f} + 工资 {wages:.2f} + 经营费 {operating:.2f}\n"
+                f"  物资款 {bill.total:.2f} + 工资 {wages:.2f} + "
+                f"经营费 {operating:.2f} + 工程现金费 {build_cash:.2f}\n"
                 f"  → 请减少采购、降低开工比例，或先卖掉存货。\n"
                 f"  ⚠️ 规则不允许透支：结算一次性扣款时必须够钱。"
             )
@@ -343,6 +354,8 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
             materials_cost=bill.total,
             wages=wages,
             operating=operating,
+            construction_cash=build_cash,
+            construction=dict(breakdown_by_player[player_id].get("construction") or {}),
             total_deduction=total,
             cash_before=player.cash + total,
         )
@@ -492,20 +505,46 @@ def _contract_deliveries(plan: Plan) -> dict[str, float]:
     )
 
 
-def _construction_materials(plan: Plan) -> dict[str, float]:
-    """本季建设要投入的物资（计入 `B_t`）。
+def _construction_cash(plan: Plan, player, cfg: Config) -> float:
+    """本季要付的**工程现金费**（§5.1 工程现金口径）。
 
-    ⚠️ 建设表 `construction.works` 目前**为空**（待填，《规则基线》§5.2）。
-       有建设指令时**明确报错**，而不是静默忽略 ——
-       忽略会让玩家以为建了、其实没建。
+        工程现金支出 = 其他工程费用 + 实际外购工程物资成本
+
+    ⚠️ **工程表里的现金费不含物资**（§5.2 表头写明），
+       物资在 `_construction_materials()` 那边按商品单独买、单独算钱。
+       两者加起来才是这一行工程的"按参考价合计"。
+    """
+    if not plan.builds:
+        return 0.0
+
+    total = 0.0
+    for order in plan.builds:
+        work, _materials = C.build_steps(cfg, player.plots.get(order.plot_id), order)
+        total += work.cash
+    return total
+
+
+def _construction_materials(plan: Plan, player, cfg: Config) -> dict[str, float]:
+    """本季建设要投入的物资（计入 `B_t`，§5.1 工程现金口径）。
+
+    ✅ 2026-10-16：`construction.works` 已按基线 §5.2 录入 14 行，本节不再是空桩。
+
+    ⚠️ 物资**按工程表原样投入**，不随 `u` / `E` 缩放 ——
+       工程是一次性投入，与"生产原料随开工率放大"不是一回事。
+
+    ⚠️ 查不到工程 / 工业路线没指定 → 由 `construction` 抛 `ConfigError`，
+       **不静默跳过**（跳过会让玩家以为建了、其实没建）。
     """
     if not plan.builds:
         return {}
-    raise SettlementError(
-        "建设/升级功能尚未接入：config 的 construction.works 为空。\n"
-        "  → 这是【待填数据】（《规则基线》§5.2 的表尚未录入 config）。\n"
-        "  ⚠️ 不静默忽略：忽略会让玩家以为建了、其实没建。"
-    )
+
+    total: dict[str, float] = {}
+    for order in plan.builds:
+        plot = player.plots.get(order.plot_id)
+        _work, materials = C.build_steps(cfg, plot, order)
+        for g, qty in materials.items():
+            total[g] = total.get(g, 0.0) + qty
+    return total
 
 
 def _advance_construction(state: GameState, player_id: str, cfg: Config) -> None:
@@ -526,8 +565,47 @@ def _advance_construction(state: GameState, player_id: str, cfg: Config) -> None
 
 
 def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Config) -> None:
-    """第 6 步：把材料投进已启动工程（§11.2 工程材料分账）。"""
-    return None
+    """第 6 步：把材料投进工程、**启动**工期（§11.2 工程材料分账）。
+
+    ✅ 2026-10-16：不再是空桩。
+
+    做两件事：
+      ① 记账：把投入的物资记进 `plot.construction_materials`
+         （材料一旦投入就**离开普通库存**，不会被当成存货）
+      ② 启动：把地块切成 `CONSTRUCTING`，写入工期与目标等级
+
+    ⚠️ **新建**（地上还没这块地）时在这里**创建** `Plot`，
+       所以"玩家的地"是在下完建设指令那一季才出现的。
+       地图上开局就是可建的空地（§5.3，不引入"零级地块"）。
+
+    ⚠️ 钱的扣除在第 5 步已经做完（`买物资 + 工程现金费`），这里只管实物与状态。
+    """
+    if not plan.builds:
+        return
+
+    player = state.players[player_id]
+    for order in plan.builds:
+        existing = player.plots.get(order.plot_id)
+        work, materials = C.build_steps(cfg, existing, order)
+
+        if existing is None:
+            # ── 新建：造出这块地 ──────────────────────────────
+            plot = Plot(
+                plot_id=order.plot_id,
+                plot_type=order.plot_type,
+                level=0,                      # 还没建成，完工时由 target_level 落地
+                status=PlotStatus.CONSTRUCTING,
+            )
+            player.plots[order.plot_id] = plot
+        else:
+            plot = existing
+
+        # ① 材料分账：投入的物资离开普通库存
+        for g, qty in materials.items():
+            plot.construction_materials[g] = plot.construction_materials.get(g, 0.0) + qty
+
+        # ② 启动工期 + 定下产出/路线（建后不可更换，§5.1）
+        C.start_work(plot, work, order.product)
 
 
 def _value_added(rep: QuarterReport, cfg: Config) -> float:
