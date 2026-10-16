@@ -378,7 +378,12 @@ function renderMap(){
       inner = `<span class="lt">${TYPE_CN[p.plot_type] || "?"}${lvl}</span>`
             + `<span class="sub">${p.product || (p.status === "constructing" ? "在建" : "—")}</span>`;
     }
-    return `<div class="${cls.join(" ")}" data-id="${c.plot_id}" title="${c.plot_id}">${inner}</div>`;
+    /* glB 资产键（引擎给，前端只挂到 DOM 上 —— 不拼键、不加载模型）。
+       c.asset 为 null = 空地/无模型 → 没有 data-asset 属性，保持现有 2D 渲染。
+       将来接 three.js 时按 data-asset 查 MAP.assets 得 .glb 路径；
+       文件缺失（fetch/Loader 失败）就保持这个 2D 格子不动，即回退。 */
+    const asset = c.asset ? ` data-asset="${c.asset}"` : "";
+    return `<div class="${cls.join(" ")}" data-id="${c.plot_id}"${asset} title="${c.plot_id}">${inner}</div>`;
   }).join("");
 
   el.querySelectorAll(".cell").forEach(c => {

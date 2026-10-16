@@ -219,10 +219,13 @@ def test_market_depth_high_tier_is_shallow():
     assert cases["H-A+"] < cases["F"] / 5, "H+ 市场应远浅于资源市场"
 
 
-def test_price_floor_limits_actual_sales():
-    """触底时**按可实现需求量成交，不保证全量收购**（§4.1）。
+def test_price_floor_still_sells_everything():
+    """触底时**按 `P_min` 全量收购**，成交量不截断（§4.1）。
 
-    ⚠️ 程序不能只把负价格截成正数、然后仍让全部产量成交。
+    ✅ 2026-10-16 深夜用户裁定："价格碰地板判定为全按地板价卖出就行了。
+       就当是全国统一收购。" —— 推翻了此前的"不保证全量收购"。
+
+    触底现在退化为**纯粹的价格惩罚**：货一定卖得掉，只是卖得便宜。
     """
     from engine import market as M
 
@@ -230,10 +233,13 @@ def test_price_floor_limits_actual_sales():
     curve = cfg.market["H-A+"]
     r = M.solve_price(curve, bought=0.0, sold=300.0)
 
-    assert r.at_floor
+    assert r.at_floor, "卖 300 远超临界量 18，应当触底"
     assert abs(r.price - curve.P_min) < TOL, "触底时应返回 P_min"
-    assert r.sellable < 300.0, "★ 不能全量成交"
-    assert abs(r.sellable - 19.0) < 0.1, f"实际卖得掉约 19，实得 {r.sellable}"
+    assert r.sellable == 300.0, "★ 触底也必须全量成交（全国统一收购）"
+
+    # 对照：不触底时同样是全量
+    r2 = M.solve_price(curve, bought=0.0, sold=5.0)
+    assert not r2.at_floor and r2.sellable == 5.0
 
 
 def test_value_added_matches_regenerated_anchor():
