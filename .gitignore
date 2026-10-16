@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# 存档（每次跑出来的局面，不进版本库）
+saves/
+*.save.json
+
+# 密钥与本地配置
+.env
+
+# 编辑器
+.vscode/
+.idea/
+
+# Office 临时锁文件（~$xxx.docx）
+~$*

@@ -1,0 +1,1318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>产业大亨 · 城市经营仪表盘</title>
+<style>
+/* ============================================================
+   第一部分：颜色与字体
+   ============================================================ */
+:root{
+  /* —— 颜色速查表 —— */
+  --page-bg:      #212930;
+  --panel-bg:     #2A323A;
+  --panel-sub:    #313A43;
+  --divider:      #3A444E;
+  --divider-soft: #333C45;
+  --topbar-bg:    #2C363F;
+  --topbar-line:  #3D4852;
+
+  --text-main:    #E8EDF2;
+  --text-sub:     #A9B6C2;
+  --text-weak:    #71808F;
+
+  --accent:       #4A9EE8;   /* 主色：按钮 / 选中 / 进度 */
+  --up:           #E8615A;   /* 涨 · 赚 · 缺料警告 */
+  --down:         #4FBF7F;   /* 跌 · 亏 · 满足安全 */
+  --warn:         #E8A93C;   /* 橙色警告：停工 */
+
+  /* —— 尺度 —— */
+  --radius-tile: 14px;
+  --gutter: 7px;
+  --topbar-h: 82px;
+
+  --font: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB",
+          "Source Han Sans SC", "Noto Sans SC", system-ui, sans-serif;
+  --mono: Consolas, "Cascadia Mono", "SF Mono", "Roboto Mono",
+          "DejaVu Sans Mono", ui-monospace, monospace;
+}
+
+*{ box-sizing: border-box; }
+html,body{ height:100%; }
+body{
+  margin:0;
+  font-family: var(--font);
+  font-weight: 300;              /* 全画面字体偏细 */
+  color: var(--text-main);
+  background: var(--page-bg);
+  overflow:hidden;
+  letter-spacing:.2px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ============================================================
+   背景层：深青蓝 → 墨绿渐变 / 淡网格 / 暗紫光晕 / 城市剪影
+   ============================================================ */
+.bg{ position:fixed; inset:0; z-index:0; overflow:hidden; }
+
+/* 1. 主渐变：左上深青蓝 → 右下墨绿，整体深沉 */
+.bg-base{
+  position:absolute; inset:0;
+  background:
+    radial-gradient(120% 100% at 8% -10%, #1E3A44 0%, rgba(30,58,68,0) 55%),
+    radial-gradient(120% 110% at 100% 110%, #1A3327 0%, rgba(26,51,39,0) 58%),
+    linear-gradient(152deg, #1E2A33 0%, #212930 42%, #1F2C2A 72%, #1C2A25 100%);
+}
+
+/* 2. 边缘微弱暗紫色环境光晕 */
+.bg-violet{
+  position:absolute; inset:-10%;
+  background:
+    radial-gradient(58% 52% at -6% 18%, rgba(120, 86, 180, .17), rgba(120,86,180,0) 68%),
+    radial-gradient(52% 46% at 104% 6%,  rgba(112, 78, 172, .14), rgba(112,78,172,0) 66%),
+    radial-gradient(60% 55% at 52% 116%, rgba(94, 70, 150, .13), rgba(94,70,150,0) 70%);
+  filter: blur(14px);
+}
+
+/* 3. 低透明度细浅灰网格纹理（很淡，不抢前景） */
+.bg-grid{
+  position:absolute; inset:0;
+  background-image:
+    linear-gradient(to right,  rgba(200,214,226,.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(200,214,226,.045) 1px, transparent 1px),
+    linear-gradient(to right,  rgba(200,214,226,.022) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(200,214,226,.022) 1px, transparent 1px);
+  background-size: 34px 34px, 34px 34px, 170px 170px, 170px 170px;
+  mask-image: linear-gradient(to bottom, rgba(0,0,0,.85), rgba(0,0,0,.45) 60%, rgba(0,0,0,.28));
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.85), rgba(0,0,0,.45) 60%, rgba(0,0,0,.28));
+}
+.bg-grid::after{ /* 再加一层极淡的噪点，压掉网格的机械感 */
+  content:""; position:absolute; inset:0;
+  background-image: radial-gradient(rgba(255,255,255,.05) .5px, transparent .6px);
+  background-size: 7px 7px; opacity:.5;
+}
+
+/* 4. 底部淡城市轮廓剪影，虚化处理 */
+.bg-city{
+  position:absolute; left:0; right:0; bottom:0; height:30vh; min-height:210px;
+  filter: blur(6px);
+  opacity:.5;
+}
+.bg-city svg{ width:100%; height:100%; display:block; }
+.bg-city svg .far{ fill:#16201F; opacity:.85; }
+.bg-city svg .near{ fill:#131B1B; }
+
+/* 顶部与底部的收边，让顶栏更"仪表盘" */
+.bg-vig{
+  position:absolute; inset:0;
+  background: linear-gradient(to bottom, rgba(0,0,0,.30), rgba(0,0,0,0) 22%, rgba(0,0,0,0) 62%, rgba(0,0,0,.34));
+}
+
+/* ============================================================
+   布局
+   ============================================================ */
+.app{ position:relative; z-index:1; height:100%; display:flex; flex-direction:column; }
+
+/* -------------------- 顶栏 -------------------- */
+.topbar{
+  flex:0 0 var(--topbar-h);
+  height: var(--topbar-h);
+  display:flex; align-items:center; gap:22px;
+  padding:0 18px;
+  background: var(--topbar-bg);
+  border-bottom:1px solid var(--topbar-line);
+  box-shadow: 0 10px 26px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.045);
+}
+
+/* 左：城市名 + 回合 */
+.city-id{ flex:0 0 auto; padding-right:20px; border-right:1px solid rgba(255,255,255,.07); }
+.city-id .name{ font-size:15px; font-weight:500; letter-spacing:1.4px; }
+.city-id .sub{ margin-top:5px; font-family:var(--mono); font-size:11px; color:var(--text-weak); }
+.city-id .sub b{ color:var(--text-sub); font-weight:400; }
+
+/* 中：五个指标块 */
+.meters{ flex:1 1 auto; display:flex; align-items:stretch; min-width:0; }
+.meter{
+  flex:1 1 0; min-width:0;
+  padding:0 18px;
+  display:flex; flex-direction:column; justify-content:center; gap:3px;
+  border-right:1px solid rgba(255,255,255,.055);   /* 极淡的竖线 */
+}
+.meter:first-child{ padding-left:6px; }
+.meter:last-child{ border-right:0; }
+.meter .label{
+  font-size:11px; font-weight:300; color:var(--text-weak);
+  letter-spacing:1.6px; white-space:nowrap;
+}
+.meter .value{
+  font-family:var(--mono); font-size:23px; font-weight:400;
+  line-height:1.05; color:var(--text-main);
+  font-variant-numeric: tabular-nums;
+  white-space:nowrap;
+}
+.meter .value.plain{ color:var(--text-main); }
+.meter .delta{
+  font-family:var(--mono); font-size:11.5px; line-height:1.2;
+  font-variant-numeric: tabular-nums; white-space:nowrap;
+}
+.meter .delta .lbl{ font-family:var(--font); color:var(--text-weak); letter-spacing:.6px; }
+.pos{ color:var(--up); }      /* 涨 / 赚 */
+.neg{ color:var(--down); }    /* 跌 / 亏 */
+
+/* 幸福度细横条 */
+.happy-bar{
+  margin-top:3px; width:100%; max-width:132px; height:3px;
+  border-radius:2px; background:rgba(255,255,255,.10); overflow:hidden;
+}
+.happy-bar i{ display:block; height:100%; border-radius:2px; }
+.happy-bar.mid i{ background: var(--accent); }
+.happy-bar.low i{ background: var(--up); }
+.happy-bar.high i{ background: var(--down); }
+
+/* 右：三个按钮 */
+.actions{ flex:0 0 auto; display:flex; align-items:center; gap:10px; padding-left:4px; }
+.btn{
+  font-family:var(--font); font-size:13px; font-weight:300;
+  color:var(--text-main); background:transparent;
+  border:1px solid #4A5A68; border-radius:8px;
+  padding:9px 16px; cursor:pointer;
+  display:inline-flex; align-items:center; gap:7px;
+  letter-spacing:1px; transition:.16s ease;
+  white-space:nowrap;
+}
+.btn:hover{ border-color:#6C8296; background:rgba(255,255,255,.045); }
+.btn:active{ transform:translateY(1px); }
+.btn svg{ width:15px; height:15px; opacity:.9; }
+
+.btn-primary{
+  border-color:#5FAEF0;
+  background:linear-gradient(180deg,#5AA9EC,#3F8FD6);
+  color:#FFFFFF; font-weight:400; font-size:14px;
+  padding:11px 22px;
+  box-shadow:0 4px 16px rgba(74,158,232,.38), inset 0 1px 0 rgba(255,255,255,.28);
+}
+.btn-primary:hover{ background:linear-gradient(180deg,#6DB7F2,#4C9BE0); border-color:#7CC0F5; }
+
+/* -------------------- 主体：地图 + 右侧栏 -------------------- */
+.body{ flex:1 1 auto; display:flex; min-height:0; position:relative; }
+
+.stage{
+  flex:1 1 auto; position:relative; min-width:0;
+  padding:20px 24px 30px;
+  display:flex; flex-direction:column;
+}
+
+.stage-head{ display:flex; align-items:baseline; gap:14px; margin-bottom:14px; }
+.stage-head h1{ margin:0; font-size:14px; font-weight:400; letter-spacing:2.4px; color:var(--text-sub); }
+.stage-head .meta{ font-family:var(--mono); font-size:11.5px; color:var(--text-weak); }
+.stage-head .spacer{ flex:1; }
+
+/* 地图区：左侧 3×4 地块网格 + 右侧装饰性地块列，整体居中 */
+.map-area{
+  flex:1 1 auto; min-height:0;
+  display:flex; align-items:center; justify-content:center;
+  gap:12px;
+}
+.grid{
+  flex:0 1 auto;
+  display:grid;
+  grid-template-columns:repeat(4, minmax(0, 238px));
+  grid-template-rows:repeat(3, minmax(0, 1fr));
+  gap:var(--gutter);
+  width:100%; max-width:975px;
+  /* 3 行 × 141px：在 1600×1000 下地块约 228×141，最接近图元 100:64 的画幅 */
+  height:100%; max-height:438px;
+}
+/* 状态 7：装饰地块，一列 3 块，不可点 */
+.deco-col-wrap{
+  flex:0 0 112px;
+  display:grid; grid-template-rows:repeat(3, minmax(0, 1fr));
+  gap:var(--gutter);
+  align-self:center;
+  height:100%; max-height:438px;
+}
+
+/* ============================================================
+   地块（有厚度的地砖）
+   ============================================================ */
+.tile{
+  position:relative;
+  border-radius:var(--radius-tile);
+  padding:4px;                                  /* 地块之间的窄缝由外层露出深色 */
+  background:#161D22;                           /* 缝隙色 */
+  border:1px solid rgba(255,255,255,.055);
+  cursor:pointer;
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, filter .16s ease;
+  /* 四周柔和的落差投影 */
+  box-shadow: 0 6px 14px rgba(0,0,0,.42), 0 1px 0 rgba(255,255,255,.03);
+  outline:none;
+}
+.tile-inner{
+  position:relative; width:100%; height:100%;
+  border-radius:calc(var(--radius-tile) - 4px);
+  overflow:hidden;
+  /* 顶边受光亮边 + 底边深色阴影 → 厚度 */
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.34),
+    inset 0 2px 0 rgba(255,255,255,.10),
+    inset 0 -3px 0 rgba(0,0,0,.42),
+    inset 0 -1px 0 rgba(0,0,0,.55);
+}
+.tile-art{ width:100%; height:100%; display:block; }
+.art-flip{ width:100%; height:100%; transform:scaleX(-1); }
+
+/* 地块右上：资源条 */
+.tile-bars{ position:absolute; top:9px; right:9px; display:flex; flex-direction:column; gap:4px; width:44%; max-width:104px; }
+.bar{ height:3.5px; border-radius:2px; background:rgba(0,0,0,.32); box-shadow:inset 0 0 0 1px rgba(255,255,255,.08); overflow:hidden; }
+.bar i{ display:block; height:100%; border-radius:2px; }
+
+/* 地块左下：名称 + 等级 */
+.tile-tag{
+  position:absolute; left:9px; bottom:8px;
+  display:flex; align-items:center; gap:6px;
+  font-size:11.5px; letter-spacing:.8px; color:rgba(255,255,255,.94);
+  text-shadow:0 1px 3px rgba(0,0,0,.75);
+  pointer-events:none;
+}
+.tile-tag .lv{
+  font-family:var(--mono); font-size:10px; padding:1px 5px; border-radius:4px;
+  background:rgba(0,0,0,.38); box-shadow:inset 0 0 0 1px rgba(255,255,255,.16);
+}
+
+/* —— 状态 1：正常经营中 —— */
+.tile.is-normal .tile-inner{ filter:none; }
+
+/* —— 状态 2：在建中 —— */
+.tile.is-building .tile-inner::after{
+  content:""; position:absolute; inset:0; background:rgba(224,236,246,.30);
+  backdrop-filter:saturate(.5);
+}
+.build-veil{
+  position:absolute; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:9px;
+  color:#F2F7FB; text-shadow:0 1px 4px rgba(0,0,0,.6);
+  font-size:12.5px; letter-spacing:1.2px; pointer-events:none;
+}
+.spinner{
+  width:22px; height:22px; border-radius:50%;
+  border:2px solid rgba(255,255,255,.30); border-top-color:#FFFFFF;
+  animation:spin 1s linear infinite;
+}
+@keyframes spin{ to{ transform:rotate(360deg); } }
+.build-progress{
+  position:absolute; left:8%; right:8%; bottom:9px; height:3px;
+  border-radius:2px; background:rgba(0,0,0,.34); overflow:hidden;
+}
+.build-progress i{ display:block; height:100%; width:38%; border-radius:2px; background:var(--accent); box-shadow:0 0 8px rgba(74,158,232,.8); }
+.build-pct{
+  position:absolute; right:10px; bottom:22px; font-family:var(--mono); font-size:10.5px;
+  color:#EAF3FB; text-shadow:0 1px 3px rgba(0,0,0,.7);
+}
+
+/* —— 状态 3：停工 / 维护不满足 —— */
+.tile.is-halted{ border-color:rgba(232,169,60,.85); border-style:dashed; }
+.tile.is-halted .tile-inner{ filter:saturate(.72) brightness(.92); }
+.warn-badge{
+  position:absolute; left:8px; top:8px; width:22px; height:19px;
+  display:grid; place-items:center; z-index:3;
+  filter:drop-shadow(0 1px 3px rgba(0,0,0,.6));
+}
+.warn-badge svg{ width:100%; height:100%; }
+.halt-note{
+  position:absolute; left:9px; top:32px; font-size:11px; letter-spacing:.6px;
+  color:#F6D9A6; text-shadow:0 1px 3px rgba(0,0,0,.8); z-index:3;
+}
+
+/* —— 状态 4：荒地（未开发） —— */
+.tile.is-wild{ background:#141A1E; }
+.tile.is-wild .tile-inner{ filter:grayscale(.92) brightness(.82); }
+.tile.is-wild .tile-art{ opacity:.30; }
+.tile.is-wild:hover .tile-inner{ filter:grayscale(.55) brightness(1.0); }
+.tile.is-wild .plus{
+  position:absolute; inset:0; display:grid; place-items:center;
+  font-family:var(--mono); font-size:30px; font-weight:200; color:rgba(232,237,242,.42);
+  text-shadow:0 2px 8px rgba(0,0,0,.6); pointer-events:none;
+}
+.tile.is-wild:hover .plus{ color:rgba(232,237,242,.85); }
+
+/* —— 状态 5：不属于我，但可购买 —— */
+.tile.is-locked{ cursor:pointer; }
+.tile.is-locked .tile-inner{
+  background:linear-gradient(180deg,#B9C3CB,#9FAAB3);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.6), inset 0 -3px 0 rgba(0,0,0,.20);
+}
+.lock-veil{
+  position:absolute; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:8px; pointer-events:none;
+}
+.lock-veil svg{ width:26px; height:26px; opacity:.72; }
+.lock-veil span{ font-size:11.5px; letter-spacing:1.4px; color:rgba(38,48,56,.72); }
+.lock-price{
+  position:absolute; right:9px; top:8px; font-family:var(--mono); font-size:11px;
+  color:rgba(38,48,56,.78);
+}
+
+/* —— 状态 6：悬停（可点地块上浮 + 主色描边） —— */
+.tile.is-clickable:hover{
+  transform:translateY(-3px);
+  border-color:var(--accent);
+  box-shadow:0 12px 24px rgba(0,0,0,.5), 0 0 0 1px rgba(74,158,232,.55), 0 0 22px rgba(74,158,232,.22);
+  z-index:5;
+}
+
+/* —— 状态 7：装饰地块，不可点 —— */
+.tile.is-decor{ cursor:default; }
+.tile.is-decor .tile-inner{ filter:brightness(.78) saturate(.6); opacity:.72; }
+.tile.is-decor:hover{ transform:none; box-shadow:0 6px 14px rgba(0,0,0,.42); border-color:rgba(255,255,255,.055); }
+.tile.is-decor .tile-tag{ opacity:.55; }
+
+/* 选中 */
+.tile.is-selected{ border-color:var(--accent); box-shadow:0 0 0 1px rgba(74,158,232,.6), 0 10px 22px rgba(0,0,0,.5); }
+
+/* 地块浮层（tooltip） */
+.tooltip{
+  position:fixed; z-index:80; width:250px; pointer-events:none;
+  background:linear-gradient(180deg, rgba(42,50,58,.985), rgba(35,43,50,.985));
+  border:1px solid var(--divider); border-radius:10px;
+  box-shadow:0 16px 38px rgba(0,0,0,.55);
+  padding:12px 13px; opacity:0; transform:translateY(4px);
+  transition:opacity .12s ease, transform .12s ease;
+  backdrop-filter:blur(6px);
+}
+.tooltip.show{ opacity:1; transform:translateY(0); }
+.tt-head{ display:flex; align-items:baseline; gap:8px; margin-bottom:9px; }
+.tt-head .nm{ font-size:13.5px; font-weight:400; color:var(--text-main); letter-spacing:.8px; }
+.tt-head .ty{ font-family:var(--mono); font-size:10.5px; color:var(--accent); border:1px solid rgba(74,158,232,.45); border-radius:4px; padding:1px 5px; }
+.tt-row{ display:flex; justify-content:space-between; gap:10px; font-size:11.5px; color:var(--text-sub); padding:3px 0; }
+.tt-row .v{ font-family:var(--mono); color:var(--text-main); font-variant-numeric:tabular-nums; }
+.tt-sep{ height:1px; background:var(--divider-soft); margin:8px 0; }
+.tt-issue{ display:flex; align-items:center; gap:6px; font-size:11.5px; }
+.tt-issue.warn{ color:var(--warn); }
+.tt-issue.bad{ color:var(--up); }
+.tt-issue.ok{ color:var(--down); }
+.tt-dot{ width:6px; height:6px; border-radius:50%; background:currentColor; box-shadow:0 0 8px currentColor; }
+
+/* 图例 */
+.legend{
+  position:absolute; left:26px; bottom:20px; z-index:6;
+  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  background:rgba(30,37,43,.72); border:1px solid var(--divider-soft);
+  border-radius:9px; padding:7px 13px; backdrop-filter:blur(8px);
+  box-shadow:0 8px 20px rgba(0,0,0,.35);
+}
+.legend .lg-item{ display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-sub); letter-spacing:.6px; }
+.legend .sw{ width:11px; height:11px; border-radius:3px; box-shadow:inset 0 1px 0 rgba(255,255,255,.4); }
+.legend .lg-title{ font-size:10.5px; color:var(--text-weak); letter-spacing:1.6px; padding-right:4px; border-right:1px solid var(--divider-soft); }
+
+/* -------------------- 右侧可收起侧栏 -------------------- */
+.sidebar{
+  flex:0 0 292px; width:292px;
+  overflow:hidden;                 /* 只裁面板自身，把手在外层不受影响 */
+  background:linear-gradient(180deg,#2A323A,#262E35);
+  border-left:1px solid var(--divider);
+  box-shadow:-14px 0 30px rgba(0,0,0,.30);
+  display:flex; flex-direction:column;
+  transition:flex-basis .26s ease, width .26s ease, transform .26s ease;
+}
+.sidebar.collapsed{
+  flex-basis:0; width:0; transform:translateX(100%);
+  border-left-color:transparent; box-shadow:none;
+}
+.sidebar-inner{ flex:1 1 auto; min-height:0; overflow-y:auto; padding:16px 15px 22px; }
+.sidebar-inner::-webkit-scrollbar{ width:8px; }
+.sidebar-inner::-webkit-scrollbar-thumb{ background:#3C4650; border-radius:4px; }
+
+/* 收起 / 展开把手：贴在侧栏左缘，收起时自动滑到画面右缘 */
+.sb-handle{
+  position:absolute; right:292px; top:50%;
+  width:16px; height:66px;
+  border:1px solid var(--divider); border-right:0;
+  border-radius:9px 0 0 9px; background:#2A323A; color:var(--text-weak);
+  display:grid; place-items:center; cursor:pointer; z-index:14;
+  box-shadow:-5px 0 14px rgba(0,0,0,.38);
+  transition:right .26s ease, color .16s ease, background .16s ease;
+}
+.body.sb-closed .sb-handle{ right:0; }
+.sb-handle:hover{ color:var(--text-main); background:#333C45; }
+.sb-handle svg{ width:11px; height:11px; transition:transform .26s ease; }
+.body.sb-closed .sb-handle svg{ transform:rotate(180deg); }
+
+.sb-panel{ display:none; }
+.sb-panel.active{ display:block; }
+.sb-title{ font-size:12.5px; letter-spacing:2px; color:var(--text-sub); margin-bottom:4px; }
+.sb-sub{ font-size:11px; color:var(--text-weak); margin-bottom:14px; font-family:var(--mono); }
+.card{ background:var(--panel-sub); border:1px solid var(--divider-soft); border-radius:9px; padding:11px 12px; margin-bottom:10px; }
+.card h4{ margin:0 0 9px; font-size:11.5px; font-weight:400; letter-spacing:1.4px; color:var(--text-weak); }
+.row{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 0; font-size:12px; color:var(--text-sub); }
+.row .v{ font-family:var(--mono); font-variant-numeric:tabular-nums; }
+.spark{ height:26px; width:100%; display:block; margin-top:4px; }
+.bar-row{ margin:9px 0; }
+.bar-row .top{ display:flex; justify-content:space-between; font-size:11.5px; color:var(--text-sub); margin-bottom:5px; }
+.bar-row .top .v{ font-family:var(--mono); }
+.bar-track{ height:5px; border-radius:3px; background:rgba(255,255,255,.08); overflow:hidden; }
+.bar-track i{ display:block; height:100%; border-radius:3px; background:var(--accent); }
+.bar-track i.up{ background:var(--up); }
+.bar-track i.down{ background:var(--down); }
+.bar-track i.warn{ background:var(--warn); }
+.sb-foot{ margin-top:14px; font-size:11px; color:var(--text-weak); line-height:1.7; }
+
+/* 结算报告遮罩（简版入口反馈） */
+.toast{
+  position:fixed; left:50%; bottom:34px; transform:translateX(-50%) translateY(14px);
+  background:linear-gradient(180deg,#33414D,#2A323A); border:1px solid var(--divider);
+  color:var(--text-main); font-size:12.5px; letter-spacing:1px;
+  padding:11px 20px; border-radius:9px; box-shadow:0 14px 34px rgba(0,0,0,.5);
+  opacity:0; pointer-events:none; transition:.22s ease; z-index:90;
+}
+.toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<!-- ===================== 背景 ===================== -->
+<div class="bg" aria-hidden="true">
+  <div class="bg-base"></div>
+  <div class="bg-violet"></div>
+  <div class="bg-grid"></div>
+  <div class="bg-city">
+    <svg viewBox="0 0 1600 260" preserveAspectRatio="none">
+      <g class="far">
+        <rect x="20"   y="150" width="54"  height="110"/>
+        <rect x="86"   y="118" width="40"  height="142"/>
+        <rect x="140"  y="168" width="66"  height="92"/>
+        <rect x="222"  y="132" width="34"  height="128"/>
+        <rect x="270"  y="176" width="72"  height="84"/>
+        <rect x="360"  y="140" width="46"  height="120"/>
+        <rect x="420"  y="186" width="88"  height="74"/>
+        <rect x="524"  y="126" width="38"  height="134"/>
+        <rect x="576"  y="162" width="64"  height="98"/>
+        <rect x="656"  y="142" width="42"  height="118"/>
+        <rect x="712"  y="180" width="78"  height="80"/>
+        <rect x="806"  y="134" width="36"  height="126"/>
+        <rect x="856"  y="164" width="70"  height="96"/>
+        <rect x="942"  y="146" width="44"  height="114"/>
+        <rect x="1000" y="182" width="84"  height="78"/>
+        <rect x="1100" y="138" width="38"  height="122"/>
+        <rect x="1152" y="166" width="66"  height="94"/>
+        <rect x="1234" y="148" width="42"  height="112"/>
+        <rect x="1290" y="184" width="80"  height="76"/>
+        <rect x="1386" y="140" width="36"  height="120"/>
+        <rect x="1436" y="168" width="70"  height="92"/>
+        <rect x="1520" y="152" width="48"  height="108"/>
+      </g>
+      <g class="near">
+        <rect x="-10"  y="196" width="96"  height="70"/>
+        <rect x="104"  y="178" width="58"  height="88"/>
+        <rect x="180"  y="208" width="120" height="58"/>
+        <rect x="318"  y="188" width="52"  height="78"/>
+        <rect x="386"  y="214" width="140" height="52"/>
+        <rect x="544"  y="182" width="46"  height="84"/>
+        <rect x="606"  y="206" width="128" height="60"/>
+        <rect x="752"  y="190" width="54"  height="76"/>
+        <rect x="822"  y="212" width="150" height="54"/>
+        <rect x="990"  y="184" width="48"  height="82"/>
+        <rect x="1054" y="208" width="132" height="58"/>
+        <rect x="1204" y="192" width="50"  height="74"/>
+        <rect x="1270" y="216" width="144" height="50"/>
+        <rect x="1430" y="186" width="46"  height="80"/>
+        <rect x="1492" y="204" width="120" height="62"/>
+      </g>
+    </svg>
+  </div>
+  <div class="bg-vig"></div>
+</div>
+
+<div class="app">
+
+  <!-- ===================== 顶栏 ===================== -->
+  <header class="topbar">
+    <div class="city-id">
+      <div class="name">青岚湾 · 产业区</div>
+      <div class="sub">Q3 · 第 <b>14</b> 季</div>
+    </div>
+
+    <div class="meters">
+      <!-- 1 现金 -->
+      <div class="meter">
+        <div class="label">现金</div>
+        <div class="value">¥ 42,850</div>
+        <div class="delta pos">↑1,284</div>
+      </div>
+      <!-- 2 等效人口 -->
+      <div class="meter">
+        <div class="label">等效人口</div>
+        <div class="value">12,460</div>
+        <div class="delta neg">↓ 86</div>
+      </div>
+      <!-- 3 幸福度 -->
+      <div class="meter">
+        <div class="label">幸福度</div>
+        <div class="value">58</div>
+        <div class="happy-bar mid"><i style="width:58%"></i></div>
+      </div>
+      <!-- 4 季度效率 -->
+      <div class="meter">
+        <div class="label">季度效率</div>
+        <div class="value">86<span style="font-size:14px;color:var(--text-weak)">%</span></div>
+        <div class="delta"><span class="lbl">环比</span> <span class="pos">+3.2%</span></div>
+      </div>
+      <!-- 5 本季盈亏 -->
+      <div class="meter">
+        <div class="label">本季盈亏</div>
+        <div class="value pos">＋¥8,420</div>
+        <div class="delta"><span class="lbl">收入</span> <span class="pos">¥18,600</span> <span class="lbl">· 支出</span> <span class="neg">¥10,180</span></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn" id="btn-market">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 10.5 5 5h14l2 5.5"/><path d="M4 10.5h16V19H4z"/><path d="M9 19v-5h6v5"/>
+        </svg>市场
+      </button>
+      <button class="btn" id="btn-people">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="9" cy="8" r="3.2"/><path d="M3 19c0-3.2 2.7-5 6-5s6 1.8 6 5"/><path d="M16 11.2c1.9.3 3.4 1.7 3.9 3.8"/>
+        </svg>居民
+      </button>
+      <button class="btn btn-primary" id="btn-report">结算报告</button>
+    </div>
+  </header>
+
+  <!-- ===================== 主体 ===================== -->
+  <div class="body">
+
+    <!-- 地块地图 -->
+    <section class="stage">
+      <div class="stage-head">
+        <h1>地块总览</h1>
+        <span class="meta">可开发 9 / 12 · 停工 1</span>
+        <span class="spacer"></span>
+        <span class="meta">左键选择地块 · 悬停查看详情</span>
+      </div>
+
+      <div class="map-area">
+        <div class="grid" id="grid"></div>
+        <div class="deco-col-wrap" id="deco-col"></div>
+      </div>
+
+      <!-- 图例 -->
+      <div class="legend" id="legend">
+        <span class="lg-title">图例</span>
+      </div>
+    </section>
+
+    <!-- 收起 / 展开把手：放在 body 层，不被侧栏裁切 */
+    <div class="sb-handle" id="sb-handle" title="收起 / 展开侧栏" role="button" tabindex="0" aria-label="收起或展开侧栏">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M15 5 8 12l7 7"/>
+      </svg>
+    </div>
+
+    <!-- 右侧可收起侧栏 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-inner">
+
+        <!-- 市场面板 -->
+        <div class="sb-panel" id="panel-market">
+          <div class="sb-title">市场行情</div>
+          <div class="sb-sub">Q3 · 第 14 季 · 报价更新于本季初</div>
+
+          <div class="card">
+            <h4>商品报价</h4>
+            <div class="row"><span>粮食</span><span class="v">¥ 62 <span class="pos">+4.2%</span></span></div>
+            <div class="row"><span>钢材</span><span class="v">¥ 148 <span class="pos">+1.1%</span></span></div>
+            <div class="row"><span>消费品</span><span class="v">¥ 96 <span class="neg">−0.8%</span></span></div>
+            <div class="row"><span>矿石</span><span class="v">¥ 74 <span class="neg">−2.6%</span></span></div>
+          </div>
+
+          <div class="card">
+            <h4>钢材 · 近 8 季</h4>
+            <svg class="spark" viewBox="0 0 240 26" preserveAspectRatio="none">
+              <polyline points="0,20 34,17 68,19 102,13 136,15 170,9 204,11 240,6"
+                        fill="none" stroke="#E8615A" stroke-width="1.6"/>
+            </svg>
+          </div>
+
+          <div class="card">
+            <h4>本季采购缺口</h4>
+            <div class="row"><span>原料 D（工业 2）</span><span class="v pos">缺 12 单位</span></div>
+            <div class="row"><span>零件（服务 3）</span><span class="v">缺 3 单位</span></div>
+          </div>
+        </div>
+
+        <!-- 居民 / 粮食面板 -->
+        <div class="sb-panel active" id="panel-people">
+          <div class="sb-title">居民与粮食</div>
+          <div class="sb-sub">等效人口 12,460 · 幸福度 58</div>
+
+          <div class="card">
+            <h4>粮食平衡</h4>
+            <div class="bar-row">
+              <div class="top"><span>本季产量</span><span class="v">1,840</span></div>
+              <div class="bar-track"><i class="down" style="width:76%"></i></div>
+            </div>
+            <div class="bar-row">
+              <div class="top"><span>本季消耗</span><span class="v">1,512</span></div>
+              <div class="bar-track"><i style="width:62%"></i></div>
+            </div>
+            <div class="row"><span>库存</span><span class="v">+328</span></div>
+          </div>
+
+          <div class="card">
+            <h4>民生指标</h4>
+            <div class="row"><span>就业率</span><span class="v">94%</span></div>
+            <div class="row"><span>住房压力</span><span class="v neg">偏高</span></div>
+            <div class="row"><span>治安</span><span class="v">良好</span></div>
+          </div>
+
+          <div class="card">
+            <h4>粮食库存 · 近 8 季</h4>
+            <svg class="spark" viewBox="0 0 240 26" preserveAspectRatio="none">
+              <polyline points="0,16 34,18 68,14 102,15 136,11 170,13 204,8 240,7"
+                        fill="none" stroke="#4FBF7F" stroke-width="1.6"/>
+            </svg>
+          </div>
+        </div>
+
+        <div class="sb-foot">
+          提示：点击顶栏「市场 / 居民」切换侧栏内容，点击左侧把手可收起侧栏，把地图区域让给地块网格。
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- 地块浮层 -->
+<div class="tooltip" id="tooltip"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============================================================
+   地块图元（SVG 元件库）
+   一级：元素最少 / 二级：加附属设施 / 三级：建筑群
+   ============================================================ */
+const A = (s) => `<svg class="tile-art" viewBox="0 0 100 64" preserveAspectRatio="xMidYMid slice">${s}</svg>`;
+
+const ART = {
+  /* ---------------- 农业：绿系，逐级加深 ---------------- */
+  farm1: () => A(`
+    <defs><linearGradient id="f1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#A8CE84"/><stop offset="1" stop-color="#88B667"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#f1)"/>
+    <path d="M-4 20C18 15 40 25 62 19 78 15 92 22 104 18" fill="none" stroke="#CDAE7A" stroke-width="3.6" opacity=".9"/>
+    <path d="M-4 40C20 36 42 45 66 39 82 35 94 42 104 38" fill="none" stroke="#CDAE7A" stroke-width="3.6" opacity=".9"/>
+    <g stroke="#5C8F45" stroke-width="1.5" stroke-linecap="round">
+      <path d="M14 50v-7M19 52v-7M84 24v-7M89 26v-7"/></g>
+    <g stroke="#6FA554" stroke-width="1.4" stroke-linecap="round">
+      <path d="M14 45l-3-3M14 45l3-3M19 47l-3-3M19 47l3-3M84 19l-3-3M84 19l3-3M89 21l-3-3M89 21l3-3"/></g>
+    <g stroke="#9A7B45" stroke-width="1.6" stroke-linecap="round">
+      <path d="M76 54V36"/><path d="M68 40h16"/></g>
+    <circle cx="76" cy="31" r="3.6" fill="#C7A468"/>
+    <path d="M69 36h14l-2.5 5h-9z" fill="#B08C54"/>
+  `),
+  farm2: () => A(`
+    <defs><linearGradient id="f2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#79AE5C"/><stop offset="1" stop-color="#5C9346"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#f2)"/>
+    <g stroke="#BC9E6C" stroke-width="3" opacity=".85" fill="none">
+      <path d="M-4 18C22 14 46 23 72 17 86 14 96 19 104 16"/>
+      <path d="M-4 34C20 30 44 39 70 33 84 30 96 35 104 32"/>
+      <path d="M-4 50C22 46 46 55 74 49 88 46 98 51 104 48"/></g>
+    <path d="M-4 58C22 54 48 61 74 56 88 53 98 57 104 55" fill="none" stroke="#5FA8D6" stroke-width="4" opacity=".95"/>
+    <path d="M-4 58C22 54 48 61 74 56" fill="none" stroke="#8FCBEA" stroke-width="1.2" opacity=".85"/>
+    <g stroke="#71A856" stroke-width="1.5" stroke-linecap="round">
+      <path d="M8 30v-6M14 32v-6M20 29v-6M26 31v-6M32 30v-6M38 32v-6M44 29v-6"/></g>
+    <path d="M60 30l4-9 14 3 3 9z" fill="#EAF1F4"/>
+    <path d="M60 30h21v12H60z" fill="#F7FAFC"/>
+    <path d="M62 33h17M62 37h17" stroke="#9DB3BF" stroke-width="1.6"/>
+    <path d="M88 22v27h-6" stroke="#C7A468" stroke-width="2" fill="none"/>
+  `),
+  farm3: () => A(`
+    <defs>
+      <linearGradient id="f3" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#4F8B3E"/><stop offset="1" stop-color="#33602C"/></linearGradient>
+      <linearGradient id="t3" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#4A8438"/><stop offset="1" stop-color="#39702E"/></linearGradient>
+    </defs>
+    <rect width="100" height="64" fill="url(#f3)"/>
+    <path d="M-4 64V34C18 28 44 40 66 32 82 27 96 34 104 30V64z" fill="url(#t3)"/>
+    <path d="M-4 64V48C20 42 46 54 70 46 86 41 98 48 104 44V64z" fill="#2E5628"/>
+    <g stroke="#6FA554" stroke-width="1.4" stroke-linecap="round" opacity=".9">
+      <path d="M-4 40C18 34 44 46 66 38 82 33 96 40 104 36" fill="none"/>
+      <path d="M-4 54C20 48 46 60 70 52 86 47 98 54 104 50" fill="none"/></g>
+    <circle cx="13" cy="50" r="5.4" fill="#35662E"/><circle cx="13" cy="50" r="4" fill="#4A8A3A"/>
+    <circle cx="25" cy="52" r="6.2" fill="#2F5C29"/><circle cx="25" cy="52" r="4.6" fill="#458433"/>
+    <circle cx="36" cy="49" r="5" fill="#35662E"/><circle cx="36" cy="49" r="3.7" fill="#4A8A3A"/>
+    <path d="M72 29l6-12h17l6 12z" fill="#C49A5B"/>
+    <path d="M68 29h32v21H68z" fill="#B98C4C"/>
+    <path d="M68 29h32v2.5H68zM68 38h32v2H68z" fill="#A5773D"/>
+    <path d="M80 50V39h6v11z" fill="#8A6330"/>
+    <rect x="86" y="21" width="4" height="6" fill="#8A6330"/>
+    <g><rect x="6" y="28" width="26" height="12" rx="2.4" fill="#94A2AC"/>
+      <rect x="9" y="31" width="11" height="6" rx="1.4" fill="#5F7C90"/>
+      <circle cx="13" cy="42" r="4.4" fill="#3E4A54"/><circle cx="25" cy="42" r="4.4" fill="#3E4A54"/>
+      <rect x="9" y="25" width="20" height="3.4" rx="1.2" fill="#7C8B96"/></g>
+  `),
+
+  /* ---------------- 工业：灰蓝冷色系，逐级加深 ---------------- */
+  ind1: () => A(`
+    <defs><linearGradient id="i1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#C0CBD5"/><stop offset="1" stop-color="#9AA9B6"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#i1)"/>
+    <rect x="0" y="46" width="100" height="18" fill="#8B9AA7"/>
+    <path d="M26 48V34h44v14z" fill="#7C8C99"/>
+    <path d="M26 34l22-7v7z" fill="#93A3B0"/>
+    <path d="M48 27h22v7H48z" fill="#8496A4"/>
+    <rect x="34" y="38" width="7" height="7" fill="#C9D6DF" opacity=".7"/>
+    <rect x="47" y="38" width="7" height="7" fill="#C9D6DF" opacity=".55"/>
+    <rect x="60" y="38" width="7" height="7" fill="#C9D6DF" opacity=".7"/>
+    <rect x="64" y="16" width="4.2" height="16" fill="#66757F"/>
+    <rect x="63" y="14" width="6.2" height="2.6" fill="#5A6873"/>
+    <ellipse cx="66" cy="11" rx="5" ry="3" fill="#D6E0E8" opacity=".38"/>
+    <rect x="30" y="44" width="36" height="3" fill="#5F6E79"/>
+  `),
+  ind2: () => A(`
+    <defs><linearGradient id="i2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#A6B6C4"/><stop offset="1" stop-color="#7D8F9F"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#i2)"/>
+    <rect x="0" y="48" width="100" height="16" fill="#6F8090"/>
+    <g fill="#5A6A78" opacity=".5"><path d="M0 56h100M0 60h100" stroke="#5A6A78" stroke-width="1"/></g>
+    <path d="M16 48V28h44v20z" fill="#6E7F8E"/>
+    <path d="M16 28h44v4H16z" fill="#8496A5"/>
+    <path d="M16 28l-3 5h50l-3-5z" fill="#5E6E7C"/>
+    <g fill="#CBD8E2" opacity=".72">
+      <rect x="21" y="35" width="7" height="6"/><rect x="33" y="35" width="7" height="6"/><rect x="45" y="35" width="7" height="6"/>
+      <rect x="21" y="43" width="7" height="4"/><rect x="33" y="43" width="7" height="4"/><rect x="45" y="43" width="7" height="4"/></g>
+    <rect x="38" y="18" width="4" height="10" fill="#61707C"/>
+    <rect x="50" y="14" width="4" height="14" fill="#61707C"/>
+    <ellipse cx="40" cy="15" rx="5" ry="3" fill="#D6E0E8" opacity=".32"/>
+    <ellipse cx="52" cy="11" rx="6" ry="3.4" fill="#D6E0E8" opacity=".3"/>
+    <rect x="26" y="50" width="24" height="4" fill="#4E5C68"/>
+    <g><rect x="62" y="34" width="16" height="14" rx="2" fill="#8798A6"/>
+      <path d="M62 34h16v3H62z" fill="#9EAEBb"/>
+      <rect x="65" y="38" width="10" height="6" fill="#C6D3DD" opacity=".6"/>
+      <path d="M70 26v8M64 28h12" stroke="#5C6B78" stroke-width="1.6"/></g>
+    <g><rect x="80" y="36" width="12" height="12" rx="1" fill="#93A3B0"/>
+      <path d="M80 39h12M80 43h12" stroke="#71818F" stroke-width="1.2"/>
+      <ellipse cx="86" cy="36" rx="6" ry="2.2" fill="#A9B8C4"/></g>
+    <path d="M58 44h22" stroke="#5E6E7C" stroke-width="2.4"/>
+  `),
+  ind3: () => A(`
+    <defs><linearGradient id="i3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7C8C9C"/><stop offset="1" stop-color="#4E5D6B"/></linearGradient>
+      <linearGradient id="i3b" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#5B6B7A"/><stop offset="1" stop-color="#3C4854"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#i3)"/>
+    <rect x="0" y="50" width="100" height="14" fill="#3F4B57"/>
+    <path d="M0 57h100M0 61h100" stroke="#54626F" stroke-width="1" opacity=".7"/>
+    <!-- 高炉 -->
+    <path d="M30 50V28c0-5 4-7 7-7s7 2 7 7v22z" fill="url(#i3b)"/>
+    <path d="M34 21h6v-7h-6z" fill="#2F3A45"/>
+    <path d="M30 33h14M30 40h14" stroke="#6C7C8A" stroke-width="1.4"/>
+    <path d="M27 50h20v3H27z" fill="#2C3640"/>
+    <!-- 连片重型厂房 -->
+    <rect x="2" y="40" width="24" height="10" fill="#485663"/>
+    <path d="M2 40h24v2.6H2z" fill="#5E6E7C"/>
+    <rect x="6" y="44" width="5" height="4" fill="#B9C8D4" opacity=".55"/>
+    <rect x="15" y="44" width="5" height="4" fill="#B9C8D4" opacity=".45"/>
+    <rect x="48" y="34" width="30" height="16" fill="#54636F"/>
+    <path d="M48 34h30v3H48z" fill="#697986"/>
+    <rect x="52" y="40" width="7" height="6" fill="#C3D1DC" opacity=".5"/>
+    <rect x="63" y="40" width="7" height="6" fill="#C3D1DC" opacity=".4"/>
+    <rect x="76" y="42" width="20" height="8" fill="#43505C"/>
+    <!-- 烟囱群 -->
+    <rect x="8" y="18" width="5" height="22" fill="#39434E"/>
+    <rect x="18" y="26" width="4" height="14" fill="#39434E"/>
+    <rect x="56" y="12" width="5.4" height="22" fill="#39434E"/>
+    <rect x="70" y="22" width="4.4" height="12" fill="#39434E"/>
+    <ellipse cx="59" cy="9" rx="8" ry="3.6" fill="#CBD8E2" opacity=".26"/>
+    <ellipse cx="10" cy="15" rx="7" ry="3.2" fill="#CBD8E2" opacity=".22"/>
+    <ellipse cx="20" cy="23" rx="5" ry="2.6" fill="#CBD8E2" opacity=".18"/>
+    <!-- 管线 -->
+    <g stroke="#8B9AA7" stroke-width="1.6" fill="none" opacity=".9">
+      <path d="M27 44h21M44 50V38h-8M78 46h22"/><path d="M86 46V30h10"/></g>
+    <circle cx="44" cy="38" r="1.8" fill="#A9B8C4"/><circle cx="86" cy="30" r="1.8" fill="#A9B8C4"/>
+    <!-- 物流卡车 -->
+    <g><rect x="56" y="53" width="15" height="6" fill="#7C8B96"/><rect x="71" y="54.5" width="7" height="4.5" fill="#5C6A76"/>
+      <circle cx="61" cy="60" r="2.2" fill="#232C34"/><circle cx="74" cy="60" r="2.2" fill="#232C34"/></g>
+    <g><rect x="12" y="55" width="13" height="5.4" fill="#6E7D89"/>
+      <circle cx="16" cy="61" r="2" fill="#232C34"/><circle cx="22" cy="61" r="2" fill="#232C34"/></g>
+  `),
+
+  /* ---------------- 服务业：暖橙 → 浅紫，逐级提亮 ---------------- */
+  srv1: () => A(`
+    <defs><linearGradient id="s1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F0C79E"/><stop offset="1" stop-color="#E0A876"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#s1)"/>
+    <rect x="0" y="48" width="100" height="16" fill="#D69C6E"/>
+    <rect x="28" y="30" width="40" height="19" fill="#F6E2CE"/>
+    <path d="M25 30h46l-4.5-8H29.5z" fill="#C97F4E"/>
+    <rect x="33" y="35" width="15" height="11" fill="#B7D8E4"/>
+    <rect x="33" y="35" width="15" height="11" fill="none" stroke="#FFF4E6" stroke-width="1.4"/>
+    <path d="M40.5 35v11" stroke="#FFF4E6" stroke-width="1.2"/>
+    <rect x="54" y="35" width="9" height="14" fill="#C08A5C"/>
+    <circle cx="61" cy="42" r="1.2" fill="#F6E2CE"/>
+    <rect x="31" y="26" width="9" height="3.4" rx="1" fill="#E2A05A"/>
+    <circle cx="35" cy="25" r="1.6" fill="#F2C078"/>
+    <!-- 公交站牌 -->
+    <path d="M79 48V28" stroke="#8B6E52" stroke-width="2"/>
+    <rect x="72" y="17" width="15" height="11" rx="2" fill="#F5E7D6"/>
+    <rect x="74" y="20" width="11" height="2.2" fill="#4A9EE8" opacity=".8"/>
+    <rect x="74" y="24" width="7" height="1.8" fill="#B79A7C"/>
+  `),
+  srv2: () => A(`
+    <defs><linearGradient id="s2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F0B27A"/><stop offset="1" stop-color="#DE9457"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#s2)"/>
+    <rect x="0" y="52" width="100" height="12" fill="#CE8A56"/>
+    <path d="M0 58h100" stroke="#E0A874" stroke-width="1.4" opacity=".7"/>
+    <!-- 多层楼宇 -->
+    <rect x="5" y="22" width="21" height="31" fill="#F6E3D1"/>
+    <rect x="5" y="22" width="21" height="3.4" fill="#FFEFE0"/>
+    <g fill="#8FBEDC" opacity=".9">
+      <rect x="9" y="29" width="4.6" height="4.6"/><rect x="17" y="29" width="4.6" height="4.6"/>
+      <rect x="9" y="37" width="4.6" height="4.6"/><rect x="17" y="37" width="4.6" height="4.6"/>
+      <rect x="9" y="45" width="4.6" height="4.2"/><rect x="17" y="45" width="4.6" height="4.2"/></g>
+    <rect x="28" y="14" width="15" height="39" fill="#EED7C1"/>
+    <g fill="#9CC6E0" opacity=".85">
+      <rect x="31" y="19" width="4" height="5"/><rect x="37" y="19" width="4" height="5"/>
+      <rect x="31" y="28" width="4" height="5"/><rect x="37" y="28" width="4" height="5"/>
+      <rect x="31" y="37" width="4" height="5"/><rect x="37" y="37" width="4" height="5"/></g>
+    <!-- 购物中心 -->
+    <rect x="45" y="34" width="51" height="19" fill="#F2DCC6"/>
+    <path d="M45 34h51v4.6H45z" fill="#D98F5A"/>
+    <g fill="#CFE4EF">
+      <rect x="49" y="42" width="9" height="8"/><rect x="61" y="42" width="9" height="8"/>
+      <rect x="73" y="42" width="9" height="8"/><rect x="85" y="42" width="8" height="8"/></g>
+    <rect x="58" y="24" width="26" height="10" fill="#FFF0E0"/>
+    <rect x="61" y="27" width="20" height="4" rx="1.6" fill="#E2703F"/>
+    <rect x="64" y="28.2" width="14" height="1.6" fill="#FFE6D2"/>
+    <!-- 街区雨棚 -->
+    <path d="M92 34l8-5v6z" fill="#C97F4E"/>
+  `),
+  srv3: () => A(`
+    <defs>
+      <linearGradient id="s3" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#E9A472"/><stop offset="1" stop-color="#C87FB0"/></linearGradient>
+      <linearGradient id="g3" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#8FD2F2"/><stop offset="1" stop-color="#B79CF0"/></linearGradient>
+    </defs>
+    <rect width="100" height="64" fill="url(#s3)"/>
+    <!-- 远景塔楼 -->
+    <g opacity=".55" fill="#B98DBE">
+      <rect x="0" y="26" width="12" height="30"/><rect x="88" y="20" width="12" height="36"/></g>
+    <!-- 主塔楼：玻璃幕墙 -->
+    <rect x="14" y="10" width="19" height="46" rx="1.6" fill="#6E86A8"/>
+    <rect x="15.4" y="11.5" width="16.2" height="43" fill="url(#g3)" opacity=".88"/>
+    <g stroke="#5D7396" stroke-width="1" opacity=".55">
+      <path d="M15.4 18h16.2M15.4 25h16.2M15.4 32h16.2M15.4 39h16.2M15.4 46h16.2"/>
+      <path d="M22 11.5v43M28 11.5v43"/></g>
+    <path d="M14 10h19l-2.4-4h-14z" fill="#8FA6C4"/>
+    <!-- 第二塔 -->
+    <rect x="36" y="20" width="15" height="36" rx="1.4" fill="#7A90AC"/>
+    <rect x="37.2" y="21.4" width="12.6" height="33" fill="#A8CBE8" opacity=".85"/>
+    <g stroke="#6A80A0" stroke-width="1" opacity=".5"><path d="M37.2 28h12.6M37.2 35h12.6M37.2 42h12.6M37.2 49h12.6"/><path d="M43.5 21.4v33"/></g>
+    <!-- 酒店 -->
+    <rect x="54" y="26" width="18" height="30" rx="1.4" fill="#F0DCC6"/>
+    <rect x="54" y="26" width="18" height="3.6" fill="#D98F5A"/>
+    <g fill="#F6C77E" opacity=".92">
+      <rect x="57" y="33" width="3.4" height="4"/><rect x="63" y="33" width="3.4" height="4"/><rect x="69" y="33" width="2.4" height="4"/>
+      <rect x="57" y="40" width="3.4" height="4"/><rect x="63" y="40" width="3.4" height="4"/><rect x="69" y="40" width="2.4" height="4"/>
+      <rect x="57" y="47" width="3.4" height="4"/><rect x="63" y="47" width="3.4" height="4"/></g>
+    <path d="M63 26v-6h5v6z" fill="#E0A876"/>
+    <!-- 霓虹发光线 -->
+    <g fill="none" stroke-linecap="round" opacity=".95">
+      <path d="M14 15h19" stroke="#7FE6FF" stroke-width="1.6"/>
+      <path d="M36 58h15" stroke="#FF9AE8" stroke-width="1.6"/>
+      <path d="M54 30h18" stroke="#FFD27F" stroke-width="1.4"/>
+      <path d="M74 34h22" stroke="#8FE7FF" stroke-width="1.4"/></g>
+    <!-- 道路枢纽 -->
+    <rect x="0" y="56" width="100" height="8" fill="#5B6172"/>
+    <path d="M0 60h100" stroke="#E8EDF2" stroke-width="1.2" stroke-dasharray="7 7" opacity=".6"/>
+    <path d="M74 40v20" stroke="#5B6172" stroke-width="8"/>
+    <path d="M74 42v18" stroke="#E8EDF2" stroke-width="1.1" stroke-dasharray="5 6" opacity=".55"/>
+    <!-- 小车 -->
+    <g fill="#F2F6FA" opacity=".92">
+      <rect x="18" y="58.4" width="8" height="3.4" rx="1.4"/><rect x="44" y="58.4" width="7" height="3.2" rx="1.4"/>
+      <rect x="86" y="58.4" width="8" height="3.4" rx="1.4"/></g>
+  `),
+
+  /* ---------------- 资源：棕褐大地色系，逐级丰富 ---------------- */
+  res1: () => A(`
+    <defs><linearGradient id="r1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#C9AC86"/><stop offset="1" stop-color="#AE8F68"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#r1)"/>
+    <g fill="#8A7250" opacity=".8">
+      <path d="M20 46l7-6 8 6z"/><path d="M42 44l6-5 7 5z"/><path d="M64 48l8-6 9 6z"/></g>
+    <g fill="#9E8460">
+      <path d="M24 30l6-5 7 5-3 6h-8z"/><path d="M56 36l5-4 6 4-2.6 5h-6.4z"/></g>
+    <g fill="#DCC7A8" opacity=".8">
+      <path d="M24 30l6-5 3 5-4 1.4z"/><path d="M56 36l5-4 3 4-4 1z"/></g>
+    <g fill="#8F7752" opacity=".75">
+      <circle cx="38" cy="50" r="1.6"/><circle cx="47" cy="54" r="1.3"/><circle cx="30" cy="56" r="1.4"/>
+      <circle cx="72" cy="34" r="1.5"/><circle cx="80" cy="42" r="1.2"/><circle cx="16" cy="40" r="1.3"/></g>
+    <path d="M12 58c8-3 16-2 23 1" fill="none" stroke="#8F7752" stroke-width="1.4" opacity=".7"/>
+    <path d="M6 40c4 1 7 3 8 6M88 32c-4 1-7 3-8 6" fill="none" stroke="#8F7752" stroke-width="1.2" opacity=".6"/>
+  `),
+  res2: () => A(`
+    <defs><linearGradient id="r2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#B08F63"/><stop offset="1" stop-color="#8E7148"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#r2)"/>
+    <!-- 露天矿坑 -->
+    <ellipse cx="42" cy="40" rx="28" ry="15" fill="#6B5533"/>
+    <ellipse cx="42" cy="39" rx="22" ry="11" fill="#574327"/>
+    <ellipse cx="42" cy="38" rx="14" ry="6.6" fill="#40311C"/>
+    <path d="M26 34c6-3 14-4 22-2" fill="none" stroke="#8B7250" stroke-width="1.6" opacity=".7"/>
+    <!-- 车辙 -->
+    <g stroke="#6E5735" stroke-width="2.2" fill="none" opacity=".68">
+      <path d="M70 58c-4-8-4-14-2-20M76 58c-4-8-4-14-2-20"/></g>
+    <!-- 矿石料堆 -->
+    <path d="M78 50l8-12 9 12z" fill="#7C6640"/>
+    <path d="M80 50l6-9 6 9z" fill="#9A8258"/>
+    <g fill="#C6AE86" opacity=".8"><path d="M84 44l3-3 3 3z"/><path d="M88 48l2.6-2.4 2.4 2.4z"/></g>
+    <!-- 挖掘机 -->
+    <g><rect x="6" y="42" width="18" height="9" rx="1.6" fill="#D9A33F"/>
+      <path d="M6 42h18v2.6H6z" fill="#EFC162"/>
+      <rect x="10" y="35" width="10" height="7" rx="1.4" fill="#C48F33"/>
+      <path d="M12 36h6v4h-6z" fill="#A9C6D8" opacity=".8"/>
+      <path d="M20 38l14 5" stroke="#C48F33" stroke-width="3" stroke-linecap="round"/>
+      <path d="M32 42l5 1.6-2 5.2-4-1.6z" fill="#8C7A5A"/>
+      <path d="M6 51V46h4v5M20 51V46h4v5" fill="none" stroke="#5A4A2E" stroke-width="0"/>
+      <rect x="4" y="51" width="22" height="3.4" rx="1.4" fill="#4E4230"/></g>
+    <!-- 简易木质支架 -->
+    <g stroke="#8A6E44" stroke-width="2.2"><path d="M60 50V30M72 50V30M60 34h12M60 42h12"/></g>
+  `),
+  res3: () => A(`
+    <defs><linearGradient id="r3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8A6E47"/><stop offset="1" stop-color="#604B2C"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#r3)"/>
+    <!-- 分层矿坑 -->
+    <path d="M0 64V40c16-4 34-4 52 0 14 3 32 3 48-1v25z" fill="#6E5936"/>
+    <path d="M0 64V48c18-3 36-3 54 1 14 3 30 3 46 0v15z" fill="#544326"/>
+    <path d="M0 64v-9c20-2 40-1 58 2 12 2 28 2 42 0v7z" fill="#3B2F1C"/>
+    <g stroke="#8B7250" stroke-width="1.3" opacity=".6" fill="none">
+      <path d="M2 44c16-3 34-3 50 1M2 52c18-2 36-2 54 2"/></g>
+    <!-- 碎石料塔 -->
+    <path d="M62 40V20h14v20z" fill="#7A6644"/>
+    <path d="M60 20h18l-3-6H63z" fill="#8E7955"/>
+    <g stroke="#5E4C31" stroke-width="1.2"><path d="M66 20v20M72 20v20M62 27h14M62 34h14"/></g>
+    <path d="M62 40h14v3H62z" fill="#4C3D25"/>
+    <g fill="#B39B73" opacity=".85"><path d="M60 46l4-4 4 4z"/><path d="M68 48l3.4-3.4 3.4 3.4z"/><path d="M56 50l3-3 3 3z"/></g>
+    <!-- 矿石传送带 -->
+    <path d="M40 34l24 8" stroke="#8E7955" stroke-width="4" stroke-linecap="round"/>
+    <path d="M40 34l24 8" stroke="#5E4C31" stroke-width="1" stroke-dasharray="3 3"/>
+    <g stroke="#8E7955" stroke-width="2"><path d="M46 38v12M58 42v8"/></g>
+    <!-- 大型采矿机械 -->
+    <g><rect x="4" y="26" width="24" height="11" rx="1.6" fill="#C9973A"/>
+      <path d="M4 26h24v3H4z" fill="#E2B65C"/>
+      <rect x="9" y="18" width="13" height="8" rx="1.4" fill="#B48531"/>
+      <path d="M11 19h9v5h-9z" fill="#A9C6D8" opacity=".85"/>
+      <path d="M28 30l12 6" stroke="#B48531" stroke-width="3.4" stroke-linecap="round"/>
+      <path d="M38 34l6 2.4-2.6 6.6-5-2.2z" fill="#7E6C4E"/>
+      <rect x="2" y="37" width="28" height="4" rx="1.6" fill="#4A3D28"/>
+      <circle cx="8" cy="43" r="3" fill="#2F2718"/><circle cx="24" cy="43" r="3" fill="#2F2718"/></g>
+    <!-- 临时板房 -->
+    <g><rect x="76" y="46" width="22" height="10" fill="#9C875F"/>
+      <path d="M74 46h26l-3-5H77z" fill="#7E6C4E"/>
+      <rect x="80" y="49" width="5" height="4" fill="#CBB891" opacity=".8"/>
+      <rect x="88" y="49" width="5" height="4" fill="#CBB891" opacity=".7"/></g>
+    <g stroke="#6E5C3C" stroke-width="1.6" opacity=".8" fill="none">
+      <path d="M84 56v6M92 56v6"/></g>
+  `),
+
+  /* ---------------- 荒地 / 装饰用图元 ---------------- */
+  wild: () => A(`
+    <rect width="100" height="64" fill="#5E6A70"/>
+    <path d="M0 44c16-4 34-4 52 0 14 3 32 3 48-1v21H0z" fill="#525E64"/>
+    <g fill="#69767C" opacity=".9"><path d="M18 42l6-5 7 5-3 5h-7z"/><path d="M60 38l5-4 6 4-3 5h-5z"/></g>
+    <path d="M70 52c4-6 12-8 18-5" fill="none" stroke="#4A555B" stroke-width="1.4"/>
+  `),
+  decor: () => A(`
+    <defs><linearGradient id="dc" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4C6B5A"/><stop offset="1" stop-color="#3A5548"/></linearGradient></defs>
+    <rect width="100" height="64" fill="url(#dc)"/>
+    <circle cx="24" cy="42" r="9" fill="#3F6B4C"/><circle cx="24" cy="42" r="6" fill="#4E8159"/>
+    <circle cx="42" cy="46" r="7" fill="#3A6146"/><circle cx="42" cy="46" r="4.6" fill="#4A7A55"/>
+    <circle cx="62" cy="40" r="10" fill="#3F6B4C"/><circle cx="62" cy="40" r="6.6" fill="#52875C"/>
+    <circle cx="80" cy="47" r="7.4" fill="#3A6146"/><circle cx="80" cy="47" r="5" fill="#4C7E58"/>
+    <path d="M0 56h100" stroke="#8FCBEA" stroke-width="5" opacity=".5"/>
+  `),
+  locked: () => A(`
+    <rect width="100" height="64" fill="#AEB9C1"/>
+    <rect x="0" y="46" width="100" height="18" fill="#9DA9B2"/>
+    <g stroke="#8B98A2" stroke-width="1" opacity=".8"><path d="M0 52h100M0 58h100"/></g>
+  `)
+};
+
+/* ============================================================
+   地块数据：3 行 × 4 列 = 12 格
+   覆盖六种地块状态 + 装饰地块
+   ============================================================ */
+const TILES = [
+  { name:'东湾农场',   kind:'farm', lv:1, art:'farm1', type:'农业', state:'normal',
+    goods:'粮食', price:62, plan:'42 单位',
+    bars:[{v:72,c:'#4FBF7F'},{v:38,c:'#4A9EE8'}] },
+
+  { name:'协作农场',   kind:'farm', lv:2, art:'farm2', type:'农业', state:'building',
+    goods:'粮食', price:62, plan:'—', left:2, pct:38,
+    bars:[{v:20,c:'#4A9EE8'}] },
+
+  { name:'梯田庄园',   kind:'farm', lv:3, art:'farm3', type:'农业', state:'halted',
+    goods:'粮食', price:62, plan:'96 单位', issue:'缺原料 D · 停工', issueType:'warn',
+    bars:[{v:88,c:'#4FBF7F'},{v:12,c:'#E8A93C'}] },
+
+  { name:'北岭荒块',   kind:'wild', lv:0, art:'wild', type:'未开发', state:'wild',
+    goods:'粮食 / 矿石', price:'—', plan:'可开发',
+    bars:[] },
+
+  { name:'湾区轻工厂', kind:'ind', lv:1, art:'ind1', type:'工业', state:'normal',
+    goods:'钢材', price:148, plan:'30 单位',
+    bars:[{v:64,c:'#4FBF7F'},{v:52,c:'#4A9EE8'}] },
+
+  { name:'联合制造园', kind:'ind', lv:2, art:'ind2', type:'工业', state:'normal',
+    goods:'钢材 · 零件', price:148, plan:'64 单位',
+    bars:[{v:80,c:'#4FBF7F'},{v:44,c:'#4A9EE8'}] },
+
+  { name:'重工高炉区', kind:'ind', lv:3, art:'ind3', type:'工业', state:'halted',
+    goods:'钢材 · 机械', price:148, plan:'128 单位', issue:'维护费未满足', issueType:'warn',
+    bars:[{v:92,c:'#4FBF7F'},{v:26,c:'#E8A93C'}] },
+
+  { name:'西港邻地',   kind:'locked', lv:0, art:'locked', type:'外地块', state:'locked',
+    goods:'—', price:'挂牌 ¥26,000', plan:'可购买', bars:[] },
+
+  { name:'中央商铺街', kind:'srv', lv:1, art:'srv1', type:'服务业', state:'normal',
+    goods:'消费品', price:96, plan:'38 单位',
+    bars:[{v:58,c:'#4FBF7F'},{v:66,c:'#4A9EE8'}] },
+
+  { name:'都会综合体', kind:'srv', lv:2, art:'srv2', type:'服务业', state:'normal',
+    goods:'消费品 · 服务', price:96, plan:'82 单位',
+    bars:[{v:74,c:'#4FBF7F'},{v:71,c:'#4A9EE8'}] },
+
+  { name:'金融塔群',   kind:'srv', lv:3, art:'srv3', type:'服务业', state:'normal',
+    goods:'服务 · 金融', price:'—', plan:'156 单位',
+    bars:[{v:84,c:'#4FBF7F'},{v:90,c:'#4A9EE8'}] },
+
+  { name:'南坡矿点',   kind:'res', lv:1, art:'res1', type:'资源', state:'normal',
+    goods:'矿石', price:74, plan:'26 单位',
+    bars:[{v:46,c:'#4FBF7F'},{v:30,c:'#4A9EE8'}] }
+];
+
+/* 状态 7：纯装饰地块，不可点，单独排成右侧一列 */
+const DECOR = [
+  { name:'远景绿地', art:'decor', state:'decor' },
+  { name:'河口湿地', art:'decor', state:'decor', flip:true },
+  { name:'防护林带', art:'decor', state:'decor' }
+];
+
+const LEGEND = [
+  { c:'#88B667', t:'农业（绿系）' },
+  { c:'#9AA9B6', t:'工业（灰蓝）' },
+  { c:'#EFA96F', t:'服务业（暖橙→浅紫）' },
+  { c:'#AE8F68', t:'资源（棕褐）' },
+  { c:'#8A98A2', t:'荒地 / 外地块', gray:true },
+  { c:'#E8A93C', t:'停工警告', warn:true }
+];
+
+/* ============================================================
+   渲染
+   ============================================================ */
+const grid = document.getElementById('grid');
+const tooltip = document.getElementById('tooltip');
+const stateClass = {
+  normal:'is-normal', building:'is-building', halted:'is-halted',
+  wild:'is-wild', locked:'is-locked', decor:'is-decor'
+};
+
+const svgLock = `<svg viewBox="0 0 24 24" fill="none" stroke="#2A333B" stroke-width="1.7" stroke-linejoin="round">
+  <rect x="5" y="10.5" width="14" height="10" rx="2.4"/><path d="M8.4 10.5V8a3.6 3.6 0 0 1 7.2 0v2.5"/>
+  <circle cx="12" cy="15.4" r="1.5"/></svg>`;
+
+const svgWarn = `<svg viewBox="0 0 24 20">
+  <path d="M12 1.6 22.4 19H1.6z" fill="#E8A93C" stroke="#8A5F12" stroke-width="1"/>
+  <path d="M12 7.4v5.4" stroke="#3A2708" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="12" cy="16" r="1.3" fill="#3A2708"/></svg>`;
+
+function makeTile(t, i, isDecor) {
+  const cell = document.createElement('div');
+  const clickable = !(t.state === 'decor');
+  cell.className = 'tile ' + (stateClass[t.state] || 'is-normal')
+                 + (clickable ? ' is-clickable' : '');
+  cell.tabIndex = clickable ? 0 : -1;
+  cell.dataset.idx = i;
+  cell.setAttribute('role', clickable ? 'button' : 'img');
+  cell.setAttribute('aria-label', t.name + (clickable ? '，可操作地块' : '，装饰地块'));
+
+  let extra = '';
+  if (t.state === 'building') {
+    extra += `<div class="build-veil"><div class="spinner"></div><div>建设中 · 剩 ${t.left} 季</div></div>
+              <div class="build-progress"><i style="width:${t.pct}%"></i></div>
+              <div class="build-pct">${t.pct}%</div>`;
+  }
+  if (t.state === 'halted') {
+    extra += `<div class="warn-badge">${svgWarn}</div><div class="halt-note">${t.issue || '停工'}</div>`;
+  }
+  if (t.state === 'wild') extra += `<div class="plus">＋</div>`;
+  if (t.state === 'locked') {
+    extra += `<div class="lock-veil">${svgLock}<span>暂不属于你</span></div>
+              <div class="lock-price">${t.price}</div>`;
+  }
+
+  const bars = (t.bars || []).map(b =>
+    `<div class="bar"><i style="width:${b.v}%;background:${b.c}"></i></div>`).join('');
+
+  const lvMark = t.kind === 'farm' ? '农' : t.kind === 'ind' ? '工'
+               : t.kind === 'srv' ? '商' : t.kind === 'res' ? '矿' : '—';
+  const tag = t.state === 'decor'
+    ? `<div class="tile-tag"><span>${t.name}</span><span class="lv">装饰</span></div>`
+    : (t.state === 'wild' || t.state === 'locked'
+        ? ''
+        : `<div class="tile-tag"><span>${t.name}</span><span class="lv">${lvMark}${t.lv}</span></div>`);
+
+  cell.innerHTML = `<div class="tile-inner">${t.flip ? `<div class="art-flip">${ART[t.art]()}</div>` : ART[t.art]()}${extra}</div>
+                    <div class="tile-bars">${bars}</div>${tag}`;
+
+  if (clickable) {
+    cell.addEventListener('mouseenter', () => showTip(t, cell));
+    cell.addEventListener('mousemove', moveTip);
+    cell.addEventListener('mouseleave', hideTip);
+    cell.addEventListener('focus', () => {
+      showTip(t, cell);
+      const r = cell.getBoundingClientRect();
+      placeTip(r.left + r.width / 2, r.top);
+    });
+    cell.addEventListener('blur', hideTip);
+    cell.addEventListener('click', () => select(cell, t));
+    cell.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(cell, t); }
+    });
+  }
+  return cell;
+}
+
+TILES.forEach((t, i) => grid.appendChild(makeTile(t, i, false)));
+/* 状态 7：装饰性地块，排成右侧一列，不可点、不弹浮层 */
+const decoCol = document.getElementById('deco-col');
+DECOR.forEach((t, i) => decoCol.appendChild(makeTile({ ...t, bars: [] }, 'd' + i, true)));
+
+/* 图例 */
+const legend = document.getElementById('legend');
+LEGEND.forEach(l => {
+  const el = document.createElement('span');
+  el.className = 'lg-item';
+  const sw = l.gray ? 'background:linear-gradient(180deg,#B9C3CB,#9FAAB3)'
+           : l.warn ? 'background:#E8A93C'
+           : `background:${l.c}`;
+  el.innerHTML = `<i class="sw" style="${sw}"></i>${l.t}`;
+  legend.appendChild(el);
+});
+
+/* ============================================================
+   浮层（tooltip）
+   ============================================================ */
+function tipHTML(t) {
+  const typeText = t.state === 'wild' ? '未开发地块'
+    : t.state === 'locked' ? '外地块 · 可购买'
+    : t.state === 'decor' ? '景观地块'
+    : `${t.type} ${t.lv} 级`;
+  let rows = '';
+  if (t.state === 'wild' || t.state === 'locked' || t.state === 'decor') {
+    rows = `<div class="tt-row"><span>可生产</span><span class="v">${t.goods || '—'}</span></div>`;
+  } else {
+    rows = `<div class="tt-row"><span>可生产商品</span><span class="v">${t.goods}</span></div>
+            <div class="tt-row"><span>当前单价</span><span class="v">${typeof t.price === 'number' ? '¥ ' + t.price : t.price}</span></div>
+            <div class="tt-row"><span>本季计划产量</span><span class="v">${t.plan}</span></div>`;
+  }
+  let foot = '';
+  if (t.issue) {
+    foot = `<div class="tt-sep"></div>
+      <div class="tt-issue ${t.issueType === 'warn' ? 'warn' : 'bad'}"><i class="tt-dot"></i>${t.issue}</div>`;
+  } else if (t.state === 'building') {
+    foot = `<div class="tt-sep"></div><div class="tt-issue ok"><i class="tt-dot"></i>建设中 · 剩 ${t.left} 季（${t.pct}%）</div>`;
+  } else if (t.state === 'normal') {
+    foot = `<div class="tt-sep"></div><div class="tt-issue ok"><i class="tt-dot"></i>运行正常</div>`;
+  } else if (t.state === 'wild') {
+    foot = `<div class="tt-sep"></div><div class="tt-issue ok"><i class="tt-dot"></i>点击开发此地块</div>`;
+  } else if (t.state === 'locked') {
+    foot = `<div class="tt-sep"></div><div class="tt-issue warn"><i class="tt-dot"></i>需向邻邦购买：${t.price}</div>`;
+  }
+  return `<div class="tt-head"><span class="nm">${t.name}</span><span class="ty">${typeText}</span></div>
+          ${rows}${foot}`;
+}
+function showTip(t, cell) {
+  tooltip.innerHTML = tipHTML(t);
+  tooltip.classList.add('show');
+  const r = cell.getBoundingClientRect();
+  placeTip(r.right + 12, r.top + 8);
+}
+function moveTip(e) { placeTip(e.clientX + 18, e.clientY + 14); }
+function placeTip(x, y) {
+  tooltip.style.left = '0px'; tooltip.style.top = '0px';
+  const w = tooltip.offsetWidth || 250, h = tooltip.offsetHeight || 150;
+  let nx = x, ny = y;
+  if (nx + w > window.innerWidth - 12) nx = window.innerWidth - w - 12;
+  if (ny + h > window.innerHeight - 12) ny = window.innerHeight - h - 12;
+  if (nx < 8) nx = 8; if (ny < 8) ny = 8;
+  tooltip.style.left = nx + 'px'; tooltip.style.top = ny + 'px';
+}
+function hideTip(){ tooltip.classList.remove('show'); }
+
+/* 选择地块 */
+let selected = null;
+function select(cell, t) {
+  if (selected) selected.classList.remove('is-selected');
+  cell.classList.add('is-selected');
+  selected = cell;
+  if (t.state === 'wild') toast(`已选中荒地「${t.name}」：可投入开发`);
+  else if (t.state === 'locked') toast(`「${t.name}」为外地块，需 ${t.price} 收购`);
+  else toast(`已选中「${t.name}」（${t.type} ${t.lv} 级）`);
+}
+
+/* ============================================================
+   顶栏按钮 / 侧栏
+   ============================================================ */
+const sidebar  = document.getElementById('sidebar');
+const bodyEl   = document.querySelector('.body');
+const handleEl = document.getElementById('sb-handle');
+const panels = { market: document.getElementById('panel-market'), people: document.getElementById('panel-people') };
+const btnMarket = document.getElementById('btn-market');
+const btnPeople = document.getElementById('btn-people');
+
+function setCollapsed(closed) {
+  sidebar.classList.toggle('collapsed', closed);
+  bodyEl.classList.toggle('sb-closed', closed);
+  handleEl.title = closed ? '展开侧栏' : '收起侧栏';
+}
+
+function openPanel(key) {
+  setCollapsed(false);
+  Object.entries(panels).forEach(([k, el]) => el.classList.toggle('active', k === key));
+  btnMarket.style.borderColor = key === 'market' ? 'var(--accent)' : '';
+  btnPeople.style.borderColor = key === 'people' ? 'var(--accent)' : '';
+}
+btnMarket.addEventListener('click', () => openPanel('market'));
+btnPeople.addEventListener('click', () => openPanel('people'));
+handleEl.addEventListener('click', () => setCollapsed(!sidebar.classList.contains('collapsed')));
+handleEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setCollapsed(!sidebar.classList.contains('collapsed')); }
+});
+document.getElementById('btn-report').addEventListener('click', () => toast('结算报告：本季 ＋¥8,420 · 收入 ¥18,600 / 支出 ¥10,180'));
+openPanel('people');
+
+/* Toast */
+let toastTimer = null;
+const toastEl = document.getElementById('toast');
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2200);
+}
+
+/* 初始选中一块地，展示选中态 */
+grid.children[4] && grid.children[4].classList.add('is-selected');
+selected = grid.children[4] || null;
+</script>
+</body>
+</html>
