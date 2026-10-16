@@ -479,7 +479,12 @@ class WorldState:
     quarter: int = 1
     rows: int = 10                          # 地图行数（已拍板 10×10）
     cols: int = 10                          # 地图列数
-    total_quarters: int = 40                # 一局总季数（交接书建议 40）
+    # 一局总季数。✅ 2026-10-16 用户拍板：**20 季**（《规则基线》§11.9.2）。
+    # ⚠️ 这里只是 dataclass 的**兜底缺省值**，真实值由 config 的
+    #    `world.total_quarters` 提供（`Config.new_world()` 会覆盖它）。
+    #    曾长期写着 40（旧交接书建议），与已拍板的 20 脱钩——本轮对齐。
+    #    改这个数＝改规则，先改基线 §11.9.2 再改这里。
+    total_quarters: int = 20
     phase: WorldPhase = WorldPhase.SETUP
 
     market: dict[str, MarketCurve] = field(default_factory=dict)

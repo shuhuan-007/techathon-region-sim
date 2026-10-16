@@ -47,10 +47,12 @@ SEASON_EN: tuple[str, ...] = ("Spring", "Summer", "Autumn", "Winter")
 START_YEAR = 1
 
 # 一局默认总季数。
-# ⚠️ 待拍板：交接书 §五.8 建议 40 季（高技术路线需要 14 季工期）。
-#    这里是**缺省展示值**，真实值应由 config 提供；
-#    未配置时用它兜底，仅用于 UI 显示"第 7 / 40 季"。
-DEFAULT_TOTAL_QUARTERS = 40
+# ✅ 2026-10-16 用户拍板：**20 季**（《规则基线》§11.9.2）。
+#    ⚠️ 高技术路线总工期 14 季，20 季局里"开局即投"才勉强走完——**已知取舍，不再复议**。
+#    这里是**缺省展示值**：真实值由 config 的 `world.total_quarters` 提供
+#    （`Config.new_world()` 会把它写进 `WorldState`）。只有拿不到 config 时
+#    才用它兜底，仅用于 UI 显示"第 7 / 20 季"。
+DEFAULT_TOTAL_QUARTERS = 20
 
 
 def season_of(quarter: int) -> str:

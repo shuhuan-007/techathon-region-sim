@@ -481,6 +481,195 @@ def test_happiness_is_piecewise_linear():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 九、★ 已拍板的一局参数（2026-10-16 用户拍板）—— 钉住配置，防止被改回去
+# ══════════════════════════════════════════════════════════════════
+#
+# 这三条**规则上早已定**（基线 §11.9.1 / §11.9.2 / §3.6），
+# 但 `config.json` 曾长期与它们不一致（40 / null / null）。
+# 本轮（2026-10-16 晚）已把配置对齐，这里加测试**钉住**，
+# 否则以后有人改回 `null` 或 40，不会有任何东西报警。
+
+
+def test_total_quarters_is_20():
+    """★ 一局 **20 季**（基线 §11.9.2，2026-10-16 用户再次确认）。
+
+    ⚠️ **已知取舍**：高技术路线总工期 14 季（§5.2），20 季局里
+       只有"开局即投"才勉强走得完。这条**明确记录为已知取舍、不再复议**——
+       所以**不要**为了让高技术路线跑得舒服而把 20 改回 40。
+    """
+    cfg = load_config()
+    assert cfg.total_quarters == 20, (
+        f"一局总季数应为 20（基线 §11.9.2），实得 {cfg.total_quarters}。\n"
+        f"  ⚠️ 若确实要改这个数，请先改《规则基线》§11.9.2，再改 config。"
+    )
+
+    # 世界状态也要跟着（new_world 会把 config 的值写进去，别让两处脱钩）
+    world = cfg.new_world()
+    assert world.total_quarters == 20, (
+        f"WorldState 的总季数应与 config 一致，实得 {world.total_quarters}"
+    )
+
+    # clock 的兜底缺省值同样是 20（UI 画"第 7 / 20 季"用）
+    from engine.clock import DEFAULT_TOTAL_QUARTERS
+    assert DEFAULT_TOTAL_QUARTERS == 20, (
+        f"clock.DEFAULT_TOTAL_QUARTERS 应为 20，实得 {DEFAULT_TOTAL_QUARTERS}"
+    )
+
+    # ★ `WorldState` 的 dataclass 兜底缺省值也必须是 20。
+    # ⚠️ 这里曾漏了一处：config 与 clock 都改成 20 了，
+    #    `models.WorldState.total_quarters` 却还写着 40（旧交接书建议）。
+    #    直接 `WorldState()` 造出来的世界会以为一局有 40 季——
+    #    `new_world()` 会覆盖它，所以正常路径看不出来，属于"潜伏的不一致"。
+    from engine.models import WorldState
+    assert WorldState().total_quarters == 20, (
+        f"models.WorldState 的缺省总季数应为 20，实得 {WorldState().total_quarters}。\n"
+        f"  ⚠️ 缺省值不能与 config/基线脱钩（正常路径被 new_world 覆盖，看不出来）。"
+    )
+
+
+def test_opening_cash_is_1200():
+    """★ 开局现金 **1200**（基线 §11.9.1，队友 v1.1 交付已采纳）。
+
+    ⚠️ **不得把 1200 当 M1 输入**：M1 夹具按**各 1000**（那是测试题设）。
+       本测试只验"正式开局值"，不碰 M1 的表。
+    """
+    cfg = load_config()
+    assert cfg.opening_cash is not None, (
+        "开局现金不能是 null —— 那会让 new_player() 直接报错，一局开不了。\n"
+        "  基线 §11.9.1 已定案 1200。"
+    )
+    assert abs(cfg.opening_cash - 1200) < TOL, (
+        f"开局现金应为 1200（基线 §11.9.1），实得 {cfg.opening_cash}"
+    )
+
+    # 真的能造出一个开局玩家（之前 opening_cash=None 时这里会抛 ConfigError）
+    player = cfg.new_player("p1")
+    assert abs(player.cash - 1200) < TOL, f"开局玩家现金应为 1200，实得 {player.cash}"
+
+
+def test_service_adjacency_is_capped_at_40pct():
+    """★ 服务邻接**封顶 +40%**（基线 §3.6，2026-10-16 晚拍板）。
+
+    这是本轮修掉的一个**真实配置漏洞**：`service_cap` 曾是 `null`（不封顶），
+    于是三级服务在 8 邻居时给出 `+80%`（`E = 1.80`），而规则说最多 `+40%`。
+
+    封顶后：`E_邻接(服务) = 1 + min(rate(等级) × 邻居数, 0.40)`
+
+    | 服务等级 | 3 邻居 | 8 邻居 |
+    |---:|---:|---:|
+    | 1 级 | 1.15 | **1.40**（0.05×8=0.40，恰好不截） |
+    | 2 级 | 1.225 | **1.40**（0.075×8=0.60 → 截到 0.40） |
+    | 3 级 | 1.30 | **1.40**（0.10×8=0.80 → 截到 0.40） |
+
+    ⚠️ **已知取舍**（基线 §3.6 自己承认）：封顶后 1/2/3 级在 **≥8 邻居时全都撞到 +40%**，
+       也就是"邻居多的时候，服务等级没区别"、服务升级的边际收益变小。
+       这是**有意接受**的——规则说要与普通地块的 +40% 上限一致。
+       **不要**因为这条测试的存在就以为封顶写错了。
+    """
+    cfg = load_config()
+    eff = cfg.efficiency
+
+    assert eff.service_cap is not None, (
+        "service_cap 不能是 null（= 不封顶）。\n"
+        "  基线 §3.6 已拍板：服务邻接封顶 +40%，与普通地块一致。\n"
+        "  ⚠️ 不封顶时三级服务 8 邻居会给出 +80%（E=1.80），是错的。"
+    )
+    assert abs(eff.service_cap - 0.40) < TOL, (
+        f"服务邻接封顶应为 0.40，实得 {eff.service_cap}"
+    )
+
+    # ── 封顶前（3 邻居）：按等级取率，还没撞到顶 ──────────
+    expected_3 = {1: 1.15, 2: 1.225, 3: 1.30}
+    for level, want in expected_3.items():
+        got = eff.service_adjacency(level, 3)
+        assert abs(got - want) < TOL, (
+            f"{level} 级服务 / 3 邻居：E_邻接 应为 {want}，实得 {got}"
+        )
+
+    # ── 封顶后（8 邻居）：三级都要被截到 1.40 ────────────
+    for level in (1, 2, 3):
+        got = eff.service_adjacency(level, 8)
+        assert abs(got - 1.40) < TOL, (
+            f"★ {level} 级服务 / 8 邻居：E_邻接 应被截到 1.40，实得 {got}\n"
+            f"  （未截时 1 级=1.40、2 级=1.60、3 级=1.80 —— 2/3 级就是本测试要挡的 bug）"
+        )
+
+    # ── 非服务的通用地块仍按关联表 +5%/邻居、封顶 +40%（两条路互不影响）──
+    assert abs(eff.adjacency_cap - 0.40) < TOL, "普通地块的 +40% 上限不应被动过"
+    assert abs(eff.adjacency_per_neighbor - 0.05) < TOL, "普通地块的每邻居 +5% 不应被动过"
+
+
+def test_service_cap_end_to_end():
+    """★ 端到端：真摆一块三级服务 + 8 个邻居，走 `compute_efficiency` 验封顶。
+
+    上面那条测的是 `service_adjacency()`（纯算式）；
+    这条测**真实地块摆法**能不能走到同一个数 —— 防止
+    "算式封顶了、但 `efficiency.py` 的调用路径忘了传" 这类脱钩。
+    """
+    from engine.efficiency import compute_efficiency
+    from engine.models import Plot, PlotStatus
+
+    cfg = load_config()
+
+    # 地图中央 (1,1)，八邻格全在界内 → 恰好 8 个邻居
+    center = "1,1"
+    plot = Plot(
+        plot_id=center, plot_type=PlotType.SERVICE, level=3,
+        status=PlotStatus.RUNNING, running_quarters=99,   # 磨合满 → E_磨合 = 1.0
+    )
+    st = make_state(cfg, "p1", plot)
+    st.players["p1"].last_happiness = 0.8                 # → E_幸福 = 1.00
+    st.players["p1"].plots = {center: plot}
+
+    # 铺满八邻格（全都正常运行，服务对任何邻居都算）
+    offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1),
+               (0, 1), (1, -1), (1, 0), (1, 1)]
+    for i, (dr, dc) in enumerate(offsets):
+        nid = f"{1 + dr},{1 + dc}"
+        st.players["p1"].plots[nid] = Plot(
+            plot_id=nid, plot_type=PlotType.RESOURCE, level=1,
+            status=PlotStatus.RUNNING, running_quarters=99,
+        )
+
+    br = compute_efficiency(st, "p1", plot, cfg)
+
+    assert br.is_service, "这块地应被认成服务"
+    assert br.linked_neighbors == 8, f"应有 8 个邻居，实得 {br.linked_neighbors}"
+    assert br.adjacency_capped, "★ 8 邻居 × 10% = 80% > 40%，必须被标记为已封顶"
+    assert abs(br.adjacency_bonus - 0.40) < TOL, (
+        f"封顶后加成应为 0.40，实得 {br.adjacency_bonus}"
+    )
+    assert abs(br.adjacency - 1.40) < TOL, (
+        f"★ E_邻接 应为 1.40，实得 {br.adjacency}（未封顶时会是 1.80）"
+    )
+
+
+def test_config_ready_no_longer_flags_settled_items():
+    """`validate_config_ready()` 的缺失清单里，**不该再出现**已结清的两项。
+
+    这是"配置体检报告"的回归标记：
+    开局现金与开局减免名额都会出现在缺失清单里，
+    但两者性质**完全不同** —— 前者已拍板（1200），后者**确实还没设计**。
+    """
+    from engine.loader import validate_config_ready
+
+    cfg = load_config()
+    problems = validate_config_ready(cfg)
+    joined = " | ".join(problems)
+
+    assert "开局现金" not in joined, (
+        f"开局现金已拍板为 1200，不该再报缺失。当前清单：{problems}"
+    )
+    assert "construction" in joined or "建设" in joined, (
+        f"建设表确实还没填（M4 的活），体检报告应如实报出。当前清单：{problems}"
+    )
+    assert "减免名额" in joined, (
+        f"开局减免名额**确实还没设计**（用户说 2/2/1 只是举例），应如实报出。"
+        f"当前清单：{problems}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
 # 八、命令行汇总
 # ══════════════════════════════════════════════════════════════════
 
