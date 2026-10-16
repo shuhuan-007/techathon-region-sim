@@ -41,9 +41,15 @@ import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
+from engine import validate
 from engine.loader import Config
 from engine.models import GameState, Plan, SessionPhase
 from engine.pipeline import QuarterReport, SettlementError, advance, preview
+
+# ⚠️ `PlanRejected` 在这里**故意显式重导出**：调用方只需要 import
+#    `server.session` 就能同时 catch `Conflict` 与 `PlanRejected`，
+#    不必再知道它来自 `engine.validate`（服务层要转发的东西越少越好）。
+from engine.validate import PlanRejected  # noqa: F401  (re-export)
 
 
 class Conflict(Exception):
@@ -94,7 +100,21 @@ class GameSession:
     # ── 写（全部串行） ────────────────────────────────────
 
     def submit(self, player_id: str, plan: Plan) -> None:
-        """提交计划。**只增不改** —— 第二次提交直接拒绝。"""
+        """提交计划。**只增不改** —— 第二次提交直接拒绝。
+
+        ⚠️ **提交时就要校验计划**（2026-10-16 补上的一环）。
+        在此之前 `submit()` 只查"是不是重复提交"，于是一个地块 ID 不存在、
+        或买了不存在商品的计划能一路走到结算第 5 步才炸 ——
+        **报错点离犯错点太远**，玩家不知道是哪一步错了。
+
+        两类错误**刻意分开**：
+
+          · `Conflict`      —— 与**会话状态**冲突（不在行动阶段 / 已提交过）
+          · `PlanRejected`  —— **计划本身**不合法（带结构化 `issues` 列表）
+
+        分开的理由：前者要玩家"等/换个时机"，后者要玩家"改计划"，
+        服务层与前端要做的事完全不同。
+        """
         with self.lock:                       # ★ 提交也串行
             if self.phase is not SessionPhase.COLLECTING:
                 raise Conflict(
@@ -110,6 +130,12 @@ class GameSession:
                     f"计划里的 player_id ({plan.player_id!r}) "
                     f"与提交者 ({player_id!r}) 不一致"
                 )
+
+            # ★ 计划校验（§11.3）。**只读**，不改状态；不合格就不入库。
+            validate.require_valid(
+                plan, self.state.player(player_id), self.cfg, player_id
+            )
+
             self.plans[player_id] = plan
 
     def end_quarter(self, player_id: str) -> Optional[QuarterReport]:
