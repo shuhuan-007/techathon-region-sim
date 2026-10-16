@@ -73,12 +73,23 @@ TOL = 1e-6
 
 
 def make_state(cfg: Config, player_id: str, plot: Plot, cash: float = 1000.0) -> GameState:
-    """造一个单人局：一块成熟地块、指定现金、开局状态。"""
+    """造一个单人局：一块成熟地块、指定现金、开局状态。
+
+    ★ **把 `last_happiness` 设为 0.8**，让 `E_幸福 = 1.00`。
+
+    M1 的题设是"**效率均为 1**"，但按真实规则
+    `E = E_邻接 × E_幸福 × E_磨合 × (1+研究)`，
+    开局 `H₀ = 0.6` → `E_幸福 = 0.90`，**E 永远到不了 1**。
+
+    要让 `E_幸福 = 1.00`：`0.90 + (H−0.6)×0.5 = 1.00` → `H = 0.8`。
+    所以这里把上季 H 设成 0.8 —— 这是**题设给定的测试条件**，不是规则。
+    """
     from engine.models import PlayerState
 
     world = cfg.new_world()
     world.phase = WorldPhase.RUNNING
     player = PlayerState(player_id=player_id, cash=cash, plots={plot.plot_id: plot})
+    player.last_happiness = 0.8        # → E_幸福 = 1.00（见 docstring）
     return GameState(world=world, players={player_id: player})
 
 
@@ -95,6 +106,7 @@ def mature(plot_id: str, ptype: PlotType, level: int = 1, product=None) -> Plot:
 
 
 def plain_plan(player_id: str, plot_id: str, u: float = 1.0, **kw) -> Plan:
+    """一个最简计划：只有一块地开工，什么都不买。"""
     return Plan(
         player_id=player_id,
         plot_plans={plot_id: PlotPlan(plot_id=plot_id, active=u > 0, u=u)},
@@ -297,21 +309,130 @@ def test_operating_cost_split():
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_missing_elasticity_raises_not_defaults():
-    """★ 弹性未填 → **明确报错**，不许偷偷用默认值。
+def test_elasticity_loaded_from_teammate_doc():
+    """★ 弹性已由规则同学提供（源文件 docs/05-原始资料/队友弹性参数.docx）。
 
-    §11.6：不得为填满配置而编造数据。
+    15 个商品全部有值。`Ed` 是**负值**（经济学惯例），
+    程序用 `d = |Ed| × Q0 / P0` 取绝对值，与基线 §4.1 一致。
     """
     cfg = load_config()
-    curve = cfg.market["F"]
-    assert curve.Es is None and curve.Ed is None, \
-        "config 里 F 的弹性应为 null（待规则同学填）"
+
+    # 全 15 个商品都要有弹性
+    missing = [g for g, c in cfg.market.items() if c.Es is None or c.Ed is None]
+    assert not missing, f"这些商品仍缺弹性：{missing}"
+
+    # 逐档核对队友给的值
+    expected = {
+        "A": (0.5, -0.5), "B": (0.5, -0.5), "C": (0.5, -0.5), "D": (0.5, -0.5),
+        "F": (0.5, -0.5),
+        "G": (1.0, -0.8),
+        "H-A": (1.5, -1.2), "H-F": (1.5, -1.2), "H-G": (1.5, -1.2), "H-J": (1.5, -1.2),
+        "I": (0.8, -0.6),
+        "H-A+": (1.0, -1.0), "H-F+": (1.0, -1.0),
+        "H-G+": (1.0, -1.0), "H-J+": (1.0, -1.0),
+    }
+    for g, (es, ed) in expected.items():
+        c = cfg.market[g]
+        assert abs(c.Es - es) < TOL, f"{g} 的 Es 应为 {es}，实得 {c.Es}"
+        assert abs(c.Ed - ed) < TOL, f"{g} 的 Ed 应为 {ed}，实得 {c.Ed}"
+
+    # Ed 为负时，斜率 d 必须取成正的（否则需求曲线方向就反了）
+    s, d = cfg.market["F"].slopes()
+    assert s > 0 and d > 0, "斜率必须为正：s = Es·Q0/P0，d = |Ed|·Q0/P0"
+
+
+def test_missing_elasticity_still_raises():
+    """★ 弹性**缺失时仍然必须报错**，不许偷偷用默认值。
+
+    现在 config 里已填满，所以这里**手工造一个缺失的曲线**来验纪律。
+    见 §11.6：不得为填满配置而编造数据。
+    """
+    from engine.models import MarketCurve
+
+    curve = MarketCurve(goods="ZZ", P0=10.0, Q0=100.0, Es=None, Ed=None)
     try:
         curve.slopes()
     except ValueError as e:
         assert "弹性" in str(e) or "Es" in str(e)
     else:
         raise AssertionError("弹性未填时必须报错，不能返回默认斜率")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 六、★ M1 完整账（弹性到位后，结算价与期末现金都能真算了）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_m1_full_account():
+    """★ M1 完整账 —— 这一条是"账本跑通"的最终验收。
+
+    题设：各 1000 现金、效率 1、工资税 10%、上期价 = 参考价。
+    弹性到位后，`P_t`、销售收入、期末现金**全部可算**。
+    """
+    from engine import pipeline
+
+    cfg = load_config()
+    cases = [
+        # 名称, 类型, 等级, 产出, 结算价, 销售收入, 期末现金, 增加值
+        ("甲", PlotType.RESOURCE, 1, None, 23.52, 94.08, 1031.68, 66.0),
+        ("乙", PlotType.INDUSTRY, 1, "G", 55.22222222222222,
+         276.1111111111111, 1065.611111111111, 110.0),
+    ]
+
+    for name, ptype, level, product, price, revenue, cash, va in cases:
+        st = make_state(cfg, "p1", mature("0,0", ptype, level, product=product))
+        pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
+        r = st.raw_reports["p1"]
+        g = r.production[0].output_goods
+
+        assert abs(r.production[0].efficiency - 1.0) < TOL, f"{name} 题设要求 E=1"
+        assert abs(r.prices[g]["price"] - price) < 1e-9, (
+            f"{name} 结算价应为 {price}，实得 {r.prices[g]['price']}"
+        )
+        assert abs(r.sales_revenue - revenue) < 1e-9, (
+            f"{name} 销售收入应为 {revenue}，实得 {r.sales_revenue}"
+        )
+        assert abs(st.players["p1"].cash - cash) < 1e-9, (
+            f"{name} 期末现金应为 {cash}，实得 {st.players['p1'].cash}"
+        )
+        assert abs(r.value_added - va) < TOL, (
+            f"{name} 增加值应为 {va}，实得 {r.value_added}"
+        )
+
+
+def test_m1_production_is_the_supply():
+    """★ 没有仓库：本季产出**自动全部**成为市场供给（用户 2026-10-16 拍板）。
+
+    不需要玩家申报卖多少 —— `X_t` 就是产出本身。
+    """
+    from engine import pipeline
+
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
+    r = st.raw_reports["p1"]
+
+    assert r.sold == {"F": 4.0}, f"X_t 应等于产出，实得 {r.sold}"
+    assert r.prices["F"]["sold"] == 4.0, "求价用的 X_t 也必须等于产出"
+    assert st.players["p1"].inventory == {}, "没有仓库 → 季末不该有库存"
+
+
+def test_m1_production_inputs_are_consumed_not_stored():
+    """★ 生产原料**当场消耗**，不是库存（否则会被居民当口粮吃掉）。
+
+    这是本轮抓到的一个真 bug：G 工厂买的 C×2 / D×1 曾经躺在库存里，
+    第 7.5 步粮食结算把它们当"能吃的"吃了，增加值从 110 掉到 52。
+    """
+    from engine import pipeline
+
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.INDUSTRY, 1, product="G"))
+    pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
+    r = st.raw_reports["p1"]
+
+    assert r.bought == {"C": 2.0, "D": 1.0, "F": 3.0}, "原料要买"
+    assert r.food.deducted == {}, "★ 玩家没报口粮 → 居民就不该吃到任何东西"
+    assert st.players["p1"].inventory == {}, "原料不该留在库存里"
 
 
 # ══════════════════════════════════════════════════════════════════

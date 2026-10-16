@@ -829,17 +829,37 @@ class Plan:
     plot_plans: dict[str, PlotPlan] = field(default_factory=dict)
     purchases: dict[str, float] = field(default_factory=dict)
 
-    # 本季**申报卖出**的量（§6 第 7 步的 X_t 来源）。
+    # ══════════════════════════════════════════════════════════════
+    # ★ 没有"申报卖出"这个字段（2026-10-16 用户拍板）
+    # ══════════════════════════════════════════════════════════════
     #
-    # ⚠️ 为什么要单独一个字段：粮食在**结算时**才扣（§3.3.6），
-    #    如果这里不区分"卖出"与"留着吃"，玩家买的口粮会在第 7 步
-    #    被一起卖掉，第 7.5 步就无粮可扣 —— 那样粮食机制等于不存在。
+    # 用户原话："玩家不需要申报要卖，因为没有仓库，生产出来的就是'供'本身。"
     #
-    # 未申报卖出的部分：先供第 7.5 步粮食扣减，剩下的在第 7.7 步
-    # **强制清仓**（§11.1，不保留普通待售库存）。
-    sales: dict[str, float] = field(default_factory=dict)
+    # 含义：
+    #   · **没有仓库** → 不存在"囤货待售"，本季产出**自动全部**成为市场供给
+    #   · 所以 `X_t`（本季卖出量）= **本季全部产出**，玩家不用填任何东西
+    #   · 也因此**没有"季末清仓"这个动作** —— 没有库存可清
+    #
+    # ⚠️ 这里原先有个 `sales: dict[str, float]` 字段，已删除。
+    #    它与"没有仓库"直接冲突：有仓库才需要申报"我留多少、卖多少"。
 
     builds: list[BuildOrder] = field(default_factory=list)
+
+    # ══════════════════════════════════════════════════════════════
+    # ★ 合同通道（**保留口子**，第一期不实现交付）
+    # ══════════════════════════════════════════════════════════════
+    #
+    # 用户原话："要保留一个额外的通道，之后玩家间可以通过协议低于市场价提供，
+    #           这个需要到时候能实现。"
+    #
+    # 口子怎么留的（主流程已经按这个写好，接合同时只填一个函数）：
+    #   · 合同交付的货**不进公开市场** → 求价时从 `X_t` 里扣掉
+    #   · 合同价**低于市场价**，由双方协商（不是程序定价）
+    #   · 卖方：`X_t = 本季产出 − 合同交付量`
+    #   · 买方：`B_t = 采购量 − 合同收货量`（收到的货不算"从公开市场买入"）
+    #
+    # ⚠️ 第一期 `pipeline._contract_deliveries()` 返回空 dict，
+    #    但求价与入库两处都已经写成"扣掉合同量"的形状。
     contracts: list[ContractAction] = field(default_factory=list)
 
     def u_for(self, plot_id: str) -> float:
@@ -852,7 +872,6 @@ class Plan:
             "player_id": self.player_id,
             "plot_plans": {pid: pp.to_dict() for pid, pp in self.plot_plans.items()},
             "purchases": dict(self.purchases),
-            "sales": dict(self.sales),
             "builds": [b.to_dict() for b in self.builds],
             "contracts": [c.to_dict() for c in self.contracts],
         }
@@ -863,7 +882,6 @@ class Plan:
             player_id=data["player_id"],
             plot_plans={pid: PlotPlan.from_dict(pp) for pid, pp in data.get("plot_plans", {}).items()},
             purchases=dict(data.get("purchases", {})),
-            sales=dict(data.get("sales", {})),
             builds=[BuildOrder.from_dict(b) for b in data.get("builds", [])],
             contracts=[ContractAction.from_dict(c) for c in data.get("contracts", [])],
         )

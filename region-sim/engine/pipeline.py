@@ -15,26 +15,42 @@ AI 说的数会和真实结算不一致 —— 玩家按 AI 说的做、结果�
 这是最伤信任的 bug。
 
 ═══════════════════════════════════════════════════════════════════
-十步顺序（§6）
+九步顺序（§6）
 ═══════════════════════════════════════════════════════════════════
 
      1. 期初更新与公告      工期推进、到期完工
      2. 玩家提交计划        只校验，**不扣钱**
      3. 期初人口计算        E → L → N → ḡ → m → F_基准/F_优秀
      4. 生产                产量 = e·u·E，投入 = input·u·E，劳动 = d·u
-     4.5 买入汇总与求价      B_t = 生产原料 + 建设物资 + 口粮 → P_t
+     4.5 买入汇总与求价      B_t = 生产原料 + 建设物资 + 口粮
+                            X_t = 本季产出 − 合同交付
      5. 一次性扣款     ★     物资款（按**上季价**）+ 工资 + 经营费
      6. 产品分配与工程投入    合同履约；本季产品投工程
-     7. 市场结算             按 **P_t** 卖出
+     7. 市场结算             **产出按 P_t 全部卖出**（不用申报）
      7.5 粮食结算            扣 A/B/C/D → 得 H
-     7.7 季末清仓            剩余普通库存全部出售，归零
      8. 税收与报告           工资税 10% 记回流收入
      9. 结转                 quarter += 1，保存本季 H
 
 ═══════════════════════════════════════════════════════════════════
+★ 没有仓库 → 产出就是供给（2026-10-16 用户拍板）
+═══════════════════════════════════════════════════════════════════
+
+用户原话："玩家不需要申报要卖，因为没有仓库，生产出来的就是'供'本身。"
+
+由此定死三件事：
+
+  ① **`X_t` = 本季全部产出**（减去合同交付），玩家不用申报卖多少
+  ② **没有"季末清仓"这个动作** —— 没有库存可清，旧 §11.1 作废
+  ③ **居民口粮只能来自买入**（`purchases` 里的 A/B/C/D）——
+     产出已经全部是市场供给，不能拿来吃
+
+唯一能让货不进公开市场的通道是**合同**（玩家间协议、低于市场价），
+接口已留：见 `_contract_deliveries()`。
+
+═══════════════════════════════════════════════════════════════════
 ★ 玩家阶段一分钱都不动
 ═══════════════════════════════════════════════════════════════════
-"期初按上期价买入"是**口语说法**，落点是**价格用的是上季那个价**，
+"期初按上季价买入"是**口语说法**，落点是**价格用的是上季那个价**，
 而不是"钱在期初就扣了"。钱只在第 5 步动一次。
 
 ═══════════════════════════════════════════════════════════════════
@@ -83,8 +99,8 @@ class QuarterReport:
 
     bought: dict[str, float] = field(default_factory=dict)       # B_t（三段合计）
     bought_breakdown: dict[str, dict] = field(default_factory=dict)
-    sold: dict[str, float] = field(default_factory=dict)         # X_t 里玩家申报的那部分
-    planned_clearing: dict[str, float] = field(default_factory=dict)  # ★ 并入 X_t 的清仓量
+    sold: dict[str, float] = field(default_factory=dict)   # X_t：本季供给（= 产出 − 合同交付）
+    contracted_out: dict[str, float] = field(default_factory=dict)  # 合同交付量（不进公开市场）
     prices: dict[str, dict] = field(default_factory=dict)
     buy_bill: Optional[M.BuyBill] = None
 
@@ -95,8 +111,9 @@ class QuarterReport:
     wage_tax_refund: float = 0.0
 
     sales_revenue: float = 0.0            # 第 7 步
-    clearing_revenue: float = 0.0         # 第 7.7 步
-    unsold_cleared: dict[str, float] = field(default_factory=dict)
+    clearing_revenue: float = 0.0         # 已废弃（没有仓库 → 没有季末清仓），恒为 0
+    unsold_cleared: dict[str, float] = field(default_factory=dict)  # 触底卖不掉、被清理的量
+    discarded: dict[str, float] = field(default_factory=dict)       # 买了但没吃掉的口粮
 
     food: Optional[S.FoodResult] = None
 
@@ -114,7 +131,7 @@ class QuarterReport:
             "bought": dict(self.bought),
             "bought_breakdown": dict(self.bought_breakdown),
             "sold": dict(self.sold),
-            "planned_clearing": dict(self.planned_clearing),
+            "contracted_out": dict(self.contracted_out),
             "prices": dict(self.prices),
             "buy_bill": self.buy_bill.to_dict() if self.buy_bill else None,
             "materials_cost": self.materials_cost,
@@ -125,6 +142,7 @@ class QuarterReport:
             "sales_revenue": self.sales_revenue,
             "clearing_revenue": self.clearing_revenue,
             "unsold_cleared": dict(self.unsold_cleared),
+            "discarded": dict(self.discarded),
             "food": self.food.to_dict() if self.food else None,
             "cash_before": self.cash_before,
             "cash_after": self.cash_after,
@@ -219,57 +237,38 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
             "other_purchases": other_purchases,
         }
 
-    # 卖出量：玩家申报的卖出。
-    # ⚠️ 必须先校验"申报卖出 ≤ 手上实际有的"，**不能静默截断**：
-    #    §11.3 明确要求"不自动减少采购或开工量；不产生部分状态变更"，
-    #    而求价时若用"申报量"而非"实际可供量"，会把本季价格人为压低。
+    # ══ 本季供给 X_t：**产出本身就是供** ═══════════════════
+    #
+    # ★ 用户拍板（2026-10-16）："玩家不需要申报要卖，因为没有仓库，
+    #   生产出来的就是'供'本身。"
+    #
+    # 所以：
+    #   X_t = 本季全部产出 − 合同交付量
+    #
+    # ⚠️ 没有"申报卖出"，也**没有"季末清仓"** —— 没有仓库就没有库存可清。
+    #    上一轮为清仓求价做的那些推导（预估清仓量、并进 X_t）随之消失，
+    #    因为清仓这个概念本身不存在了。
+    #
+    # ⚠️ 居民口粮**不来自产出**（产出已全部是供给），
+    #    而来自玩家在 `purchases` 里申报买入的口粮，见第 7.5 步。
     sold_by_player: dict[str, dict[str, float]] = {}
-    clearing_by_player: dict[str, dict[str, float]] = {}
+    contracted_by_player: dict[str, dict[str, float]] = {}
 
     for player_id, plan in plans.items():
-        available = _expected_available(state, player_id, plan, outcomes[player_id])
-        for g, qty in plan.sales.items():
-            have = available.get(g, 0.0)
-            if qty > have + 1e-9:
-                raise SettlementError(
-                    f"申报卖出超量\n"
-                    f"  错误类型：卖出量超过实际持有\n"
-                    f"  涉及商品：{g}\n"
-                    f"  申请值  ：{qty:.6f}\n"
-                    f"  可用值  ：{have:.6f}\n"
-                    f"  差额    ：{qty - have:.6f}\n"
-                    f"  → 本季可卖 = 期初库存 + 本季买入 + 本季自产。\n"
-                    f"  ⚠️ 规则不自动截断（§11.3）：请改计划后重新提交。"
-                )
-        sold_by_player[player_id] = dict(plan.sales)
+        produced = P.merge_outputs(outcomes[player_id])
 
-        # ── ★ 预估清仓量，并把它算进本季总供给 X_t ──────────
-        #
-        # 为什么要求价**之前**就算清仓量：季末清仓（第 7.7 步）卖出去的货
-        # 同样是本季供给，必须压价。否则玩家只要"什么都不申报"，
-        # 就能把一大堆货按**上季价**清掉 —— 等于绕开"供给冲击压价"。
-        #
-        # ⚠️ 这里**没有循环依赖**：居民吃多少只看**数量**、不看价格
-        #    （§4.3.7 作废了预算约束 `D_实 = min(D, B/k)`），
-        #    所以可以在求价之前先把"吃掉多少"按数量算出来。
-        remaining = {}
-        for g, q in available.items():
-            left = q - plan.sales.get(g, 0.0)
+        # 合同交付：不进公开市场（口子已留，第一期返回空）
+        contracted = _contract_deliveries(plan)
+        supply = dict(produced)
+        for g, q in contracted.items():
+            left = supply.get(g, 0.0) - q
             if left > 1e-12:
-                remaining[g] = left
+                supply[g] = left
+            else:
+                supply.pop(g, None)
 
-        pop = populations[player_id]
-        food_plan = S.plan_food_deduction(
-            {g: remaining.get(g, 0.0) for g in S.FOOD_GOODS},
-            pop.baseline_food, pop.good_food, cfg,
-        )
-
-        clearing: dict[str, float] = {}
-        for g, q in remaining.items():
-            left = q - food_plan.deducted.get(g, 0.0)
-            if left > 1e-12:
-                clearing[g] = left
-        clearing_by_player[player_id] = clearing
+        sold_by_player[player_id] = supply
+        contracted_by_player[player_id] = contracted
 
     # 求价需要把**所有玩家**的买卖合并（共享资源，一起结算）
     total_bought: dict[str, float] = {}
@@ -278,10 +277,6 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
         for g, q in d.items():
             total_bought[g] = total_bought.get(g, 0.0) + q
     for d in sold_by_player.values():
-        for g, q in d.items():
-            total_sold[g] = total_sold.get(g, 0.0) + q
-    # ★ 清仓量并进本季总供给：X_t = 申报卖出 + 季末清仓
-    for d in clearing_by_player.values():
         for g, q in d.items():
             total_sold[g] = total_sold.get(g, 0.0) + q
 
@@ -315,7 +310,7 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
             bought=bought_by_player[player_id],
             bought_breakdown=breakdown_by_player[player_id],
             sold=sold_by_player[player_id],
-            planned_clearing=clearing_by_player[player_id],
+            contracted_out=contracted_by_player[player_id],
             prices={g: pr.to_dict() for g, pr in prices.items()},
             buy_bill=bill,
             materials_cost=bill.total,
@@ -325,44 +320,59 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
             cash_before=player.cash + total,
         )
 
-        # 入库：买入的物资 + 本季产出
-        for g, q in bought_by_player[player_id].items():
+        # ══════════════════════════════════════════════════════════
+        # ★ 产出**直接就是供给**，不进库存（没有仓库）
+        # ══════════════════════════════════════════════════════════
+        # 买进来的东西分三类，**只有口粮进库存**：
+        #   · 生产原料   → 第 4 步生产时**当场消耗**，不是库存
+        #   · 建设物资   → 进工程项目，不是库存
+        #   · 居民口粮   → 落到库存，等第 7.5 步被吃掉
+        #
+        # ⚠️ 这里曾经把 `bought_by_player` **全部**入库，导致一个隐蔽的 bug：
+        #    G 工厂买的 C×2 / D×1（生产原料）躺在库存里，
+        #    第 7.5 步粮食结算把它们当成"居民能吃的"给吃掉了
+        #    —— 增加值因此从 110 掉到 52。
+        #    原料必须在生产时就消耗掉，不能留到粮食结算。
+        for g, q in (breakdown_by_player[player_id]["household_food"] or {}).items():
             player.add_inventory(g, q)
-        for o in outcomes[player_id]:
-            if o.output_goods is not None and o.output_qty:
-                player.add_inventory(o.output_goods, o.output_qty)
 
     # ══ 第 6 步：产品分配与工程投入 ════════════════════════
     for player_id, plan in plans.items():
         _invest_construction(state, player_id, plan, cfg)
 
-    # ══ 第 7 步：市场结算（按 P_t 卖出） ══════════════════
+    # ══ 第 7 步：市场结算（产出按 P_t 全部卖出） ══════════
+    #
+    # ★ 没有"申报卖出"：本季产出就是供给本身（用户 2026-10-16 拍板）。
+    #   所以这一步只是**结算收入**，不再从库存里挑货去卖。
     for player_id, plan in plans.items():
         player = state.players[player_id]
         rep = reports[player_id]
 
         revenue = 0.0
         for g, qty in sorted(sold_by_player[player_id].items()):
-            have = player.inventory.get(g, 0.0)
-            actual = min(have, qty)          # 不足则按实际能卖的算
-            if actual <= 0:
-                continue
             pr = prices.get(g)
             if pr is None:
                 raise SettlementError(
-                    f"商品 {g!r} 申报卖出 {qty}，但求价时没有把它算进去（内部错误）"
+                    f"商品 {g!r} 有产出 {qty}，但求价时没有把它算进去（内部错误）"
                 )
-            effective = min(actual, pr.sellable) if pr.at_floor else actual
-            player.take_inventory(g, actual)
+            # 触底时只卖得掉 sellable 那部分；其余清理、不产生收入（§4.1）
+            effective = min(qty, pr.sellable) if pr.at_floor else qty
             revenue += effective * pr.price
-            if pr.at_floor and actual > effective:
-                rep.unsold_cleared[g] = rep.unsold_cleared.get(g, 0.0) + (actual - effective)
+            if pr.at_floor and qty > effective:
+                rep.unsold_cleared[g] = rep.unsold_cleared.get(g, 0.0) + (qty - effective)
 
         player.cash += revenue
         rep.sales_revenue = revenue
 
     # ══ 第 7.5 步：粮食结算 → H ═══════════════════════════
-    # ⚠️ 必须在第 7 步**之后**（否则卖不掉的东西不能拿来吃）。
+    #
+    # ★ 居民口粮来自玩家**本季申报买入**的 A/B/C/D（用户 2026-10-16：
+    #   "都是需求，玩家处理，结算的时候买"）。
+    #
+    # ⚠️ 产出不能拿来吃 —— 产出已经全部是市场供给（没有仓库）。
+    #    所以玩家要想让居民吃上饭，必须在 `purchases` 里报口粮。
+    #
+    # ⚠️ 必须在第 7 步**之后**（§6 铁律 6）：先卖货拿到钱，再谈吃饭。
     for player_id, plan in plans.items():
         pop = populations[player_id]
         rep = reports[player_id]
@@ -370,29 +380,22 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
             state, player_id, pop.baseline_food, pop.good_food, cfg
         )
 
-    # ══ 第 7.7 步：季末清仓 ════════════════════════════════
+    # ══ 第 7.7 步：季末清仓 —— ★ 已取消（没有仓库） ════════
     #
-    # ★ 清仓量在第 4.5 步**已经算过并并进了 `X_t`**，所以本季一定有价格。
-    #   这里不再有"回退上季价"那条分支 —— 那条分支是个可套利漏洞：
-    #   玩家只要什么都不申报，就能把一大堆货按旧价清掉，价格不动。
+    # 用户 2026-10-16："没有仓库，生产出来的就是'供'本身。"
+    # 既然没有库存，就没有"清仓"这个动作。旧 §11.1 的季末清仓作废。
+    #
+    # ⚠️ 留下的唯一残留可能在"买了口粮但居民没吃完"的情况：
+    #    那种情况下多余的口粮会被丢弃（不产生收入、也不结转）。
+    #    第一期按此处理；若以后要让它变现，在合同通道里做更合理。
     for player_id, plan in plans.items():
         player = state.players[player_id]
         rep = reports[player_id]
-        clearing = 0.0
-        for g in sorted(player.inventory):
-            qty = player.inventory[g]
-            if qty <= 0:
-                continue
-            pr = prices.get(g)
-            if pr is None:
-                raise SettlementError(
-                    f"商品 {g!r} 有清仓量 {qty}，但求价时没有把它算进去（内部错误）。\n"
-                    f"  → 清仓量必须并进 X_t，否则会按旧价卖掉、绕过供给压价。"
-                )
-            player.take_inventory(g, qty)
-            clearing += qty * pr.price
-        player.cash += clearing
-        rep.clearing_revenue = clearing
+        leftover = {g: q for g, q in player.inventory.items() if q > 1e-12}
+        if leftover:
+            rep.discarded = leftover
+            for g in list(player.inventory):
+                player.take_inventory(g, player.inventory[g])
 
     # ══ 第 8 步：税收与报告 ════════════════════════════════
     for player_id, plan in plans.items():
@@ -422,28 +425,43 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
 # ══════════════════════════════════════════════════════════════════
 
 
-def _expected_available(
-    state: GameState,
-    player_id: str,
-    plan: Plan,
-    outcomes: list[P.PlotOutcome],
-) -> dict[str, float]:
-    """本季**实际可卖**的量 = 期初库存 + 本季买入 + 本季自产。
+def _contract_deliveries(plan: Plan) -> dict[str, float]:
+    """★ **合同通道**：本季通过合同直接交付给别的玩家、**不进公开市场**的量。
 
-    用途：在第 4.5 步校验玩家申报的卖出量（§11.3 要求明确报错，不自动截断），
-    以及推算季末清仓量（清仓量要并进 `X_t` 参与求价）。
+    用户 2026-10-16："要保留一个额外的通道，之后玩家间可以通过协议低于市场价
+    提供，这个需要到时候能实现。"
+
+    为什么需要这个口子
+    ------------------
+    没有仓库之后，**产出 100% 自动进公开市场**（`X_t` = 产出）。
+    于是"我想把货便宜卖给隔壁老王"这件事**没有地方表达**。
+    合同就是这个唯一的例外通道。
+
+    对求价的影响（两条都要扣，否则合同会凭空扰动市场）
+    --------------------------------------------------
+        卖方：`X_t = 本季产出 − 合同交付量`     ← 货没进公开市场，不该压价
+        买方：`B_t = 采购量 − 合同收货量`       ← 货不是从公开市场买的，不该抬价
+
+    ⚠️ **第一期返回空 dict**（`builds` 为空时同理，不报错）。
+       但主流程**已经按"扣掉合同量"的形状写好**：
+       以后接合同只需要在这里解析 `plan.contracts`，**不动 `_run` 一行**。
+
+    实现时要做的事（留给以后）
+    --------------------------
+      · `ContractAction` 已有 action / counterparty / goods / qty / price 字段
+      · 需要一个"合同账本"（谁欠谁多少货），挂在 GameState 上
+      · 交货要校验：卖方本季确实产得出这么多（否则违约，走 §7.3 流程）
+      · 合同价由双方协商，**低于市场价**；结算时按合同价转账，不走 `P_t`
     """
-    player = state.players[player_id]
-    available: dict[str, float] = {}
-    for g, q in player.inventory.items():
-        if q > 0:
-            available[g] = available.get(g, 0.0) + q
-    for g, q in plan.purchases.items():
-        available[g] = available.get(g, 0.0) + q
-    for o in outcomes:
-        if o.output_goods is not None and o.output_qty:
-            available[o.output_goods] = available.get(o.output_goods, 0.0) + o.output_qty
-    return available
+    if not plan.contracts:
+        return {}
+    # 第一期：合同交付尚未实现。**明确报错**而不是静默忽略 ——
+    # 静默忽略会让玩家以为货交出去了，其实还在自己账上。
+    raise SettlementError(
+        "合同交付功能尚未实现（第一期留口子）。\n"
+        "  → 规则见《规则基线》§7.2；接口形状见 Plan.contracts。\n"
+        "  ⚠️ 不静默忽略：忽略会让玩家以为货已交付，实际没有。"
+    )
 
 
 def _construction_materials(plan: Plan) -> dict[str, float]:

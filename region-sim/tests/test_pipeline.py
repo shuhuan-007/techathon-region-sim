@@ -147,7 +147,7 @@ def test_buy_uses_last_quarter_price_not_current():
     st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
 
     # 第一季：跑一遍，把 F 的成交价记进历史
-    pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0, sales={"F": 3.6})}, cfg)
+    pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
     q1_price = st.world.price_history["F"][-1]
 
     # 第二季：上季价必须等于第一季的成交价
@@ -168,34 +168,34 @@ def test_first_quarter_falls_back_to_P0():
 # 四、★ 粮食结算在市场结算之后（铁律 6）
 # ══════════════════════════════════════════════════════════════════
 
+# ⚠️ 2026-10-16 已删除两条旧对账：
+#   · `test_food_deducted_after_market_sale`（"申报卖出导致没粮吃"）
+#   · `test_food_kept_is_eaten`（"自产的粮留着吃"）
+#    两者都建立在"有仓库 + 申报卖出"之上。没有仓库之后：
+#      · 产出 100% 是市场供给，**不能拿来吃**
+#      · 口粮只能从 `purchases` 买入
+#    替代它们的对账在第七节：
+#      `test_food_must_be_purchased_not_from_production`
+#      `test_food_purchase_enters_supply_and_demand`
 
-def test_food_deducted_after_market_sale():
-    """粮食在市场卖出**之后**扣：卖掉的粮不能拿来吃（§6 铁律 6）。"""
+
+def test_food_settled_after_market_sale():
+    """★ 铁律 6 仍然成立：粮食结算在市场结算**之后**。
+
+    现在它的含义变成："先把货卖出去拿到钱，再谈居民吃饭"。
+    顺序反了会让玩家用还没到手的钱买粮。
+    """
     cfg = cfg_with_example_elasticity()
-    plot = mature("0,0", PlotType.AGRICULTURE, 1, product="A")
-    st = make_state(cfg, "p1", plot)
-
-    # 产 A×5×E。E = 0.9（H₀=0.6）→ 4.5。申报卖 4.5，则手上无粮可吃 → H=0
-    rep = pipeline.advance(
-        st, {"p1": plain_plan("p1", "0,0", u=1.0, sales={"A": 4.5})}, cfg
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    pipeline.advance(
+        st, {"p1": plain_plan("p1", "0,0", u=1.0, purchases={"A": 1.0, "B": 0.5})}, cfg
     )
     r = st.raw_reports["p1"]
-    assert r.food.happiness == 0.0, "全卖掉后无粮可吃，H 应为 0"
-    assert r.food.deducted == {}, "没有粮就不该扣出东西"
 
-
-def test_food_kept_is_eaten():
-    """留着的粮会在结算时被吃掉，不参与卖出。"""
-    cfg = cfg_with_example_elasticity()
-    plot = mature("0,0", PlotType.AGRICULTURE, 1, product="A")
-    st = make_state(cfg, "p1", plot)
-
-    # 全部留着自己吃 → 清仓前先扣粮
-    pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
-    r = st.raw_reports["p1"]
-
-    assert r.food.deducted, "自产的 A 应被粮食结算扣掉一部分"
-    assert r.food.happiness > 0.0, "有粮可吃时 H 应大于 0"
+    # 口粮买入计入 B_t（需求侧），说明它在求价时已经存在
+    assert r.bought == {"A": 1.0, "B": 0.5}
+    # 且确实被消费了
+    assert r.food.available == {"A": 1.0, "B": 0.5, "C": 0.0, "D": 0.0}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -243,10 +243,11 @@ def test_session_lock_is_per_game():
 def test_session_resolve_releases_lock_on_error():
     """结算报错时锁必须释放（否则整局卡死）。"""
     cfg = cfg_with_example_elasticity()
-    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    # G 工厂要买 C/D/F，只给 10 块钱 → 扣款时必然资金不足
+    st = make_state(cfg, "p1", mature("0,0", PlotType.INDUSTRY, 1, product="G"), cash=10.0)
     sess = GameSession(state=st, cfg=cfg)
 
-    sess.submit("p1", plain_plan("p1", "0,0", u=1.0, sales={"F": 99.0}))
+    sess.submit("p1", plain_plan("p1", "0,0", u=1.0))
     try:
         sess.end_quarter("p1")
     except SettlementError:
@@ -259,72 +260,156 @@ def test_session_resolve_releases_lock_on_error():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 六、★ 季末清仓必须并进 X_t（2026-10-16 修的漏洞）
+# 六、★ 没有仓库（2026-10-16 用户拍板）
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_clearing_volume_is_included_in_price():
-    """★ 季末清仓的货**也要压价**。
+def test_production_is_supply_no_declaration_needed():
+    """★ 产出自动就是供给 —— 玩家不用申报卖多少。
 
-    漏洞原状：玩家什么都不申报 → 本季不求价 → 清仓回退**上季价**卖掉，
-    相当于往市场砸货而价格不动。
-
-    修法：求价前先按**数量**推算清仓量，并进 `X_t`。
-    这样"申报 0 + 全部清仓"与"申报全部"应该得到**同一个价格**。
+    用户原话："玩家不需要申报要卖，因为没有仓库，生产出来的就是'供'本身。"
     """
-    cfg = cfg_with_example_elasticity()
-    plot = mature("0,0", PlotType.RESOURCE, 1)
-
-    # 甲：什么都不申报，全靠季末清仓
-    st_a = make_state(cfg, "p1", deepcopy(plot))
-    rep_a = pipeline.preview(st_a, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
-
-    # 乙：把同样多的量在 sales 里申报掉
-    out_qty = rep_a.production[0].output_qty
-    st_b = make_state(cfg, "p1", deepcopy(plot))
-    rep_b = pipeline.preview(
-        st_b, {"p1": plain_plan("p1", "0,0", u=1.0, sales={"F": out_qty})}, cfg
-    )
-
-    assert abs(rep_a.prices["F"]["price"] - rep_b.prices["F"]["price"]) < TOL, (
-        "★ 清仓与申报卖出必须求出同一个价 —— 否则'不申报'就能按旧价清货"
-    )
-    # 且价格确实被压低了，不是沿用上季价
-    assert rep_a.prices["F"]["price"] < cfg.market["F"].P0 - 1e-9, "供给必须压价"
-
-
-def test_clearing_planned_equals_actual():
-    """预估清仓量与实际清仓量必须一致（否则求价用的 X_t 是错的）。"""
-    cfg = cfg_with_example_elasticity()
+    cfg = load_config()
     st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
     pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
     r = st.raw_reports["p1"]
 
-    # 实际清仓 = 期初(0) + 产出 − 申报(0) − 粮食扣减
-    eaten = r.food.deducted.get("F", 0.0)
-    expected = r.production[0].output_qty - eaten
-    planned = r.planned_clearing.get("F", 0.0)
-    assert abs(planned - expected) < TOL, (
-        f"预估清仓 {planned} 与实际 {expected} 不一致"
+    out_qty = r.production[0].output_qty
+    assert abs(r.sold["F"] - out_qty) < TOL
+    assert abs(r.prices["F"]["sold"] - out_qty) < TOL, "求价的 X_t 必须等于产出"
+
+
+def test_supply_pushes_price_down():
+    """产出越多，本季价越低（供给压价）。"""
+    cfg = load_config()
+    curve = cfg.market["F"]
+
+    p_small = curve.price(bought=0.0, sold=4.0)
+    p_large = curve.price(bought=0.0, sold=40.0)
+    assert p_large < p_small, "供给越大价格越低"
+
+
+def test_no_inventory_carries_over():
+    """没有仓库 → 季末零库存（§11.1 的"季末清仓"已随仓库一起取消）。"""
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
+
+    assert st.players["p1"].inventory == {}, "季末不该有库存"
+    assert st.raw_reports["p1"].clearing_revenue == 0.0, "清仓概念已取消"
+
+
+def test_contract_channel_is_reserved():
+    """★ 合同通道：口子留着，第一期**明确报错**而不是静默忽略。
+
+    用户："要保留一个额外的通道，之后玩家间可以通过协议低于市场价提供。"
+    """
+    from engine.models import ContractAction
+
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    plan = plain_plan("p1", "0,0", u=1.0)
+    plan.contracts.append(
+        ContractAction(action="deliver", counterparty="p2", goods="F", qty=1.0, price=20.0)
     )
-    assert st.players["p1"].inventory == {}, "清仓后普通库存必须归零（§11.1）"
+    try:
+        pipeline.advance(st, {"p1": plan}, cfg)
+    except SettlementError as e:
+        assert "合同" in str(e), "应明确报出合同功能未实现"
+    else:
+        raise AssertionError("合同功能未实现时必须报错，不能静默忽略")
 
 
-def test_keeping_food_reduces_clearing():
-    """留着自己吃的粮不进清仓量（§11.1 消费扣减先于清仓）。"""
+def test_contract_would_reduce_supply():
+    """合同交付的货**不进公开市场** → 求价时应从 X_t 扣掉。
+
+    这里直接验 `market.settle_prices` 的语义：
+    同样的产出，扣掉合同量后价格应该更高（因为公开供给少了）。
+    """
     cfg = cfg_with_example_elasticity()
-    plot = mature("0,0", PlotType.AGRICULTURE, 1, product="A")
+    curve = cfg.market["F"]
 
-    st = make_state(cfg, "p1", deepcopy(plot))
-    r = pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg).raw_reports["p1"]
-
-    assert r.food.deducted, "自产的 A 应被扣掉一部分当口粮"
-    assert "A" not in r.planned_clearing or r.planned_clearing["A"] < r.production[0].output_qty, \
-        "被吃掉的部分不该出现在清仓量里"
+    p_with_contract = curve.price(bought=0.0, sold=4.0 - 1.0)   # 1 单位走了合同
+    p_no_contract = curve.price(bought=0.0, sold=4.0)
+    assert p_with_contract > p_no_contract, (
+        "合同交付的货不进公开市场 → 公开供给变少 → 价格应更高"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
-# 七、★ H 的斜率（用户 2026-10-16 确认：中间线性）
+# 七、★ 口粮只能来自买入（产出已全部是供给）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_food_must_be_purchased_not_from_production():
+    """★ 产出不能拿来吃 —— 产出已全部是市场供给。
+
+    所以种 A 的玩家若想喂居民，必须在 `purchases` 里报口粮。
+    """
+    cfg = cfg_with_example_elasticity()
+    plot = mature("0,0", PlotType.AGRICULTURE, 1, product="A")
+
+    # 只种地、不买口粮 → 居民没得吃
+    st = make_state(cfg, "p1", deepcopy(plot))
+    r = pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg).raw_reports["p1"]
+    assert r.food.deducted == {}, "产出全部是供给，不该有粮可吃"
+    assert r.food.happiness == 0.0, "没口粮 → H = 0"
+
+    # 买了口粮 → 居民吃得上
+    st2 = make_state(cfg, "p1", deepcopy(plot))
+    r2 = pipeline.advance(
+        st2, {"p1": plain_plan("p1", "0,0", u=1.0, purchases={"A": 5.0, "B": 3.0})}, cfg
+    ).raw_reports["p1"]
+    assert r2.food.deducted, "买了口粮就该被扣掉"
+    assert r2.food.happiness > 0.0, "有口粮 → H > 0"
+
+
+def test_food_purchase_enters_supply_and_demand():
+    """口粮买入同时是 `B_t` 的一部分（需求侧），会把价格顶高。"""
+    cfg = cfg_with_example_elasticity()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    pipeline.advance(
+        st, {"p1": plain_plan("p1", "0,0", u=1.0, purchases={"A": 10.0})}, cfg
+    )
+    r = st.raw_reports["p1"]
+
+    assert r.bought == {"A": 10.0}, "口粮买入应计入 B_t"
+    assert r.bought_breakdown["household_food"] == {"A": 10.0}
+
+
+def test_leftover_food_is_discarded_not_stored():
+    """买了吃不完的口粮 → **丢弃**（没有仓库），不产生收入、不结转。"""
+    cfg = cfg_with_example_elasticity()
+    plot = mature("0,0", PlotType.RESOURCE, 1)
+    st = make_state(cfg, "p1", plot)
+
+    # 买一大堆 A/B（远超 F_基准），居民吃不完
+    # N=6 → F_基准=1.2、F_优秀=1.8；买 A5/B3 远够优秀档，必有剩
+    pipeline.advance(
+        st,
+        {"p1": plain_plan("p1", "0,0", u=1.0, purchases={"A": 5.0, "B": 3.0})},
+        cfg,
+    )
+    r = st.raw_reports["p1"]
+
+    assert r.discarded, "吃不完的口粮应被记为丢弃"
+    assert st.players["p1"].inventory == {}, "丢弃后不该有库存"
+
+
+def test_oversell_raises():
+    """★ 已取消：没有"申报卖出"，所以不再有"卖出超量"这种错误。
+
+    这条留作**回归标记** —— 如果哪天 `Plan` 又长出 `sales` 字段，
+    说明规则被改回去了，这里会失败并提醒。
+    """
+    from engine.models import Plan
+    assert not hasattr(Plan(player_id="p1"), "sales"), (
+        "Plan 不该再有 sales 字段（没有仓库 → 产出就是供给）"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 八、★ H 的斜率（用户 2026-10-16 确认：中间线性）
 # ══════════════════════════════════════════════════════════════════
 
 
