@@ -557,7 +557,7 @@ class WorldState:
         return cls(
             quarter=data.get("quarter", 1),
             rows=data.get("rows", 10), cols=data.get("cols", 10),
-            total_quarters=data.get("total_quarters", 40),
+            total_quarters=data.get("total_quarters", 20),
             phase=WorldPhase(data.get("phase", "setup")),
             market={g: MarketCurve.from_dict(c) for g, c in data.get("market", {}).items()},
             policies=[Policy.from_dict(p) for p in data.get("policies", [])],
@@ -576,8 +576,16 @@ class PlayerState:
 
     ⚠️ 永远通过 `state.players[player_id]` 访问，**不要**摊到顶层。
 
-    `inventory` 是"计划内待用"的普通库存，**不是**自由仓库：
-    季末未消耗的部分会被清仓卖掉（§11.1），除非已投入已启动工程。
+    ⚠️ **`inventory` 不是"仓库"**（2026-10-16 用户拍板：本项目**没有仓库**）。
+       它**只放本季买来、准备给居民吃的口粮**（A/B/C/D），别的什么都不放：
+
+         · 产出        → 当季**全部**成为市场供给（`X_t`），**不落地**
+         · 生产原料    → 生产时**当场消耗**，不进这里
+         · 建设物资    → 直接进工程，不进这里
+         · 没用完的口粮 → **丢弃**（不产生收入、不结转）
+
+       ⚠️ 所以**不要**拿它当通用存货用。历史上曾有一条"季末未消耗的部分
+          会被清仓卖掉（§11.1）"，那条**整节已作废** —— 没有仓库就没有清仓。
     """
 
     player_id: str

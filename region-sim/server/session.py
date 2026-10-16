@@ -39,7 +39,10 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:                       # 只为类型标注，运行时不 import
+    from storage.base import Storage
 
 from engine import report, validate
 from engine.loader import Config
@@ -73,9 +76,19 @@ class GameSession:
     # ★ 每局一把锁。`repr=False` 避免打印时出现无意义的锁对象。
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
+    # ── 存档（可选）────────────────────────────────────────
+    # 给了就在**结算完、锁内**自动存一次（《项目架构-总》§八）。
+    # ⚠️ 不给也能跑（测试与 M1 对账就不需要磁盘）。
+    storage: Optional["Storage"] = field(default=None, repr=False)
+    game_id: str = ""
+
     def __post_init__(self) -> None:
         if not self.player_ids:
             self.player_ids = self.state.player_ids
+        if self.storage is not None and not self.game_id:
+            raise ValueError(
+                "给了 storage 就必须给 game_id —— 否则不知道往哪一局存。"
+            )
 
     # ── 读 ────────────────────────────────────────────────
 
@@ -184,8 +197,27 @@ class GameSession:
 
         self.plans.clear()
         self.phase = SessionPhase.REPORT
+        self._save_unlocked()          # ★ 结算完立刻全量快照（锁内）
         first = sorted(self.state.raw_reports)[0]
         return self.state.raw_reports[first]
+
+    def _save_unlocked(self) -> None:
+        """落盘。⚠️ **调用方必须已持有 `self.lock`**（与 `_resolve_unlocked` 同理）。
+
+        ⚠️ 放在**锁内**是《项目架构-总》§八 的要求：
+           两个请求同时结算 → 交叉覆盖 → 存档写成一锅粥。
+           原子替换只能保证"文件不半截"，**保证不了"内容对应哪一季"**。
+
+        ⚠️ 没配 `storage` 时**静默跳过** —— 测试与 M1 对账不需要磁盘。
+        """
+        if self.storage is None:
+            return
+        self.storage.save(self.game_id, self.state)
+
+    def save_now(self) -> None:
+        """手动存一次（给"不结算也想存"的场景，如退出前）。**拿锁。**"""
+        with self.lock:
+            self._save_unlocked()
 
     def start_next_quarter(self) -> None:
         """月报看完 → 回到行动阶段（§三 的循环）。"""
