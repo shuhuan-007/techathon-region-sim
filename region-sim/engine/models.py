@@ -241,7 +241,12 @@ class MarketCurve:
 
     @property
     def P_min(self) -> float:
-        """价格下限（§4.1）。触底后按可实现需求量分配，不保证全量收购。"""
+        """价格下限（§4.1）。
+
+        ✅ 2026-10-16 深夜用户裁定：**触底时按 `P_min` 全量收购**
+        （"就当是全国统一收购"）——所以 `P_min` **只决定最低成交价**，
+        不代表"卖不掉"。旧口径"按可实现需求量分配、不保证全量收购"**已作废**。
+        """
         return self.P_min_ratio * self.P0
 
     def price(self, bought: float = 0.0, sold: float = 0.0) -> float:

@@ -33,10 +33,12 @@
 
 程序**用原始弹性算斜率**，不手工维护四舍五入后的数。
 
-`P_min = 0.1 × P0`。到下限仍供过于求时，**按可实现需求量分配成交，
-不保证全量收购**；未售商品清理，不产生收入。
+`P_min = 0.1 × P0`。**触底时按 `P_min` 全量收购**（2026-10-16 深夜用户裁定，
+"就当是全国统一收购"）：价格被地板截住，**成交量恒为 `X_t`，不截断**。
 
-⚠️ 程序**不能**只把负价格截成正数然后仍让全部产量成交——那等于凭空造需求。
+⚠️ **不要再实现"未售商品清理"**：那条"按可实现需求量分配成交、不保证全量收购"
+已于 2026-10-16 深夜被用户推翻（见《规则基线》§4.1 / §8 第 3c 条）。
+触底现在退化为**纯粹的价格惩罚**——货一定卖得掉，只是卖得便宜。
 
 ═══════════════════════════════════════════════════════════════════
 弹性缺失时怎么办
@@ -69,8 +71,8 @@ class PriceResult:
     s: float                # 供给斜率
     d: float                # 需求斜率
     price: float            # 本季成交价 P_t
-    at_floor: bool          # 是否触底
-    sellable: float         # 触底时**实际能卖掉**的量（不触底 = sold）
+    at_floor: bool          # 是否触底（**只影响价格**，不影响销量）
+    sellable: float         # 可成交量 —— ✅ 恒等于 `sold`（触底也全量收购）
 
     def to_dict(self) -> dict:
         return {
@@ -91,6 +93,9 @@ def solve_price(
         P_t = P0 + (B_t − X_t) / (s + d)
         P_t = max(P_t, P_min)        P_min = 0.1 × P0
 
+    ✅ **触底时全量成交（2026-10-16 深夜）**：`sellable = sold`，**一切情况都是它**。
+       价格碰地板只影响**价格**，不影响**能不能卖掉**。
+
     ⚠️ `bought`（B_t）**必须包含三段**：生产原料 + 建设物资 + 居民口粮。
        漏掉任何一段都会让本季价格偏低，进而让卖出收入偏高——
        这是最容易发生、又最难察觉的一类错。
@@ -110,8 +115,10 @@ def solve_price(
     price = max(raw, p_min)
     at_floor = raw < p_min
 
-    # 触底时按**可实现需求量**分配成交，不保证全量收购（§4.1）。
-    sellable = demand_at(curve, price) if at_floor else sold
+    # ✅ 触底也**全量成交**（§4.1，2026-10-16 深夜用户裁定）。
+    #    此前这里写的是 demand_at(curve, price)——那是"按可实现需求分配、
+    #    不保证全量收购"的旧口径，已被推翻。触底只剩价格惩罚。
+    sellable = sold
 
     return PriceResult(
         goods=curve.goods, bought=bought, sold=sold,
@@ -121,18 +128,14 @@ def solve_price(
 
 
 def external_supply(curve: MarketCurve, price: float) -> float:
-    """`S_外(P) = max(0, Q0 + s(P − P0))`（外部供给）。"""
+    """`S_外(P) = max(0, Q0 + s(P − P0))`（外部供给）。
+
+    ⚠️ **当前没有生产调用点**（2026-10-16 深夜核实）。它是分段均衡价的
+       低价侧分界 `zL = −Q0(s+d)/s` 的来源，留在这里是为了保留那条边界
+       的出处 —— **不要**据此重新引入"触底截断成交"，那条口径已作废。
+    """
     s, _ = curve.slopes()
     return max(0.0, curve.Q0 + s * (price - curve.P0))
-
-
-def demand_at(curve: MarketCurve, price: float) -> float:
-    """`D_外(P) = max(0, Q0 − d(P − P0))`（外部需求）。
-
-    ⚠️ 触底时用它决定"实际能卖掉多少"。**不是**把价格截成正数就算完。
-    """
-    _, d = curve.slopes()
-    return max(0.0, curve.Q0 - d * (price - curve.P0))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -210,7 +213,8 @@ def buy_bill(world: WorldState, bought: dict[str, float]) -> BuyBill:
 def sell_revenue(prices: dict[str, PriceResult], sold: dict[str, float]) -> float:
     """按**本季价**算卖出收入（§4.1）。
 
-    ⚠️ 触底商品只算 `sellable` 那部分收入，未售部分**清理、不产生收入**。
+    ✅ **触底也全量成交**（2026-10-16 深夜）：收入恒为 `Σ(qty × price)`，
+       没有任何"卖不掉的量"。价格碰地板只压低单价，不减少销量。
     """
     total = 0.0
     for g, qty in sold.items():
@@ -219,26 +223,18 @@ def sell_revenue(prices: dict[str, PriceResult], sold: dict[str, float]) -> floa
         pr = prices.get(g)
         if pr is None:
             raise KeyError(f"商品 {g!r} 有卖出量但没有求价结果")
-        # 触底时只卖得掉 sellable；否则全卖。
-        effective = min(qty, pr.sellable) if pr.at_floor else qty
-        total += effective * pr.price
+        total += qty * pr.price
     return total
 
 
 def unsold_after_floor(prices: dict[str, PriceResult], sold: dict[str, float]) -> dict[str, float]:
-    """触底卖不掉的量（会被清理，不产生收入）。
+    """~~触底卖不掉的量~~ → **恒为空**（保留函数只为兼容旧调用点）。
 
-    用途：财报里要如实显示"这批货没卖出去"，而不是让它悄悄消失。
+    ⚠️ 2026-10-16 深夜用户裁定"触底按 `P_min` 全量收购"之后，
+       **不存在"卖不掉被清理"的货**。此函数永远返回空字典。
+       新代码不要再用它；财报里"未售清理"一栏也应恒为 0。
     """
-    left: dict[str, float] = {}
-    for g, qty in sold.items():
-        pr = prices.get(g)
-        if pr is None or not pr.at_floor:
-            continue
-        gap = qty - min(qty, pr.sellable)
-        if gap > 0:
-            left[g] = gap
-    return left
+    return {}
 
 
 # ══════════════════════════════════════════════════════════════════

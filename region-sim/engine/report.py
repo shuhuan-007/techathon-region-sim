@@ -315,7 +315,8 @@ def _market(
         last_price    上季结算价 —— 也是**本季买入记账价**（§4.1）
         current_price 本季求价 `P_t`；**没试算时为 None**（不编造）
         P_min         价格下限 = 0.1 × P0，接近时前端要警告
-        at_floor      是否已触底（触底 → 卖不掉、会被清理）
+        at_floor      是否已触底（**只表示价格压到地板**，不代表卖不掉）
+                      ✅ 2026-10-16 深夜裁定：触底也**全量收购**，销量不受影响
     """
     world = state.world
     prices = trial.prices if trial is not None else {}
