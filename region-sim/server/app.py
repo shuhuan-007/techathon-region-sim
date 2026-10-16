@@ -31,6 +31,9 @@
     GET  /api/state?game=&player=  → /state（引擎算好的数字）
     GET  /api/map?game=&player=    → 整张 10×10
     POST /api/submit               → 提交计划
+    POST /api/simulate             → ★ 试算（只读，AI/玩家共用）
+    POST /api/validate             → ★ 只校验（只读）
+    GET  /api/rules?[section=]      → ★ 规则基线原文（只读，给 AI）
     POST /api/end_quarter          → 结算这一季
     POST /api/next_quarter         → 看完月报进入下一季
     GET  /api/report?game=&player= → 上一季完整财报
@@ -52,6 +55,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -83,8 +87,59 @@ from server.registry import GameRegistry  # noqa: E402
 from server.session import Conflict  # noqa: E402
 from storage import GameNotFound, JsonFileStorage, StorageError  # noqa: E402
 
+from engine.models import SessionPhase  # noqa: E402
+
 # 前端根目录（region-sim/web）
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
+
+# 《规则基线》（**规则唯一权威**，README §八 权威顺序 ②）。
+# 本文件在 region-sim/server/ 下，规则在 开发特区/docs/01-规范/ 下，
+# 所以从本文件往上退两层（server → region-sim → 开发特区）。
+RULES_PATH = Path(__file__).resolve().parents[2] / "docs" / "01-规范" / "规则基线.md"
+RULES_SOURCE = "docs/01-规范/规则基线.md"
+
+
+def _read_rules_text() -> str:
+    """读《规则基线》全文。**找不到就抛 `FileNotFoundError`**（不许装成功）。"""
+    if not RULES_PATH.is_file():
+        raise FileNotFoundError(f"规则基线不存在：{RULES_PATH}")
+    return RULES_PATH.read_text(encoding="utf-8")
+
+
+def _scan_sections(text: str) -> list[dict]:
+    """从 Markdown 扫出 `#`/`##`/`###` 标题行。不用第三方库。"""
+    sections: list[dict] = []
+    for idx, line in enumerate(text.splitlines()):
+        m = re.match(r"^(#{1,3})\s+(.+?)\s*$", line)
+        if m:
+            sections.append({
+                "title": m.group(2),
+                "level": len(m.group(1)),
+                "line": idx + 1,          # 1-based，方便人去对照
+            })
+    return sections
+
+
+def _slice_section(lines: list[str], sections: list[dict], keyword: str) -> str:
+    """按关键词截出单节：从其标题到下一个**同级或更高级**标题之前。
+
+    找不到命中的小节 → `KeyError`（调用方翻成 404）。
+    """
+    start_idx = None
+    for i, s in enumerate(sections):
+        if keyword in s["title"]:
+            start_idx = i
+            break
+    if start_idx is None:
+        raise KeyError(f"没有标题含 {keyword!r} 的小节")
+    sec = sections[start_idx]
+    # 结束位置 = 下一个 level ≤ 本节 的标题
+    end_line = len(lines) + 1
+    for s in sections[start_idx + 1:]:
+        if s["level"] <= sec["level"]:
+            end_line = s["line"]
+            break
+    return "\n".join(lines[sec["line"] - 1:end_line - 1])
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -208,6 +263,74 @@ class App:
         session.submit(player_id, plan)
         return {"ok": True, "state": session.state_for(player_id)}
 
+    # ── ★ AI 秘书的三个只读端点（§11.4）──────────────────
+    #
+    # ⚠️ 三个端点**全部只读**：不落存档、不改 GameState、不动 plans。
+    #    AI 可解释 / 可试算 / 可起草，但 **AI 无 commit** ——
+    #    提交与结算永远走上面的 /api/submit，由玩家确认。
+
+    def simulate(self, body: dict) -> dict:
+        """试算：跑一遍真引擎的副本，返回**本季试算报告**。
+
+        ⚠️ **时机与 /api/submit 同口径**：不在行动阶段 → 409 `conflict`。
+        ⚠️ **先校验再试算**：`preview` 本身不查计划合法性（它只跑引擎），
+           所以这里**显式**走 `validate_plan` —— 与 /api/submit 是同一处校验，
+           非法 → 400 `plan_rejected` + 五要素 issues，不会让引擎在 KeyError 上炸成 500。
+        """
+        session = self.registry.get(_need(body, "game"))
+        player_id = _need(body, "player")
+        plan = plan_from_dict(body.get("plan") or {})
+        if session.phase is not SessionPhase.COLLECTING:
+            raise Conflict(
+                f"当前不在行动阶段（{session.phase.value}），不能试算"
+            )
+        issues = session.validate_only(plan, player_id)
+        if issues:
+            from engine.validate import PlanRejected
+            raise PlanRejected(issues)
+        rep = session.simulate(plan)
+        return {"ok": True, "report": rep.to_dict()}
+
+    def validate(self, body: dict) -> dict:
+        """只校验，不试算、不落任何状态。
+
+        形状与 /api/submit 完全相同：合法 → 200 `{ok, valid, issues: []}`；
+        非法 → 400 `plan_rejected` + 五要素 issues（前端与 AI 用同一套解析）。
+        """
+        session = self.registry.get(_need(body, "game"))
+        player_id = _need(body, "player")
+        plan = plan_from_dict(body.get("plan") or {})
+        issues = session.validate_only(plan, player_id)
+        if issues:
+            from engine.validate import PlanRejected
+            raise PlanRejected(issues)
+        return {"ok": True, "valid": True, "issues": []}
+
+    def rules(self, params: dict) -> dict:
+        """把《规则基线》原样给出去（给 AI 用）。
+
+        `?section=关键词`：给了就只回该小节（从其标题到下一个同级或更高级标题之前）；不给就回全文。
+        """
+        text = _read_rules_text()
+        sections = _scan_sections(text)
+        # 第一行（首个 `# ` 行）作为 title
+        first_line = text.splitlines()[0] if text else ""
+        m = re.match(r"^#\s+(.+?)\s*$", first_line)
+        title = m.group(1) if m else first_line.lstrip("# ").strip()
+
+        section = params.get("section")
+        if section:
+            sliced = _slice_section(text.splitlines(), sections, section)
+        else:
+            sliced = text
+        return {
+            "ok": True,
+            "source": RULES_SOURCE,
+            "title": title,
+            "text": sliced,
+            "sections": sections,
+        }
+
     def end_quarter(self, body: dict) -> dict:
         session = self.registry.get(_need(body, "game"))
         player_id = _need(body, "player")
@@ -262,6 +385,7 @@ _ERROR_MAP: list[tuple[type, int, str]] = [
     (PlanRejected, 400, "plan_rejected"),
     (Conflict, 409, "conflict"),
     (GameNotFound, 404, "not_found"),
+    (KeyError, 404, "not_found"),
     (ValueError, 400, "bad_input"),
     (StorageError, 500, "storage_error"),
 ]
@@ -302,6 +426,9 @@ ROUTES: dict[str, tuple[str, bool, str]] = {
     "/api/report":        ("GET",  False, "report"),
     "/api/build_options": ("GET",  False, "build_options"),
     "/api/submit":        ("POST", True,  "submit"),
+    "/api/simulate":      ("POST", True,  "simulate"),
+    "/api/validate":      ("POST", True,  "validate"),
+    "/api/rules":         ("GET",  False, "rules"),
     "/api/end_quarter":   ("POST", True,  "end_quarter"),
     "/api/next_quarter":  ("POST", True,  "next_quarter"),
 }

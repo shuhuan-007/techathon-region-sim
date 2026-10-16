@@ -116,6 +116,17 @@ class GameSession:
         with self.lock:
             return report.build_map(self.state, player_id)
 
+    def validate_only(self, plan: Plan, player_id: str) -> list:
+        """只校验，不试算、不落任何状态（给 `POST /api/validate`）。
+
+        ⚠️ **只读**：调 `engine.validate.validate_plan` 拿问题列表就返回。
+           不提交、不入 `plans`、不改 `phase`、不落存档。
+        """
+        with self.lock:
+            return validate.validate_plan(
+                plan, self.state.player(player_id), self.cfg, player_id
+            )
+
     # ── 写（全部串行） ────────────────────────────────────
 
     def submit(self, player_id: str, plan: Plan) -> None:
