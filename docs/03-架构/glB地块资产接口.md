@@ -64,6 +64,8 @@ region-sim/web/assets/plots/<key>.glb
   （`ASSETS_DIR` / `ASSETS_EXT`），换格式只改这两处常量与目录里的文件。
 - 前端经 `/static/assets/plots/<key>.glb` 取文件（`server/app.py` 的静态路由已覆盖 web/ 全目录，无需改动）。
 
+> ✅ **目录已统一为 `assets/plots`（2026-10-17）**：以引擎 `ASSETS_DIR` 为准，旧的 `web/assets/tiles/` **已移除**（原先仅是空目录、从未被代码使用）。占位说明见 `web/assets/plots/README.md`。
+
 ---
 
 ## 三、manifest 形状（`/api/map` 响应）

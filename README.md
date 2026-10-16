@@ -21,10 +21,10 @@
 
 | 你的角色 | 先看 |
 |---|---|
-| 写引擎/后端 | [`docs/03-架构/项目架构-总.md`](docs/03-架构/项目架构-总.md) → `engine/` |
-| 写前端 | [`docs/04-交接/前端设计规范.md`](docs/04-交接/前端设计规范.md) · [`界面要显示的变量清单`](docs/04-交接/界面要显示的变量清单.md) → `web/` |
-| 整理数据/规则 | [`docs/04-交接/规则细化交接书.md`](docs/04-交接/规则细化交接书.md) → `config/` |
-| 写 AI 层 | [`docs/03-架构/AI自主演算-架构影响.md`](docs/03-架构/AI自主演算-架构影响.md) → `ai/` |
+| 写引擎/后端 | [`docs/03-架构/项目架构-总.md`](docs/03-架构/项目架构-总.md) → `region-sim/engine/` |
+| 写前端 | [`docs/04-交接/前端设计规范.md`](docs/04-交接/前端设计规范.md) · [`界面要显示的变量清单`](docs/04-交接/界面要显示的变量清单.md) → `region-sim/web/` |
+| 整理数据/规则 | [`docs/04-交接/规则细化交接书.md`](docs/04-交接/规则细化交接书.md) → `region-sim/config/` |
+| 写 AI 层 | [`docs/03-架构/AI自主演算-架构影响.md`](docs/03-架构/AI自主演算-架构影响.md) → `region-sim/ai/` |
 
 > ⚠️ **前端布局一切以实际程序为准**，随时调整。
 > [`region-sim/web/prototype-v0.html`](region-sim/web/prototype-v0.html) 是**参考**，不是规格书——
@@ -121,6 +121,8 @@ preview(state, plans) -> Report       # 试算，不改状态（AI 和 UI 都用
 
 ## 六、开工顺序（测试先行）
 
+> **本表是开工时的计划视图，不是进度看板**；现状看 §七「现状简报」。
+
 | 步 | 做什么 |
 |---|---|
 | **1** | **`tests/test_m1.py`** —— 先写死验收数字 |
@@ -176,6 +178,14 @@ M1 最小账本 → **M1.5 粮食/幸福度链** → M2 效率/全配方 → M3 
 >
 > 📌 **现状简报**：想一次看清"现在什么状态 / 还差什么 / 下一步写什么"，
 > 看外层的 [**`项目现状与下一步.md`**](项目现状与下一步.md)（2026-10-16 实测快照）。
+>
+> ✅ **最新进度（2026-10-17 凌晨快照）**：
+> - **第 8 步政策系统已落地**：`region-sim/engine/policies.py`（**常规环境 / 生产激励 / 精益运营 / 民生优先** 四项，每季抽 1 项、各 25%、仅当季有效），`tests/test_policies.py` **29 项**。
+> - **开局减免已定案并落码**：每类 **3 个名额 × 折扣 0.50**（config `opening.discount_quota` / `discount_rate`，测试钉住见 `tests/test_pipeline.py`）。
+> - **合同交付已实现**：玩家对玩家双向提交、互相确认才生效（`tests/test_contracts.py`）；**单人局机制上不可达**——这不是 bug。
+> - **三个只读接口已落地**：`POST /api/simulate` / `POST /api/validate` / `GET /api/rules`（前两个要带 `{game, player, plan}`；见 `tests/test_ai_endpoints.py`）。
+> - **`ai/` 层已建**：`region-sim/ai/tools.py`（preview / validate / draft_plan）＋ `rules_digest.py`，**import 边界自检**（`assert_import_boundary()`）钉住「AI 无 commit」，测试见 `tests/test_ai_layer.py`。
+> - glB 地块资产接口已定（`docs/03-架构/glB地块资产接口.md`），目录统一为 `web/assets/plots/`（模型未到位，前端回退 2D 格子）。
 
 ---
 

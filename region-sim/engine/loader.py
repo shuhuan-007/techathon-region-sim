@@ -791,13 +791,16 @@ def validate_config_ready(cfg: Config, goods: list[str] | None = None) -> list[s
             problems.append(f"商品 {g} 的弹性 Es/Ed 未填（无法算价）")
 
     if cfg.opening_cash is None:
-        problems.append("开局现金 opening_cash 未拍板")
+        problems.append("开局现金 opening_cash 未填")
 
     if not cfg.construction.get("works"):
         problems.append("建设/升级表 construction.works 为空（M1 之后需要）")
 
+    # 开局减免名额已裁定（2026-10-16：每类 3 个 × 折扣 0.50）。
+    # 只有「整个 quota 缺失」或「全部为 None」才算真没填、才报；
+    # 只要有一类填了数，就当配置齐了，不再报。
     quota = cfg.opening_quota or {}
-    if all(v is None for v in quota.values()) or not quota:
-        problems.append("开局分类减免名额 discount_quota 未填（机制已定、数值待设计）")
+    if not quota or all(v is None for v in quota.values()):
+        problems.append("开局分类减免名额 discount_quota 未填")
 
     return problems
