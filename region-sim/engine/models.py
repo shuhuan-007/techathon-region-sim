@@ -1,0 +1,869 @@
+"""核心数据模型 —— 全部状态对象的定义。
+
+═══════════════════════════════════════════════════════════════════
+这是全项目最贵的一个文件，改动会牵动全身
+═══════════════════════════════════════════════════════════════════
+依据《规则基线》§1.2 骨架与 §1.1「五条写法红线」。
+
+★ 五条红线里，**第一条最贵**：玩家身份永远用 `player_id` 索引。
+
+    ✅ state.players["p1"].cash
+    ❌ state.cash
+
+第一期功能上只做单人（一局一个玩家、不联机），但**结构按多人写**。
+理由：把玩家状态摊在顶层，以后加联机几乎等于重写；
+守住这一条，单→多扩展的全部代价就只有**三处**：
+
+    ① players 字典        ② player_id 参数        ③ advance 收 plans 字典
+
+═══════════════════════════════════════════════════════════════════
+共享 vs 私有：一切设计从这里分叉（红线 2）
+═══════════════════════════════════════════════════════════════════
+    WorldState（共享）   quarter / policies / price_history / market
+                         —— 所有玩家看得见、会互相争夺
+    PlayerState（私有）  cash / plots / inventory / debts / credit_flag
+                         —— 每人一份，挂在 players[player_id] 下
+
+判断一个新字段放哪，问一句：**"两个玩家会抢它吗？"**
+会抢（市场价、政策）→ 共享；不会抢（自己的现金、自己的地）→ 私有。
+
+═══════════════════════════════════════════════════════════════════
+定下的四个"接口形状"（《规则基线》§10 第 0 步硬阻塞）
+═══════════════════════════════════════════════════════════════════
+① config schema   → 见 loader.py 与 config/schema（本文件只定义运行时对象）
+② 地块 ID / 地图   → PlotId，格式 "r,c"，八邻格枚举见 neighbors()
+③ Plan 结构        → 见文件后半段
+④ 存档格式         → 每个类都有 to_dict / from_dict
+
+⚠️ 数值一律**不进代码**：经营费 c、劳动 d、产量 e、价格 P0 等
+   全部来自 config，由 loader 读入后塞进 Recipe / MarketCurve。
+   本文件只定义"形状"，不含任何游戏平衡数字。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from enum import Enum
+from typing import Iterable, Iterator, Optional
+
+# ══════════════════════════════════════════════════════════════════
+# 一、枚举：有限的几种"状态"
+# ══════════════════════════════════════════════════════════════════
+
+
+class PlotType(str, Enum):
+    """地块类型。决定走哪套配方、哪套邻接规则。
+
+    ⚠️ 服务（SERVICE）是**唯一**需要特殊分支的类型：
+       它 0→0 不产出商品，邻接按"任何邻居 +10%"算（§3.6），
+       其余类型走关联表 +5%/封顶（§3.2）。
+    """
+
+    AGRICULTURE = "agriculture"  # 农业：产 A/B/C/D
+    RESOURCE = "resource"        # 资源：产 F
+    INDUSTRY = "industry"        # 工业：产 G / H-* / I
+    SERVICE = "service"          # 服务：0→0，纯基础设施
+    RESEARCH = "research"        # 研究：0→0，出效率加成
+
+    @property
+    def is_service(self) -> bool:
+        """服务地块走独立分支（邻接 +10%/任何邻居，且无商品产出）。"""
+        return self is PlotType.SERVICE
+
+    @property
+    def produces_goods(self) -> bool:
+        """是否会产出商品进全国市场。
+
+        服务与研究都**不产出商品**——服务换邻接加成，研究换效率加成。
+        它们的产出不体现在市场，而体现在**别的地块的数字**上。
+        """
+        return self not in (PlotType.SERVICE, PlotType.RESEARCH)
+
+
+class PlotStatus(str, Enum):
+    """地块状态机（《项目架构-总》§三 的第三条）。
+
+        空地 EMPTY ──建造──> 在建 CONSTRUCTING ──完工──> 运行 RUNNING
+                                  ↑                          │
+                                  └────────升级──────────────┘
+
+    `CONSTRUCTING` 覆盖"新建"与"升级中"两种情况——两者共用同一套
+    工期推进逻辑。区别只在完成后等级 +0 还是 +1。
+
+    ⚠️ 在建/升级中的地块：
+       · **不提供**邻接加成（§3.2 排除项）
+       · **不提供**研究加成
+       · 不进 ḡ（平均等级）的计算（§3.3.2）
+    """
+
+    EMPTY = "empty"                # 空地：地图开局就是这个状态
+    CONSTRUCTING = "constructing"  # 在建 / 升级中
+    RUNNING = "running"            # 正常运行
+
+
+class SessionPhase(str, Enum):
+    """会话状态机（《回合流程与状态机》§一）。
+
+        COLLECTING（收计划）→ RESOLVING（结算）→ REPORT（月报）→ 回到 COLLECTING
+
+    玩家动作**只有一个时点**：提交本季 Plan。
+    单人 = 多人的特例：len(plans) == len(players) 提交即成立，无等待逻辑。
+    """
+
+    COLLECTING = "collecting"
+    RESOLVING = "resolving"
+    REPORT = "report"
+
+
+class WorldPhase(str, Enum):
+    """世界状态机：开局 → 进行 → 结束。"""
+
+    SETUP = "setup"        # 开局摆放地块阶段（吃分类减免名额）
+    RUNNING = "running"    # 正常进行
+    FINISHED = "finished"  # 到达总季数
+
+
+# ══════════════════════════════════════════════════════════════════
+# 二、地图与地块 ID
+# ══════════════════════════════════════════════════════════════════
+
+# 地块 ID 采用 "r,c" 坐标制（0 基）。
+# 例："0,0" 左上角、"9,9" 右下角（地图 10×10）。
+#
+# ⚠️ 为什么用 "r,c" 而不是 "x3_y5"：
+#    ① 八邻格枚举时，行列各自 ±1 即可，不用做字符串拆解；
+#    ② 排序后天然是"从上到下、从左到右"，UI 渲染顺序稳定；
+#    ③ 存档可读性够用（规则基线提过的 "x3_y5" 只是举例）。
+PLOT_ID_SEP = ","
+
+
+def make_plot_id(row: int, col: int) -> str:
+    """由行列号生成地块 ID。"""
+    if row < 0 or col < 0:
+        raise ValueError(f"地块坐标不能为负：({row}, {col})")
+    return f"{row}{PLOT_ID_SEP}{col}"
+
+
+def parse_plot_id(plot_id: str) -> tuple[int, int]:
+    """地块 ID → (row, col)。格式错误时抛 ValueError。"""
+    parts = str(plot_id).split(PLOT_ID_SEP)
+    if len(parts) != 2:
+        raise ValueError(f"地块 ID 格式应为 'r,c'，收到 {plot_id!r}")
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"地块 ID 的行列必须是整数，收到 {plot_id!r}") from None
+
+
+# 八邻格偏移（含对角）。顺序固定：从左上开始顺时针——
+# 顺序固定很重要，保证遍历结果可复现（确定性要求）。
+_NEIGHBOR_OFFSETS: tuple[tuple[int, int], ...] = (
+    (-1, -1), (-1, 0), (-1, 1),
+    (0, -1), (0, 1),
+    (1, -1), (1, 0), (1, 1),
+)
+
+
+def neighbors(plot_id: str, rows: int, cols: int) -> list[str]:
+    """返回地块的**八邻格** ID 列表（越界的自动剔除）。
+
+    邻接是本项目第一条效率规则（§3.2）的计算基础：
+    数出"落在关联表里的邻居个数 n"，`E_邻接 = 1 + min(0.05n, 0.40)`。
+
+    ⚠️ 只认**八邻格**，不是四邻格——对角相邻也算。
+       用户已拍板（§11.7-3）：八邻格 + 关联表 + 5%/40%。
+    """
+    row, col = parse_plot_id(plot_id)
+    out: list[str] = []
+    for dr, dc in _NEIGHBOR_OFFSETS:
+        r, c = row + dr, col + dc
+        if 0 <= r < rows and 0 <= c < cols:
+            out.append(make_plot_id(r, c))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════
+# 三、市场曲线（共享层）
+# ══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class MarketCurve:
+    """一种商品的供需曲线参数（§4.1）。
+
+    定价公式::
+
+        s = Es × Q0 / P0              # 供给斜率
+        d = |Ed| × Q0 / P0            # 需求斜率
+        P_t = P0 + (B_t − X_t)/(s + d)
+        P_t = max(P_t, 0.1 × P0)      # 价格下限 P_min
+
+    其中 `B_t` = 本季从公开市场买入量，`X_t` = 本季准备卖出的量。
+
+    ⚠️ `Es` / `Ed` **允许为 None**（尚未由规则同学填写）。
+       这不是"默认 0.5"——交接书里"先全用 0.5"只是**建议**，
+       不是裁定。纪律见《规则基线》§11.6：
+       **不得为填满配置而编造数据**。
+       读到 None 时，`slopes()` 会明确报错，而不是偷偷用个默认值。
+    """
+
+    goods: str
+    P0: float                 # 参考价
+    Q0: float                 # 基准量
+    Es: Optional[float] = None   # 供给弹性（待填）
+    Ed: Optional[float] = None   # 需求弹性（待填）
+    P_min_ratio: float = 0.1     # 价格下限 = P_min_ratio × P0
+
+    # 外部固定收购量（§8.5 的 30/15/10）。
+    # ⚠️ **已全部停用（✅ 2026-10-16 定案）**：用户裁定"暂时没有固定采购"——
+    #    `H-*` / `I` / `H+` 的固定收购**一律不生效**，所有商品**只走供需曲线**
+    #    S_外(P) / D_外(P)，外部没有兜底买家（《规则基线》§8.5）。
+    #    停用理由：固定收购量无条件生效 = **无限量免费买家，可直接套利**。
+    #    因此本字段**应保持 0、且不参与任何定价计算**（引擎里除序列化外无引用）；
+    #    `config.json` 里不必再写它。待调项：若实测"机械卖不出去"卡玩法，
+    #    再加**带上限或带价格条件**的兜底买家 —— 第一期不加。
+    external_purchase: float = 0.0
+
+    def slopes(self) -> tuple[float, float]:
+        """返回 (s, d)。缺弹性时**明确报错**，不编造默认值。"""
+        if self.Es is None or self.Ed is None:
+            raise ValueError(
+                f"商品 {self.goods!r} 的弹性 Es/Ed 未填 —— 不能计算价格。\n"
+                f"  请让规则同学补上（见 docs/04-交接/规则细化交接书.md §五.1）。\n"
+                f"  ⚠️ 不要用默认值糊过去：弹性直接决定成交价，"
+                f"捏一个值会让后面所有对账失去意义。"
+            )
+        if self.P0 == 0:
+            raise ValueError(f"商品 {self.goods!r} 的 P0 = 0，无法计算斜率")
+        s = self.Es * self.Q0 / self.P0
+        d = abs(self.Ed) * self.Q0 / self.P0
+        return s, d
+
+    @property
+    def P_min(self) -> float:
+        """价格下限（§4.1）。触底后按可实现需求量分配，不保证全量收购。"""
+        return self.P_min_ratio * self.P0
+
+    def price(self, bought: float = 0.0, sold: float = 0.0) -> float:
+        """按供需求本季成交价（§4.1）。
+
+        bought = B_t（本季买入量），sold = X_t（本季卖出量）。
+        不触底时用线性解；触底则返回 P_min。
+        """
+        s, d = self.slopes()
+        denom = s + d
+        if denom == 0:
+            raise ValueError(f"商品 {self.goods!r} 的 s + d = 0，曲线退化为水平线")
+        raw = self.P0 + (bought - sold) / denom
+        return max(raw, self.P_min)
+
+    def to_dict(self) -> dict:
+        return {
+            "goods": self.goods, "P0": self.P0, "Q0": self.Q0,
+            "Es": self.Es, "Ed": self.Ed,
+            "P_min_ratio": self.P_min_ratio,
+            "external_purchase": self.external_purchase,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MarketCurve":
+        return cls(
+            goods=data["goods"], P0=data["P0"], Q0=data["Q0"],
+            Es=data.get("Es"), Ed=data.get("Ed"),
+            P_min_ratio=data.get("P_min_ratio", 0.1),
+            external_purchase=data.get("external_purchase", 0.0),
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 四、配方（静态数据，从 config 读入）
+# ══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class Recipe:
+    """一条配方 = "基准满负荷一个季度"的投入产出（§2.1）。
+
+    ★ 这句话是**所有数值校准的地基**，必须理解成"整批"：
+
+        不是"生产 1 单位需要多少投入"，
+        而是"一季度跑满，产出 e 单位，消耗 input 那么多、花 c 现金、占 d 劳动"。
+
+    所以 `u`（开工比例）与 `E`（效率）改变时：
+        产量     = e × u × E          ← 产出随两者变
+        商品投入 = 基础投入 × u × E    ← 原料跟着一起变
+        劳动需求 = d × u               ← ★ 劳动**不乘 E**（六条铁律之一）
+        经营费   = 0.7c + 0.3c×u×E     ← 固定部分 + 变动部分
+
+    ⚠️ 劳动不乘 E 是最容易写错的一条：效率提高意味着"同样的人
+       处理更多批次"，而不是"雇更多人"。
+    """
+
+    plot_type: PlotType
+    level: int                      # 1 / 2 / 3
+    output: Optional[str]           # 产出商品；服务与研究为 None
+    input: dict[str, float] = field(default_factory=dict)   # 商品 → 数量
+    c: float = 0.0                  # 经营费（不含采购、不含工资）
+    d: float = 0.0                  # 劳动
+    e: float = 0.0                  # 产量
+
+    @property
+    def key(self) -> tuple[PlotType, int]:
+        return (self.plot_type, self.level)
+
+    def to_dict(self) -> dict:
+        return {
+            "plot_type": self.plot_type.value, "level": self.level,
+            "output": self.output, "input": dict(self.input),
+            "c": self.c, "d": self.d, "e": self.e,
+        }
+
+
+# ══════════════════════════════════════════════════════════════════
+# 五、地块（私有层）
+# ══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class Plot:
+    """一块地（§1 私有层）。
+
+    状态机：空地 → 在建 → 运行（见 PlotStatus）。
+    磨合（`running_quarters`）从**首次可用**起算，决定 E_磨合：
+        第 1 季 0.5、第 2 季 0.75、第 3 季起 1.0（§3.1）
+    """
+
+    plot_id: str
+    plot_type: PlotType
+    level: int = 1
+    status: PlotStatus = PlotStatus.RUNNING
+
+    # 磨合计数：正常运行了多少个季度（0 = 刚建好，本季还没跑过）
+    running_quarters: int = 0
+
+    # 在建 / 升级的剩余工期（季）。
+    # 归零时由 pipeline 把 status 切到 RUNNING、level 生效。
+    construction_left: int = 0
+
+    # 升级目标等级（在建时有效）。新建时等于当前 level。
+    target_level: int = 1
+
+    # 已投入工程的物资（§11.2 工程材料分账）。
+    # 材料一旦投入就**离开普通库存**，因此不会被季末清仓卖掉。
+    construction_materials: dict[str, float] = field(default_factory=dict)
+
+    # 具体产什么 / 走哪条路线（交接书 §五.4 待拍板）。
+    # 例：工业 1 级产 G；工业 2 级可选 H-A / H-F / H-G / H-J；农业可选 A/B/C/D。
+    # ⚠️ 该字段**留空即由 config 的默认配方决定**，等拍板后启用。
+    product: Optional[str] = None
+
+    # ── 派生属性 ────────────────────────────────────────
+
+    @property
+    def is_running(self) -> bool:
+        """是否正常运行（可开工、可提供邻接加成）。"""
+        return self.status is PlotStatus.RUNNING
+
+    @property
+    def is_constructing(self) -> bool:
+        return self.status is PlotStatus.CONSTRUCTING
+
+    def recipe_key(self) -> tuple[PlotType, int]:
+        """本块地当前该用哪条配方。"""
+        return (self.plot_type, self.level)
+
+    def to_dict(self) -> dict:
+        return {
+            "plot_id": self.plot_id,
+            "plot_type": self.plot_type.value,
+            "level": self.level,
+            "status": self.status.value,
+            "running_quarters": self.running_quarters,
+            "construction_left": self.construction_left,
+            "target_level": self.target_level,
+            "construction_materials": dict(self.construction_materials),
+            "product": self.product,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Plot":
+        return cls(
+            plot_id=data["plot_id"],
+            plot_type=PlotType(data["plot_type"]),
+            level=data["level"],
+            status=PlotStatus(data["status"]),
+            running_quarters=data.get("running_quarters", 0),
+            construction_left=data.get("construction_left", 0),
+            target_level=data.get("target_level", data["level"]),
+            construction_materials=dict(data.get("construction_materials", {})),
+            product=data.get("product"),
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 六、政策与债务（占位，第一期不用）
+# ══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class Policy:
+    """政策机（§7.4 八字段）。
+
+    ⚠️ 第一期**空列表**。政策内容（3~5 条）尚未设计
+       （交接书 §五.9），这里只锁形状，让存档格式稳定。
+    """
+
+    policy_id: str
+    policy_type: str            # subsidy / quota / tariff
+    effective_quarter: int
+    duration: int
+    target_goods: str
+    target_player: str = "ALL"
+    parameter: float = 0.0
+    announcement: str = ""
+
+    def is_active(self, quarter: int) -> bool:
+        """本季是否生效（含首尾，`duration` 为持续季数）。"""
+        return self.effective_quarter <= quarter < self.effective_quarter + self.duration
+
+    def to_dict(self) -> dict:
+        return {
+            "policy_id": self.policy_id, "policy_type": self.policy_type,
+            "effective_quarter": self.effective_quarter, "duration": self.duration,
+            "target_goods": self.target_goods, "target_player": self.target_player,
+            "parameter": self.parameter, "announcement": self.announcement,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Policy":
+        return cls(**data)
+
+
+@dataclass
+class Debt:
+    """玩家间借贷（系统不放贷，§9 已声明不做）。
+
+    ⚠️ 第一期为空。违约流程（§10）只说"形成赔偿义务"，无金额公式，
+       故这里只留最小形状。
+    """
+
+    creditor: str
+    amount: float
+    due_quarter: int
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "creditor": self.creditor, "amount": self.amount,
+            "due_quarter": self.due_quarter, "note": self.note,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Debt":
+        return cls(**data)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 七、共享层状态
+# ══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class WorldState:
+    """共享层 —— 所有玩家看得见、会互相争夺的部分（红线 2）。
+
+    包含**世界时钟**、**市场曲线**、**政策**、**历史价格**。
+    玩家私有的东西一律不在这里（那样等于把红线 2 踩了）。
+    """
+
+    quarter: int = 1
+    rows: int = 10                          # 地图行数（已拍板 10×10）
+    cols: int = 10                          # 地图列数
+    total_quarters: int = 40                # 一局总季数（交接书建议 40）
+    phase: WorldPhase = WorldPhase.SETUP
+
+    market: dict[str, MarketCurve] = field(default_factory=dict)
+    policies: list[Policy] = field(default_factory=list)
+
+    # 上期价，供**结算时按上季价记账买入**使用。
+    # ★ 2026-10-16：玩家阶段只提交 Plan，**不扣钱、不锁价、不动账户**——
+    #    采购的**记账与付款都发生在结算时**（与工资、经营费一起一笔扣清）。
+    #    六条铁律第 3 条：**买入按上季价、卖出按本季价，但扣款全部集中在结算时**；
+    #    "期初采购"是旧口语说法，落点在【用哪个价】，不在【时点】。
+    #    见《规则基线》§4.1 交割时序 与 §6 第 5 步"一次性扣款"。
+    # 结构：{商品: [逐季价格]}，末位即"上期价"（last_price() 取的就是它）。
+    price_history: dict[str, list[float]] = field(default_factory=dict)
+
+    # ── 价格查询 ────────────────────────────────────────
+
+    def last_price(self, goods: str) -> float:
+        """上期价。没有历史时退回参考价 P0。
+
+        ⚠️ 开局第一季没有"上期价"，用参考价兜底——
+           基线 §8.1 的 M1 初始条件明确写了"上期价格 = 新参考价"。
+        """
+        hist = self.price_history.get(goods)
+        if hist:
+            return hist[-1]
+        curve = self.market.get(goods)
+        if curve is None:
+            raise KeyError(f"商品 {goods!r} 既无历史价、也不在市场配置里")
+        return curve.P0
+
+    def record_price(self, goods: str, price: float) -> None:
+        """把本期成交价记入历史（结转时调用）。"""
+        self.price_history.setdefault(goods, []).append(price)
+
+    def active_policies(self) -> list[Policy]:
+        """本季生效的政策。"""
+        return [p for p in self.policies if p.is_active(self.quarter)]
+
+    def in_bounds(self, plot_id: str) -> bool:
+        """坐标是否在地图内。"""
+        try:
+            r, c = parse_plot_id(plot_id)
+        except ValueError:
+            return False
+        return 0 <= r < self.rows and 0 <= c < self.cols
+
+    def all_plot_ids(self) -> list[str]:
+        """地图上全部格子 ID（按行列顺序，确定性）。"""
+        return [
+            make_plot_id(r, c)
+            for r in range(self.rows)
+            for c in range(self.cols)
+        ]
+
+    def neighbor_ids(self, plot_id: str) -> list[str]:
+        """该地块的八邻格（已按地图边界裁剪）。"""
+        return neighbors(plot_id, self.rows, self.cols)
+
+    def to_dict(self) -> dict:
+        return {
+            "quarter": self.quarter, "rows": self.rows, "cols": self.cols,
+            "total_quarters": self.total_quarters, "phase": self.phase.value,
+            "market": {g: c.to_dict() for g, c in self.market.items()},
+            "policies": [p.to_dict() for p in self.policies],
+            "price_history": {g: list(v) for g, v in self.price_history.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "WorldState":
+        return cls(
+            quarter=data.get("quarter", 1),
+            rows=data.get("rows", 10), cols=data.get("cols", 10),
+            total_quarters=data.get("total_quarters", 40),
+            phase=WorldPhase(data.get("phase", "setup")),
+            market={g: MarketCurve.from_dict(c) for g, c in data.get("market", {}).items()},
+            policies=[Policy.from_dict(p) for p in data.get("policies", [])],
+            price_history={g: list(v) for g, v in data.get("price_history", {}).items()},
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 八、私有层状态
+# ══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class PlayerState:
+    """单个玩家的私有状态（红线 2）。
+
+    ⚠️ 永远通过 `state.players[player_id]` 访问，**不要**摊到顶层。
+
+    `inventory` 是"计划内待用"的普通库存，**不是**自由仓库：
+    季末未消耗的部分会被清仓卖掉（§11.1），除非已投入已启动工程。
+    """
+
+    player_id: str
+    cash: float = 0.0
+    plots: dict[str, Plot] = field(default_factory=dict)
+    inventory: dict[str, float] = field(default_factory=dict)
+    debts: list[Debt] = field(default_factory=list)
+    credit_flag: bool = False
+
+    # 上一季的幸福度 H，供本季算 E_幸福（六条铁律第一条：
+    # 必须用**上一季**的 H，否则与"粮食 → H → 效率"形成循环依赖）。
+    # 开局 H₀ = 0.6（§3.3.5 已确认）。
+    last_happiness: float = 0.6
+
+    # 开局减免名额使用情况：{地块类型: 已用名额数}（§5.3）。
+    # ⚠️ 名额数值待定，config 留空；这里只记"用掉了几个"。
+    opening_quota_used: dict[str, int] = field(default_factory=dict)
+
+    # ── 地块访问（一律带 player_id 语义：这是"这个人"的地） ──
+
+    @property
+    def running_plots(self) -> list[Plot]:
+        """正常运行的地块（可开工、可提供邻接加成）。"""
+        return [p for p in self.plots.values() if p.is_running]
+
+    def running_plots_of(self, plot_type: PlotType) -> list[Plot]:
+        return [p for p in self.plots.values() if p.is_running and p.plot_type is plot_type]
+
+    def add_inventory(self, goods: str, qty: float) -> None:
+        """入库。数量为负时不允许（防止偷偷清零）。"""
+        if qty < 0:
+            raise ValueError(f"入库数量不能为负：{goods} {qty}")
+        self.inventory[goods] = self.inventory.get(goods, 0.0) + qty
+
+    def take_inventory(self, goods: str, qty: float) -> float:
+        """出库，返回**实际**取到的数量（不足则取光，不欠账）。
+
+        这条"取光不欠账"的语义与粮食结算一致（§3.3.6）：
+        扣减时有多少扣多少，不足扣光。
+        """
+        have = self.inventory.get(goods, 0.0)
+        actual = min(have, qty)
+        left = have - actual
+        if left > 1e-12:
+            self.inventory[goods] = left
+        else:
+            self.inventory.pop(goods, None)
+        return actual
+
+    def to_dict(self) -> dict:
+        return {
+            "player_id": self.player_id,
+            "cash": self.cash,
+            "plots": {pid: p.to_dict() for pid, p in self.plots.items()},
+            "inventory": dict(self.inventory),
+            "debts": [d.to_dict() for d in self.debts],
+            "credit_flag": self.credit_flag,
+            "last_happiness": self.last_happiness,
+            "opening_quota_used": dict(self.opening_quota_used),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PlayerState":
+        return cls(
+            player_id=data["player_id"],
+            cash=data["cash"],
+            plots={pid: Plot.from_dict(p) for pid, p in data.get("plots", {}).items()},
+            inventory=dict(data.get("inventory", {})),
+            debts=[Debt.from_dict(d) for d in data.get("debts", [])],
+            credit_flag=data.get("credit_flag", False),
+            last_happiness=data.get("last_happiness", 0.6),
+            opening_quota_used=dict(data.get("opening_quota_used", {})),
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 九、总状态
+# ══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class GameState:
+    """整个游戏状态 = 共享层 + 私有层（红线 2 的分层在这里体现）。
+
+    ⚠️ `players` **永远是字典**，即使第一期只有一个玩家。
+       这是单→多扩展三处代价里最贵的一处。
+    """
+
+    world: WorldState = field(default_factory=WorldState)
+    players: dict[str, PlayerState] = field(default_factory=dict)
+
+    # 最近一季的财报（**机器可读**，前端只显示、AI 只解读，都读这个）。
+    # `report` 是序列化后的字典；`raw_reports` 挂着运行时对象（不进存档）。
+    report: dict = field(default_factory=dict)
+    raw_reports: dict = field(default_factory=dict, repr=False, compare=False)
+
+    def player(self, player_id: str) -> PlayerState:
+        """取某个玩家的私有状态。不存在时**报错**，不静默造一个。"""
+        try:
+            return self.players[player_id]
+        except KeyError:
+            raise KeyError(
+                f"没有玩家 {player_id!r}。现有玩家：{sorted(self.players)}"
+            ) from None
+
+    @property
+    def player_ids(self) -> list[str]:
+        """全部玩家 ID（排序后返回，保证遍历确定性）。"""
+        return sorted(self.players)
+
+    def single_player(self) -> tuple[str, PlayerState]:
+        """第一期的便捷入口：取出唯一的玩家。
+
+        ⚠️ 只在**明确知道是单人局**的地方用（比如 M1 测试、单人 UI）。
+           引擎主流程一律用 `players` 字典遍历，不要用它走捷径——
+           那样会把多人结构写死成单人。
+        """
+        if len(self.players) != 1:
+            raise ValueError(
+                f"single_player() 要求恰好 1 个玩家，当前有 {len(self.players)} 个："
+                f"{sorted(self.players)}"
+            )
+        pid = next(iter(self.players))
+        return pid, self.players[pid]
+
+    def deep_copy(self) -> "GameState":
+        """深拷贝。用于 `preview()` 试算——**改副本，不动原件**。
+
+        ⚠️ 这是 `preview` 与 `advance` 共用一个实现的关键：
+           `preview` = `advance(deepcopy(state), plans)`，
+           所以试算的数字与真实结算**必然一致**。
+        """
+        from copy import deepcopy
+
+        return deepcopy(self)
+
+    def to_dict(self) -> dict:
+        return {
+            "world": self.world.to_dict(),
+            "players": {pid: p.to_dict() for pid, p in self.players.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GameState":
+        return cls(
+            world=WorldState.from_dict(data.get("world", {})),
+            players={pid: PlayerState.from_dict(p) for pid, p in data.get("players", {}).items()},
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 十、计划（Plan）—— 玩家一季度的全部操作
+# ══════════════════════════════════════════════════════════════════
+#
+# ★ 关键设计：Plan 是**纯数据**，完全可序列化。
+#
+#   这条不是风格问题，是 AI 边界问题：
+#   AI 帮玩家"起草可执行的操作"时，产出的是**数据**（一个 Plan 对象），
+#   不是函数调用。于是 AI 的 Plan 与玩家的 Plan 走**同一条 validate**，
+#   AI 没有特权 —— 这就是"能算 ≠ 能改"（见 docs/03-架构/AI自主演算-架构影响.md）。
+# ══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class PlotPlan:
+    """对**一块地**本季的安排（§1.2）。"""
+
+    plot_id: str
+    active: bool = True     # 是否开工
+    u: float = 1.0          # 开工比例 0–1
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.u <= 1.0:
+            raise ValueError(f"开工比例 u 必须在 0–1 之间，收到 {self.u}（地块 {self.plot_id}）")
+
+    @property
+    def effective_u(self) -> float:
+        """不开工时比例为 0（避免调用方忘记判断 active）。"""
+        return self.u if self.active else 0.0
+
+    def to_dict(self) -> dict:
+        return {"plot_id": self.plot_id, "active": self.active, "u": self.u}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PlotPlan":
+        return cls(plot_id=data["plot_id"], active=data.get("active", True), u=data.get("u", 1.0))
+
+
+@dataclass
+class BuildOrder:
+    """一条建设 / 升级指令（§5.2 工程表）。
+
+    `target_level` = 1 表示新建一级；> 当前等级表示升级。
+    """
+
+    plot_id: str
+    plot_type: PlotType
+    target_level: int = 1
+    # 升级/建造的具体路线产物（如工业 2 级选 H-A），留空用 config 默认
+    product: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "plot_id": self.plot_id, "plot_type": self.plot_type.value,
+            "target_level": self.target_level, "product": self.product,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BuildOrder":
+        return cls(
+            plot_id=data["plot_id"], plot_type=PlotType(data["plot_type"]),
+            target_level=data.get("target_level", 1), product=data.get("product"),
+        )
+
+
+@dataclass
+class ContractAction:
+    """合同动作（起草 / 接受 / 履约 / 违约）。
+
+    ⚠️ 第一期留桩：合同的执行逻辑（§10）尚不完整，
+       这里只保证 Plan 的形状稳定、可序列化。
+    """
+
+    action: str                 # draft / accept / deliver / breach
+    counterparty: str = ""
+    goods: str = ""
+    qty: float = 0.0
+    price: float = 0.0
+    quarter: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action, "counterparty": self.counterparty,
+            "goods": self.goods, "qty": self.qty,
+            "price": self.price, "quarter": self.quarter,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ContractAction":
+        return cls(**data)
+
+
+@dataclass
+class Plan:
+    """一个玩家一个季度的完整计划（§1.2）。
+
+    ⚠️ **只增不改**：玩家提交后不得修改。要改就是撤回重提，
+       第一期直接禁止（《回合流程与状态机》§三）。
+
+    ⚠️ **AI 填的和玩家填的是同一个东西**，走同一个 `validate`。
+    """
+
+    player_id: str
+    plot_plans: dict[str, PlotPlan] = field(default_factory=dict)
+    purchases: dict[str, float] = field(default_factory=dict)
+
+    # 本季**申报卖出**的量（§6 第 7 步的 X_t 来源）。
+    #
+    # ⚠️ 为什么要单独一个字段：粮食在**结算时**才扣（§3.3.6），
+    #    如果这里不区分"卖出"与"留着吃"，玩家买的口粮会在第 7 步
+    #    被一起卖掉，第 7.5 步就无粮可扣 —— 那样粮食机制等于不存在。
+    #
+    # 未申报卖出的部分：先供第 7.5 步粮食扣减，剩下的在第 7.7 步
+    # **强制清仓**（§11.1，不保留普通待售库存）。
+    sales: dict[str, float] = field(default_factory=dict)
+
+    builds: list[BuildOrder] = field(default_factory=list)
+    contracts: list[ContractAction] = field(default_factory=list)
+
+    def u_for(self, plot_id: str) -> float:
+        """取某地块的开工比例；未在计划里出现 = 不开工（0）。"""
+        pp = self.plot_plans.get(plot_id)
+        return pp.effective_u if pp else 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "player_id": self.player_id,
+            "plot_plans": {pid: pp.to_dict() for pid, pp in self.plot_plans.items()},
+            "purchases": dict(self.purchases),
+            "sales": dict(self.sales),
+            "builds": [b.to_dict() for b in self.builds],
+            "contracts": [c.to_dict() for c in self.contracts],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Plan":
+        return cls(
+            player_id=data["player_id"],
+            plot_plans={pid: PlotPlan.from_dict(pp) for pid, pp in data.get("plot_plans", {}).items()},
+            purchases=dict(data.get("purchases", {})),
+            sales=dict(data.get("sales", {})),
+            builds=[BuildOrder.from_dict(b) for b in data.get("builds", [])],
+            contracts=[ContractAction.from_dict(c) for c in data.get("contracts", [])],
+        )

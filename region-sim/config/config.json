@@ -1,0 +1,255 @@
+{
+  "_comment": [
+    "═══════════════════════════════════════════════════════════════",
+    "区域发展模拟 · 静态数据配置",
+    "═══════════════════════════════════════════════════════════════",
+    "铁律：凡是【数值】都进这个文件；凡是【公式】都进 engine/ 代码。",
+    "不要试图用本文件表达 if-else 逻辑。",
+    "",
+    "⚠️ 值为 null 的字段 = 规则同学尚未填写 = 程序读到会【明确报错】。",
+    "   这不是 bug，是纪律（《规则基线》§11.6）：",
+    "   不得为填满配置而编造数据。",
+    "   尤其 Es/Ed 直接决定成交价，捏一个值会让后续所有对账失去意义。",
+    "",
+    "数据源：docs/01-规范/规则基线.md §2.3 / §3.5 / §5.2 / §8.5",
+    "        docs/04-交接/规则细化交接书.md §一"
+  ],
+
+  "meta": {
+    "config_version": "0.1.0",
+    "rules_baseline": "V7",
+    "note": "M1 阶段：只填了 M1 需要的部分。弹性、建设表、开局名额等待填。"
+  },
+
+  "world": {
+    "rows": 10,
+    "cols": 10,
+    "_comment_total_quarters": "⚠️ 待拍板：交接书 §五.8 建议 40 季（高技术路线需 14 季工期）",
+    "total_quarters": 40,
+    "opening_cash": null,
+    "_comment_opening_cash": "⚠️ 待拍板：测试用 1000，正式值未定（交接书 §五.4 建议 1200）。null = 报错，不编造。"
+  },
+
+  "goods": {
+    "A":     { "name": "主粮",           "P0": 10,  "Q0": 2000, "Es": null, "Ed": null },
+    "B":     { "name": "杂粮",           "P0": 7,   "Q0": 2200, "Es": null, "Ed": null },
+    "C":     { "name": "油料",           "P0": 16,  "Q0": 200,  "Es": null, "Ed": null },
+    "D":     { "name": "纤维",           "P0": 26,  "Q0": 150,  "Es": null, "Ed": null },
+    "F":     { "name": "资源原料",       "P0": 24,  "Q0": 200,  "Es": null, "Ed": null },
+    "G":     { "name": "工业基础材料",   "P0": 56,  "Q0": 200,  "Es": null, "Ed": null },
+    "H-A":   { "name": "农业机械",       "P0": 64,  "Q0": 30,   "Es": null, "Ed": null },
+    "H-F":   { "name": "资源机械",       "P0": 68,  "Q0": 30,   "Es": null, "Ed": null },
+    "H-G":   { "name": "工业机械",       "P0": 73,  "Q0": 30,   "Es": null, "Ed": null },
+    "H-J":   { "name": "服务机械",       "P0": 64,  "Q0": 30,   "Es": null, "Ed": null },
+    "I":     { "name": "高技术产品",     "P0": 225, "Q0": 15,   "Es": null, "Ed": null },
+    "H-A+":  { "name": "自动化农业机械", "P0": 277, "Q0": 10,   "Es": null, "Ed": null },
+    "H-F+":  { "name": "自动化资源机械", "P0": 283, "Q0": 10,   "Es": null, "Ed": null },
+    "H-G+":  { "name": "自动化工业机械", "P0": 289, "Q0": 10,   "Es": null, "Ed": null },
+    "H-J+":  { "name": "自动化服务机械", "P0": 277, "Q0": 10,   "Es": null, "Ed": null }
+  },
+
+  "_comment_goods": [
+    "⚠️ 所有 Es/Ed 为 null（待规则同学填）。这是【待填数据】，程序读到会明确报错，不编造默认值。",
+    "★ 2026-10-16：external_purchase（H*/I 的 30/15/10 固定收购）已【全部停用】，字段已从本文件移除。",
+    "   用户裁定『暂时没有固定采购』。固定收购无条件生效 = 无限买家可套利（基线 §8.5 / §11.8-2）。",
+    "   所有商品一律只走供需曲线 S_外(P)/D_外(P)，外部没有兜底买家。",
+    "   ⚠️ 若实测发现『机械卖不出去』卡玩法，再加带条件的兜底买家 —— 第一期不加。",
+    "⚠️ 不要建 J/J2/J3（服务 0→0，不是商品）。",
+    "⚠️ 不要建 A2/A3（不分等级，共用同一编码）。"
+  ],
+
+  "recipes": {
+    "_comment": "字段含义：input/c/d/e 都是【基准满负荷一个季度】的整批值，不是生产 1 单位的投入。",
+
+    "agriculture": {
+      "_comment": "农业 0 商品投入，只烧钱和劳动。输出 A/B/C/D，各三级。",
+      "A": { "1": { "input": {}, "c": 20, "d": 2,   "e": 5  },
+             "2": { "input": {}, "c": 32, "d": 2,   "e": 8  },
+             "3": { "input": {}, "c": 48, "d": 1.5, "e": 12 } },
+      "B": { "1": { "input": {}, "c": 15, "d": 1.5, "e": 6  },
+             "2": { "input": {}, "c": 24, "d": 1.5, "e": 9  },
+             "3": { "input": {}, "c": 36, "d": 1.2, "e": 14 } },
+      "C": { "1": { "input": {}, "c": 25, "d": 2.5, "e": 4  },
+             "2": { "input": {}, "c": 40, "d": 2.5, "e": 6  },
+             "3": { "input": {}, "c": 60, "d": 2,   "e": 9  } },
+      "D": { "1": { "input": {}, "c": 30, "d": 3,   "e": 3  },
+             "2": { "input": {}, "c": 48, "d": 3,   "e": 5  },
+             "3": { "input": {}, "c": 72, "d": 2.5, "e": 7  } }
+    },
+    "_comment_D3": "⚠️ 三级 D 产量：配方v3 说 7，草稿2 说 7.5。交接书 §五.2 裁定以 v3 为准 = 7。已按 7 填。",
+
+    "resource": {
+      "_comment": "资源只产 F。M1 区域甲用的就是这条。",
+      "F": { "1": { "input": {}, "c": 30, "d": 3,   "e": 4 },
+             "2": { "input": {}, "c": 48, "d": 3,   "e": 6 },
+             "3": { "input": {}, "c": 72, "d": 2.5, "e": 9 } }
+    },
+
+    "industry": {
+      "_comment": "工业按等级与路线区分。M1 区域乙用的就是 G_L1。",
+      "G_L1":  { "input": { "C": 2, "D": 1, "F": 3 },              "c": 40,  "d": 3, "e": 5 },
+      "H-A_L2": { "input": { "G": 3, "F": 2 },                     "c": 80,  "d": 4, "e": 8 },
+      "H-F_L2": { "input": { "G": 3, "F": 3 },                     "c": 80,  "d": 4, "e": 8 },
+      "H-G_L2": { "input": { "G": 4, "F": 2 },                     "c": 80,  "d": 4, "e": 8 },
+      "H-J_L2": { "input": { "G": 3, "F": 2 },                     "c": 80,  "d": 4, "e": 8 },
+      "I_L3":   { "input": { "F": 3, "G": 2, "H-G": 1 },           "c": 120, "d": 6, "e": 4 },
+      "H-A+_L3": { "input": { "F": 2, "G": 2, "I": 1, "H-A": 4 },  "c": 100, "d": 4, "e": 4 },
+      "H-F+_L3": { "input": { "F": 2, "G": 2, "I": 1, "H-F": 4 },  "c": 100, "d": 4, "e": 4 },
+      "H-G+_L3": { "input": { "F": 2, "G": 2, "I": 1, "H-G": 4 },  "c": 100, "d": 4, "e": 4 },
+      "H-J+_L3": { "input": { "F": 2, "G": 2, "I": 1, "H-J": 4 },  "c": 100, "d": 4, "e": 4 }
+    },
+    "_comment_industry": "I_L3 每季消耗 H-G×1 —— 解释为专用设备模块的更新耗损，与建厂时安装的 H-G 是两笔不同用途的投入，不算重复收费（基线 §2.4）。⚠️ 这条解释必须保留在注释里。",
+
+    "service": {
+      "_comment": "★ 服务 0→0：不产出商品、不采购物资，纯资金流。output = null。",
+      "1": { "input": {}, "c": 20, "d": 3,   "e": 0, "output": null },
+      "2": { "input": {}, "c": 32, "d": 3,   "e": 0, "output": null },
+      "3": { "input": {}, "c": 48, "d": 2.5, "e": 0, "output": null }
+    },
+
+    "research": {
+      "_comment": "研究 0→0：烧钱出效率加成（+1%/块，玩家内封顶 +3%）。",
+      "maintain": { "input": {}, "c": 60, "d": 2, "e": 0, "output": null }
+    }
+  },
+
+  "wages": {
+    "_comment": "工资/单位劳动/季（基线 §3.5）。M1 甲用 resource=12，乙用 industry_g=15。",
+    "agriculture": 8,
+    "resource": 12,
+    "industry_g": 15,
+    "machine": 20,
+    "high_tech": 28,
+    "service": 16
+  },
+
+  "efficiency": {
+    "_comment": "效率四分量参数（基线 §3.1 / §3.2 / §3.3.5 / §3.6）。",
+    "adjacency": {
+      "per_neighbor": 0.05,
+      "cap": 0.40,
+      "_comment_service": [
+        "★ 2026-10-16 改定：服务『给出去』的加成按【服务自身等级】取率，",
+        "   取代此前的『任何邻居一律 +10%』。",
+        "   原写法导致一级/三级服务收益相同、升级无意义。",
+        "   service_cap = null 表示暂不封顶（初始估值，实测后再定）。"
+      ],
+      "service_rate_by_level": { "1": 0.05, "2": 0.075, "3": 0.10 },
+      "service_cap": null,
+      "table": {
+        "agriculture": ["agriculture", "resource"],
+        "resource":    ["resource", "industry"],
+        "industry":    ["industry", "resource"],
+        "service":     ["service", "agriculture", "industry"],
+        "research":    ["industry", "high_tech"]
+      }
+    },
+    "happiness": {
+      "baseline_h": 0.6,
+      "slope": 0.5,
+      "floor": 0.90,
+      "initial_h": 0.6
+    },
+    "ramp_up": {
+      "_comment": "磨合：第 1 季 0.5、第 2 季 0.75、第 3 季起 1.0",
+      "1": 0.5,
+      "2": 0.75,
+      "default": 1.0
+    },
+    "research_bonus": {
+      "per_plot": 0.01,
+      "cap": 0.03
+    }
+  },
+
+  "population": {
+    "_comment": [
+      "★ 2026-10-16：取消 round。N = L × r 直接保留小数（基线 §3.3.1）。",
+      "  L = Σ(d×u) 本身是劳动当量，u 是 0-1 比例、三级地块 d=1.5，故 L 天然带小数。",
+      "  引擎一律存小数（否则账对不上），显示层负责取整。",
+      "  全文计算链不再有任何四舍五入。"
+    ],
+    "r": 2,
+    "level_multiplier_slope": 0.15,
+    "base_baskets_per_person": 5,
+    "good_tier_multiplier": 1.5
+  },
+
+  "food": {
+    "_comment": "两档粮食需求（基线 §3.3.3）。注意 A/B 必须都有且可互换。",
+    "baseline_quota": { "A": 0.4, "B": 0.2 },
+    "good_quota":     { "A": 0.4, "B": 0.2, "C": 0.1, "D": 0.02 },
+    "replaceable_goods": ["A", "B"]
+  },
+
+  "tax": {
+    "wage_tax_rate": 0.10,
+    "_comment": "工资税 10%：工资支出记税前总额，税记回流收入（基线 §10）。"
+  },
+
+  "production": {
+    "_comment": [
+      "经营费拆分（基线 §3.4）：",
+      "   u = 0  → 经营费 = 0",
+      "   u > 0  → 经营费 = fixed_share×c + variable_share×c×u×E",
+      "即 0.7c + 0.3c·u·E。固定部分照付，变动部分随开工比例与效率放大。",
+      "⚠️ 这两个数是【规则常量】，不是平衡数值 —— 改它们等于改公式，不是调参。"
+    ],
+    "operating_fixed_share": 0.7,
+    "operating_variable_share": 0.3
+  },
+
+  "trade": {
+    "_comment": [
+      "  buy_price_source = last_settlement：买入按【上一季度结算价】记账。",
+      "  sell_price_source = current：卖出按【本季求出的 P_t】。",
+      "  deduct_timing = settlement：物资款 + 工资 + 经营费，在结算时【一次性】扣。",
+      "     玩家阶段（期初）只提交 Plan，不扣钱、不锁价、不动账户。",
+      "  buy_volume_includes = 三段全计入本季需求侧，买入动作会把本季价格顶高：",
+      "     ① production_input 生产原料",
+      "     ② construction     建设物资（一次性买入，但同样扰动市场）",
+      "     ③ household_food   居民口粮",
+      "  首季无上季价 → 用参考价 P0 兜底（基线 §8.1）。"
+    ],
+    "buy_price_source": "last_settlement",
+    "sell_price_source": "current",
+    "deduct_timing": "settlement",
+    "buy_volume_includes": ["production_input", "construction", "household_food"],
+    "first_quarter_price_fallback": "P0"
+  },
+
+  "concurrency": {
+    "_comment": [
+      "★ 2026-10-16：限制并发（基线 §1.3.1）。",
+      "  同一局同一时刻只允许一个请求，全部串行。",
+      "  ⚠️ 锁只活在【服务层】，引擎是纯函数、不知道锁的存在。",
+      "  锁的粒度是每局一把（按 game_id），不同局互不阻塞。"
+    ],
+    "per_game_lock": true,
+    "lock_scope": "per_game",
+    "serialize_submit": true,
+    "lock_release_in_finally": true
+  },
+
+  "construction": {
+    "_comment": "⚠️ 待填：建设/升级全表（基线 §5.2）。M1 用不到（无工程）。",
+    "works": {}
+  },
+
+  "opening": {
+    "_comment": [
+      "⚠️ 开局分类减免名额（§5.3）：机制已定，数值待设计。",
+      "   用户说 2/2/1 只是举例，不要照抄。null = 未定。",
+      "   旧方案 discount_by_type_count（按品种数给 0/10/20/30%）已作废。"
+    ],
+    "discount_quota": {
+      "agriculture": null,
+      "resource": null,
+      "industry": null,
+      "service": null
+    },
+    "discount_rate": null
+  },
+
+  "policies": []
+}

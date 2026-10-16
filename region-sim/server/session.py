@@ -1,0 +1,163 @@
+"""会话 —— 三状态机 + **每局一把串行锁**。
+
+依据《规则基线》§1.3.1（限制并发）与《项目架构-总》§三 / §七。
+
+═══════════════════════════════════════════════════════════════════
+★ 限制并发（2026-10-16 定案）
+═══════════════════════════════════════════════════════════════════
+
+**同一局同一时刻只允许一个请求在跑，全部串行。**
+
+    game_id → Lock       一个请求进 → 拿锁 → 算完 → 释放 → 下一个才能进
+
+为什么必须这样：
+
+  · `advance()` 会**整体改写状态**。两个请求同时跑 = 状态被交叉覆盖，账必错。
+  · 结算必须"**一次算完**"。中途被打断会留下半个季度，比崩溃更难查。
+
+四条落地要点（§1.3.1）：
+
+  1. 锁的粒度是**每局一把**（按 game_id），不是全局一把 —— 不同局互不阻塞
+  2. **提交计划也走串行**：`plans` 只增不改，配合锁天然满足"只能提交一次"
+  3. 单人期 `len(plans) == 1` 立即结算，**锁内**完成，不留等待态
+  4. 锁在 `try/finally` 里释放 —— 异常也必须放锁，否则整局卡死
+
+═══════════════════════════════════════════════════════════════════
+⚠️ 锁**只活在服务层**
+═══════════════════════════════════════════════════════════════════
+`engine/` 是纯函数、**不知道锁的存在**。这样引擎仍能脱离 Web 单独跑。
+
+⚠️ 这**不是**"防并发写库"那类问题（《项目架构-总》§八已澄清：
+   行动阶段是收集、结算是单点触发）。这里挡的是
+   **同一个 HTTP 端点被重复点两次 / 重放**，属于最朴素的一类并发。
+
+⚠️ 与"plans 只增不改"的关系：§3.4 的"只能提交一次"是**业务层**约束，
+   本节是**传输层**约束，两者互不替代。
+"""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass, field
+from typing import Optional
+
+from engine.loader import Config
+from engine.models import GameState, Plan, SessionPhase
+from engine.pipeline import QuarterReport, SettlementError, advance, preview
+
+
+class Conflict(Exception):
+    """请求与当前会话状态冲突（不在行动阶段、已提交过等）。"""
+
+
+@dataclass
+class GameSession:
+    """一局游戏的会话。**每个 game_id 一个实例，每个实例一把锁。**
+
+    ⚠️ 单人 = 多人的特例：`len(plans) == len(players)` 在单人时
+       提交即成立，**没有任何等待逻辑**。
+    """
+
+    state: GameState
+    cfg: Config
+    player_ids: list[str] = field(default_factory=list)
+    plans: dict[str, Plan] = field(default_factory=dict)
+    phase: SessionPhase = SessionPhase.COLLECTING
+
+    # ★ 每局一把锁。`repr=False` 避免打印时出现无意义的锁对象。
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.player_ids:
+            self.player_ids = self.state.player_ids
+
+    # ── 读 ────────────────────────────────────────────────
+
+    def state_for(self, player_id: str) -> dict:
+        """给前端的只读状态快照（**已算好的数字**，前端零计算）。
+
+        ⚠️ 读也要拿锁：否则可能读到"结算到一半"的状态。
+        """
+        with self.lock:
+            player = self.state.player(player_id)
+            last = self.state.report.get(player_id) if self.state.report else None
+            return {
+                "quarter": self.state.world.quarter,
+                "phase": self.phase.value,
+                "player_id": player_id,
+                "cash": player.cash,
+                "happiness": player.last_happiness,
+                "inventory": dict(player.inventory),
+                "report": last,
+            }
+
+    # ── 写（全部串行） ────────────────────────────────────
+
+    def submit(self, player_id: str, plan: Plan) -> None:
+        """提交计划。**只增不改** —— 第二次提交直接拒绝。"""
+        with self.lock:                       # ★ 提交也串行
+            if self.phase is not SessionPhase.COLLECTING:
+                raise Conflict(
+                    f"当前不在行动阶段（{self.phase.value}），不能提交计划"
+                )
+            if player_id in self.plans:
+                raise Conflict(
+                    f"{player_id} 本季已提交，不能修改。"
+                    f"（plans 只增不改：要改只能等下一季）"
+                )
+            if plan.player_id != player_id:
+                raise Conflict(
+                    f"计划里的 player_id ({plan.player_id!r}) "
+                    f"与提交者 ({player_id!r}) 不一致"
+                )
+            self.plans[player_id] = plan
+
+    def end_quarter(self, player_id: str) -> Optional[QuarterReport]:
+        """结束季度。**收齐所有计划才结算**（红线 3）。"""
+        with self.lock:                       # ★ 整个结算在锁内
+            if self.phase is not SessionPhase.COLLECTING:
+                raise Conflict(f"当前不在行动阶段（{self.phase.value}）")
+            if player_id not in self.plans:
+                raise Conflict(f"{player_id} 还没提交计划，不能结束季度")
+            if len(self.plans) < len(self.player_ids):
+                # 多人：等其他人。单人时这个分支永远不会走到。
+                return None
+            return self._resolve_unlocked()
+
+    def simulate(self, plan: Plan) -> QuarterReport:
+        """试算（= AI 与 UI 用的 `preview`）。**不改状态。**
+
+        ⚠️ 拿锁是为了读到一致的状态快照，不是为了串行化试算本身
+           （试算在副本上跑，本来就不冲突）。
+        """
+        with self.lock:
+            return preview(self.state, {plan.player_id: plan}, self.cfg)
+
+    # ── 内部 ──────────────────────────────────────────────
+
+    def _resolve_unlocked(self) -> QuarterReport:
+        """真结算。⚠️ **调用方必须已持有 `self.lock`。**
+
+        命名带 `_unlocked` 后缀是刻意的：看到这个名字就知道
+        "这里没有自己拿锁"，避免以后有人直接调用而漏掉锁。
+        """
+        self.phase = SessionPhase.RESOLVING
+        try:
+            advance(self.state, self.plans, self.cfg)
+        except SettlementError:
+            # 结算失败 → 退回行动阶段，让玩家改计划重来。
+            # ⚠️ 不改状态：advance 在扣款前就会抛错，所以状态是干净的。
+            self.phase = SessionPhase.COLLECTING
+            raise
+
+        self.plans.clear()
+        self.phase = SessionPhase.REPORT
+        first = sorted(self.state.raw_reports)[0]
+        return self.state.raw_reports[first]
+
+    def start_next_quarter(self) -> None:
+        """月报看完 → 回到行动阶段（§三 的循环）。"""
+        with self.lock:
+            if self.phase is not SessionPhase.REPORT:
+                raise Conflict(f"只有月报阶段才能进入下一季（当前 {self.phase.value}）")
+            self.phase = SessionPhase.COLLECTING
