@@ -141,13 +141,25 @@ def happiness_from_level(
     good_need: float,
     cfg: Config,
 ) -> float:
-    """由实际达成量算 H（§3.3.4）。
+    """由实际达成量算 H（§3.3.4）。**两段直线 + 一段封顶**。
 
-        H = 0.6 × (F / F_基准)                            , F < F_基准
-        H = 0.6 + 0.4 × (F − F_基准)/(F_优秀 − F_基准)    , F_基准 ≤ F < F_优秀
-        H = 1.0                                           , F ≥ F_优秀
+    ★ 三段形状（用户 2026-10-16 确认：中间就是线性）::
 
-    **两个锚点**：吃饱 → 0.60；吃好 → 1.00。
+        F < F_基准           H = 0.6 × (F / F_基准)                  斜率 0.6/F_基准
+        F_基准 ≤ F < F_优秀   H = 0.6 + 0.4 × (F−F_基准)/(F_优秀−F_基准) 斜率 0.4/(F_优秀−F_基准)
+        F ≥ F_优秀           H = 1.0                                 斜率 0
+
+    ★ **中间段的斜率可以化简**（因为 `F_优秀 = 1.5 × F_基准`）::
+
+        F_优秀 − F_基准 = 0.5 × F_基准
+        斜率 = 0.4 / (0.5 × F_基准) = **0.8 / F_基准**
+
+    也就是说：**中段斜率是下段斜率的 4/3**（0.8 / 0.6 ≈ 1.333）。
+
+    以 `F_基准 = 2.0` 为例：下段斜率 0.30，中段斜率 **0.40**，中段从
+    `(2.0, 0.60)` 直线到 `(3.0, 1.00)`。
+
+    **两个锚点**：吃饱 → 0.60；吃好 → 1.00。**中间直线连接，不拐弯。**
     """
     if baseline_need <= 0:
         return 1.0
@@ -159,6 +171,106 @@ def happiness_from_level(
     if span <= 0:
         return 0.6
     return 0.6 + 0.4 * (achieved - baseline_need) / span
+
+
+def happiness_slopes(baseline_need: float, good_need: float) -> dict[str, float]:
+    """H 曲线两段的斜率（供 UI / 对账显示用）。
+
+    ★ 化简后的形式（`F_优秀 = 1.5 × F_基准` 时）::
+
+        下段（饿着）    斜率 = 0.6 / F_基准
+        中段（吃饱→吃好）斜率 = 0.8 / F_基准   ← 是下段的 4/3
+
+    例：`F_基准 = 2.0` → 下段 0.30、中段 0.40。
+    """
+    if baseline_need <= 0:
+        return {"lower": 0.0, "middle": 0.0}
+    lower = 0.6 / baseline_need
+    span = good_need - baseline_need
+    middle = (0.4 / span) if span > 0 else 0.0
+    return {"lower": lower, "middle": middle}
+
+
+def plan_food_deduction(
+    available: dict[str, float],
+    baseline_need: float,
+    good_need: float,
+    cfg: Config,
+) -> "FoodPlan":
+    """**纯函数**：只算"会扣哪些、扣多少"，**不动库存**（§3.3.6）。
+
+    ★ 为什么要单独抽出来（2026-10-16 修的一个漏洞）：
+
+    季末清仓（§6 第 7.7 步）卖出去的货，**也必须算进本季的总供给 `X_t`**，
+    否则玩家只要"什么都不申报"，就能把一大堆货按**上季价**清掉，
+    等于绕开了"供给冲击压价"这条规则。
+
+    而 `X_t = 申报卖出 + 清仓量`，清仓量又 = `可供出售 − 申报卖出 − 居民吃掉`。
+    所以**求价之前必须先知道"居民会吃掉多少"**。
+
+    ⚠️ 这里**没有循环依赖**：居民吃多少**只看数量、不看价格**
+       （§4.3.7 明确作废了预算约束 `D_实 = min(D, B/k)`）。
+       所以可以在求价之前先按数量把扣减算出来。
+    """
+    achieved = _achieved_food_level(available, baseline_need, good_need, cfg)
+    goodness = happiness_from_level(achieved, baseline_need, good_need, cfg)
+
+    achieved_base = achieved_ge_baseline(available, baseline_need, cfg)
+    achieved_good = achieved_ge_good(available, good_need, cfg)
+
+    deducted: dict[str, float] = {}
+
+    if achieved_good:
+        # 扣满四样配额（按 F_优秀 的配额）
+        for g, ratio in cfg.food.good_quota.items():
+            want = ratio * good_need
+            actual = min(available.get(g, 0.0), want)
+            if actual > 0:
+                deducted[g] = actual
+    elif achieved_base:
+        # 只扣 A、B（按 F_基准 的配额），C/D 不动
+        for g, ratio in cfg.food.baseline_quota.items():
+            want = ratio * baseline_need
+            actual = min(available.get(g, 0.0), want)
+            if actual > 0:
+                deducted[g] = actual
+    else:
+        # 部分达到：扣光手上所有能吃的
+        for g in FOOD_GOODS:
+            have = available.get(g, 0.0)
+            if have > 0:
+                deducted[g] = have
+
+    return FoodPlan(
+        baseline_met=achieved_base,
+        good_met=achieved_good,
+        achieved_level=achieved,
+        happiness=goodness,
+        deducted=deducted,
+    )
+
+
+@dataclass
+class FoodPlan:
+    """粮食扣减的**计划**（纯数据，尚未执行）。
+
+    `settle_food` 会把它应用到库存上；`pipeline` 在求价前用它推算清仓量。
+    """
+
+    baseline_met: bool
+    good_met: bool
+    achieved_level: float
+    happiness: float
+    deducted: dict[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "baseline_met": self.baseline_met,
+            "good_met": self.good_met,
+            "achieved_level": self.achieved_level,
+            "happiness": self.happiness,
+            "deducted": dict(self.deducted),
+        }
 
 
 def settle_food(
@@ -173,61 +285,31 @@ def settle_food(
     ⚠️ **会修改 `player.inventory`**（扣减实物）。这是"结算"而非"试算"。
        试算请先 `state.deep_copy()`（见 `pipeline.preview`）。
 
-    ⚠️ 扣减规则（§3.3.6 的表）：
-        达到优秀    → 扣满 A/B/C/D 配额（按 F_优秀 的配额）
-        只达到基准  → 扣 A、B（按配额），**C/D 不扣**
-        部分达到    → **扣光手上所有能吃的**（A/B/C/D 全扣）
-        完全不投    → 扣 0
+    实现上只是 `plan_food_deduction()` + 真正执行扣减，
+    **保证"预先推算的清仓量"与"实际扣减"用的是同一套口径**。
     """
     player: PlayerState = state.players[player_id]
 
     available = {g: player.inventory.get(g, 0.0) for g in FOOD_GOODS}
-    achieved = _achieved_food_level(available, baseline_need, good_need, cfg)
-    goodness = happiness_from_level(achieved, baseline_need, good_need, cfg)
-
-    quotas_b = cfg.food.baseline_quota
-    quotas_g = cfg.food.good_quota
-
-    # 用同一口径判两档是否达成
-    achieved_base = achieved_ge_baseline(available, baseline_need, cfg)
-    achieved_good = achieved_ge_good(available, good_need, cfg)
+    plan = plan_food_deduction(available, baseline_need, good_need, cfg)
 
     deducted: dict[str, float] = {}
+    for g, want in plan.deducted.items():
+        actual = player.take_inventory(g, want)
+        if actual:
+            deducted[g] = actual
 
-    if achieved_good:
-        # 扣满四样配额（按 F_优秀 的配额）
-        for g, ratio in quotas_g.items():
-            want = ratio * good_need
-            actual = player.take_inventory(g, want)
-            if actual:
-                deducted[g] = actual
-    elif achieved_base:
-        # 只扣 A、B（按 F_基准 的配额），C/D 不动
-        for g, ratio in quotas_b.items():
-            want = ratio * baseline_need
-            actual = player.take_inventory(g, want)
-            if actual:
-                deducted[g] = actual
-    else:
-        # 部分达到：扣光手上所有能吃的
-        for g in FOOD_GOODS:
-            have = player.inventory.get(g, 0.0)
-            if have > 0:
-                actual = player.take_inventory(g, have)
-                if actual:
-                    deducted[g] = actual
-
-    player.last_happiness = goodness
+    player.last_happiness = plan.happiness
 
     return FoodResult(
         baseline_need=baseline_need,
         good_need=good_need,
         available=available,
-        baseline_met=achieved_base,
-        good_met=achieved_good,
-        achieved_level=achieved,
+        baseline_met=plan.baseline_met,
+        good_met=plan.good_met,
+        achieved_level=plan.achieved_level,
         deducted=deducted,
-        happiness=goodness,
+        happiness=plan.happiness,
     )
 
 

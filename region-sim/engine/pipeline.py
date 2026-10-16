@@ -83,7 +83,8 @@ class QuarterReport:
 
     bought: dict[str, float] = field(default_factory=dict)       # B_t（三段合计）
     bought_breakdown: dict[str, dict] = field(default_factory=dict)
-    sold: dict[str, float] = field(default_factory=dict)         # X_t
+    sold: dict[str, float] = field(default_factory=dict)         # X_t 里玩家申报的那部分
+    planned_clearing: dict[str, float] = field(default_factory=dict)  # ★ 并入 X_t 的清仓量
     prices: dict[str, dict] = field(default_factory=dict)
     buy_bill: Optional[M.BuyBill] = None
 
@@ -113,6 +114,7 @@ class QuarterReport:
             "bought": dict(self.bought),
             "bought_breakdown": dict(self.bought_breakdown),
             "sold": dict(self.sold),
+            "planned_clearing": dict(self.planned_clearing),
             "prices": dict(self.prices),
             "buy_bill": self.buy_bill.to_dict() if self.buy_bill else None,
             "materials_cost": self.materials_cost,
@@ -222,8 +224,10 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
     #    §11.3 明确要求"不自动减少采购或开工量；不产生部分状态变更"，
     #    而求价时若用"申报量"而非"实际可供量"，会把本季价格人为压低。
     sold_by_player: dict[str, dict[str, float]] = {}
+    clearing_by_player: dict[str, dict[str, float]] = {}
+
     for player_id, plan in plans.items():
-        available = _expected_available(plan, outcomes[player_id])
+        available = _expected_available(state, player_id, plan, outcomes[player_id])
         for g, qty in plan.sales.items():
             have = available.get(g, 0.0)
             if qty > have + 1e-9:
@@ -239,6 +243,34 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
                 )
         sold_by_player[player_id] = dict(plan.sales)
 
+        # ── ★ 预估清仓量，并把它算进本季总供给 X_t ──────────
+        #
+        # 为什么要求价**之前**就算清仓量：季末清仓（第 7.7 步）卖出去的货
+        # 同样是本季供给，必须压价。否则玩家只要"什么都不申报"，
+        # 就能把一大堆货按**上季价**清掉 —— 等于绕开"供给冲击压价"。
+        #
+        # ⚠️ 这里**没有循环依赖**：居民吃多少只看**数量**、不看价格
+        #    （§4.3.7 作废了预算约束 `D_实 = min(D, B/k)`），
+        #    所以可以在求价之前先把"吃掉多少"按数量算出来。
+        remaining = {}
+        for g, q in available.items():
+            left = q - plan.sales.get(g, 0.0)
+            if left > 1e-12:
+                remaining[g] = left
+
+        pop = populations[player_id]
+        food_plan = S.plan_food_deduction(
+            {g: remaining.get(g, 0.0) for g in S.FOOD_GOODS},
+            pop.baseline_food, pop.good_food, cfg,
+        )
+
+        clearing: dict[str, float] = {}
+        for g, q in remaining.items():
+            left = q - food_plan.deducted.get(g, 0.0)
+            if left > 1e-12:
+                clearing[g] = left
+        clearing_by_player[player_id] = clearing
+
     # 求价需要把**所有玩家**的买卖合并（共享资源，一起结算）
     total_bought: dict[str, float] = {}
     total_sold: dict[str, float] = {}
@@ -246,6 +278,10 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
         for g, q in d.items():
             total_bought[g] = total_bought.get(g, 0.0) + q
     for d in sold_by_player.values():
+        for g, q in d.items():
+            total_sold[g] = total_sold.get(g, 0.0) + q
+    # ★ 清仓量并进本季总供给：X_t = 申报卖出 + 季末清仓
+    for d in clearing_by_player.values():
         for g, q in d.items():
             total_sold[g] = total_sold.get(g, 0.0) + q
 
@@ -279,6 +315,7 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
             bought=bought_by_player[player_id],
             bought_breakdown=breakdown_by_player[player_id],
             sold=sold_by_player[player_id],
+            planned_clearing=clearing_by_player[player_id],
             prices={g: pr.to_dict() for g, pr in prices.items()},
             buy_bill=bill,
             materials_cost=bill.total,
@@ -334,6 +371,10 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
         )
 
     # ══ 第 7.7 步：季末清仓 ════════════════════════════════
+    #
+    # ★ 清仓量在第 4.5 步**已经算过并并进了 `X_t`**，所以本季一定有价格。
+    #   这里不再有"回退上季价"那条分支 —— 那条分支是个可套利漏洞：
+    #   玩家只要什么都不申报，就能把一大堆货按旧价清掉，价格不动。
     for player_id, plan in plans.items():
         player = state.players[player_id]
         rep = reports[player_id]
@@ -344,13 +385,12 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
                 continue
             pr = prices.get(g)
             if pr is None:
-                # 本季没有买卖该商品 → 按上季价清仓
-                unit = state.world.last_price(g)
-                price = unit
-            else:
-                price = pr.price
+                raise SettlementError(
+                    f"商品 {g!r} 有清仓量 {qty}，但求价时没有把它算进去（内部错误）。\n"
+                    f"  → 清仓量必须并进 X_t，否则会按旧价卖掉、绕过供给压价。"
+                )
             player.take_inventory(g, qty)
-            clearing += qty * price
+            clearing += qty * pr.price
         player.cash += clearing
         rep.clearing_revenue = clearing
 
@@ -382,12 +422,22 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
 # ══════════════════════════════════════════════════════════════════
 
 
-def _expected_available(plan: Plan, outcomes: list[P.PlotOutcome]) -> dict[str, float]:
+def _expected_available(
+    state: GameState,
+    player_id: str,
+    plan: Plan,
+    outcomes: list[P.PlotOutcome],
+) -> dict[str, float]:
     """本季**实际可卖**的量 = 期初库存 + 本季买入 + 本季自产。
 
-    用途：在第 4.5 步校验玩家申报的卖出量（§11.3 要求明确报错，不自动截断）。
+    用途：在第 4.5 步校验玩家申报的卖出量（§11.3 要求明确报错，不自动截断），
+    以及推算季末清仓量（清仓量要并进 `X_t` 参与求价）。
     """
+    player = state.players[player_id]
     available: dict[str, float] = {}
+    for g, q in player.inventory.items():
+        if q > 0:
+            available[g] = available.get(g, 0.0) + q
     for g, q in plan.purchases.items():
         available[g] = available.get(g, 0.0) + q
     for o in outcomes:

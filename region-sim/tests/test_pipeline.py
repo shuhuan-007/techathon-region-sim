@@ -259,7 +259,130 @@ def test_session_resolve_releases_lock_on_error():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 六、命令行汇总
+# 六、★ 季末清仓必须并进 X_t（2026-10-16 修的漏洞）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_clearing_volume_is_included_in_price():
+    """★ 季末清仓的货**也要压价**。
+
+    漏洞原状：玩家什么都不申报 → 本季不求价 → 清仓回退**上季价**卖掉，
+    相当于往市场砸货而价格不动。
+
+    修法：求价前先按**数量**推算清仓量，并进 `X_t`。
+    这样"申报 0 + 全部清仓"与"申报全部"应该得到**同一个价格**。
+    """
+    cfg = cfg_with_example_elasticity()
+    plot = mature("0,0", PlotType.RESOURCE, 1)
+
+    # 甲：什么都不申报，全靠季末清仓
+    st_a = make_state(cfg, "p1", deepcopy(plot))
+    rep_a = pipeline.preview(st_a, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
+
+    # 乙：把同样多的量在 sales 里申报掉
+    out_qty = rep_a.production[0].output_qty
+    st_b = make_state(cfg, "p1", deepcopy(plot))
+    rep_b = pipeline.preview(
+        st_b, {"p1": plain_plan("p1", "0,0", u=1.0, sales={"F": out_qty})}, cfg
+    )
+
+    assert abs(rep_a.prices["F"]["price"] - rep_b.prices["F"]["price"]) < TOL, (
+        "★ 清仓与申报卖出必须求出同一个价 —— 否则'不申报'就能按旧价清货"
+    )
+    # 且价格确实被压低了，不是沿用上季价
+    assert rep_a.prices["F"]["price"] < cfg.market["F"].P0 - 1e-9, "供给必须压价"
+
+
+def test_clearing_planned_equals_actual():
+    """预估清仓量与实际清仓量必须一致（否则求价用的 X_t 是错的）。"""
+    cfg = cfg_with_example_elasticity()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
+    r = st.raw_reports["p1"]
+
+    # 实际清仓 = 期初(0) + 产出 − 申报(0) − 粮食扣减
+    eaten = r.food.deducted.get("F", 0.0)
+    expected = r.production[0].output_qty - eaten
+    planned = r.planned_clearing.get("F", 0.0)
+    assert abs(planned - expected) < TOL, (
+        f"预估清仓 {planned} 与实际 {expected} 不一致"
+    )
+    assert st.players["p1"].inventory == {}, "清仓后普通库存必须归零（§11.1）"
+
+
+def test_keeping_food_reduces_clearing():
+    """留着自己吃的粮不进清仓量（§11.1 消费扣减先于清仓）。"""
+    cfg = cfg_with_example_elasticity()
+    plot = mature("0,0", PlotType.AGRICULTURE, 1, product="A")
+
+    st = make_state(cfg, "p1", deepcopy(plot))
+    r = pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg).raw_reports["p1"]
+
+    assert r.food.deducted, "自产的 A 应被扣掉一部分当口粮"
+    assert "A" not in r.planned_clearing or r.planned_clearing["A"] < r.production[0].output_qty, \
+        "被吃掉的部分不该出现在清仓量里"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 七、★ H 的斜率（用户 2026-10-16 确认：中间线性）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_happiness_slopes():
+    """H 两段直线的斜率（§3.3.4）。
+
+        F_优秀 = 1.5 × F_基准
+        下段斜率 = 0.6 / F_基准
+        中段斜率 = 0.4 / (F_优秀 − F_基准) = 0.4 / (0.5·F_基准) = **0.8 / F_基准**
+
+    中段斜率是下段的 4/3。
+    """
+    from engine.settlement import happiness_slopes
+
+    # F_基准 = 2.0 → F_优秀 = 3.0
+    s = happiness_slopes(2.0, 3.0)
+    assert abs(s["lower"] - 0.30) < TOL, f"下段斜率应 0.30，实得 {s['lower']}"
+    assert abs(s["middle"] - 0.40) < TOL, f"中段斜率应 0.40，实得 {s['middle']}"
+    assert abs(s["middle"] / s["lower"] - 4.0 / 3.0) < TOL, "中段应是下段的 4/3"
+
+    # 一般式：中段 = 0.8 / F_基准
+    for baseline in (1.0, 1.2, 2.0, 4.0, 10.0):
+        good = 1.5 * baseline
+        s = happiness_slopes(baseline, good)
+        assert abs(s["middle"] - 0.8 / baseline) < TOL, (
+            f"F_基准={baseline} 时中段斜率应为 {0.8/baseline}，实得 {s['middle']}"
+        )
+
+
+def test_happiness_is_piecewise_linear():
+    """H 在三段上分别是直线（等距取点验证线性）。"""
+    from engine.settlement import happiness_from_level
+
+    cfg = load_config()
+    B, G = 2.0, 3.0
+
+    # 下段：0 → F_基准，等距取点，增量应恒定
+    xs = [0.0, 0.5, 1.0, 1.5, 2.0]
+    hs = [happiness_from_level(x, B, G, cfg) for x in xs]
+    deltas = [hs[i + 1] - hs[i] for i in range(len(hs) - 1)]
+    assert max(deltas) - min(deltas) < TOL, f"下段应为直线，实得增量 {deltas}"
+    assert abs(hs[-1] - 0.60) < TOL, "F_基准 处 H 应为 0.60"
+
+    # 中段：F_基准 → F_优秀
+    xs = [2.0, 2.25, 2.5, 2.75, 3.0]
+    hs = [happiness_from_level(x, B, G, cfg) for x in xs]
+    deltas = [hs[i + 1] - hs[i] for i in range(len(hs) - 1)]
+    assert max(deltas) - min(deltas) < TOL, f"中段应为直线，实得增量 {deltas}"
+    assert abs(hs[0] - 0.60) < TOL and abs(hs[-1] - 1.00) < TOL, "两端锚点应为 0.60 / 1.00"
+    assert abs(hs[2] - 0.80) < TOL, f"中点应为 0.80，实得 {hs[2]}"
+
+    # 上段：封顶
+    for x in (3.0, 4.0, 99.0):
+        assert abs(happiness_from_level(x, B, G, cfg) - 1.0) < TOL, "吃好以上封顶 1.00"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 八、命令行汇总
 # ══════════════════════════════════════════════════════════════════
 
 
