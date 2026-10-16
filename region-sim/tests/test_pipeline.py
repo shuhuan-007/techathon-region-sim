@@ -480,6 +480,37 @@ def test_happiness_is_piecewise_linear():
         assert abs(happiness_from_level(x, B, G, cfg) - 1.0) < TOL, "吃好以上封顶 1.00"
 
 
+def test_zero_demand_keeps_previous_happiness():
+    """★ 零需求边界：`F_基准 = 0` 时 **保持上季 H**，不是白送 1.0。
+
+    2026-10-16 用户拍板。这是修掉一个真漏洞的回归测试：
+
+        旧行为：一块地都没有 / 建了地整季不申报开工 → `F_基准 = 0`
+                → 结算白给 `H = 1.0` → 下季 `E_幸福 = 1.10`（开局本该 0.90）
+        新行为：保持上季 H；首季没有上季，取 `H₀ = 0.6`（基线 §3.3.5）
+
+    ⚠️ 注意**不能**走第 1 段公式 `0.6 × F / F_基准` —— 分母为 0 会除零。
+    """
+    from engine.settlement import happiness_from_level
+
+    cfg = load_config()
+
+    # 不传 prev_happiness → 用首季默认值 0.6
+    assert abs(happiness_from_level(0.0, 0.0, 0.0, cfg) - 0.6) < TOL, (
+        "零需求时应回落到 H₀ = 0.6，而不是 1.0"
+    )
+
+    # 传了上季 H → 原样保持（既不给奖也不给罚）
+    for prev in (0.0, 0.35, 0.6, 0.83, 1.0):
+        got = happiness_from_level(0.0, 0.0, 0.0, cfg, prev)
+        assert abs(got - prev) < TOL, f"上季 H={prev} 时应原样保持，实得 {got}"
+
+    # 边界：只要 F_基准 > 0，就必须走正常三段，不能被这条短路吃掉
+    assert abs(happiness_from_level(0.0, 2.0, 3.0, cfg, 0.9) - 0.0) < TOL, (
+        "有需求而完全没投粮时 H 应算作 0.00，不是保持上季值"
+    )
+
+
 # ══════════════════════════════════════════════════════════════════
 # 九、★ 已拍板的一局参数（2026-10-16 用户拍板）—— 钉住配置，防止被改回去
 # ══════════════════════════════════════════════════════════════════

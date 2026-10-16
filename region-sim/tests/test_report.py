@@ -434,16 +434,39 @@ def test_population_keeps_decimals():
     """★ `N = L×2` **不取整** —— 引擎存小数，显示层负责取整。
 
     ⚠️ 若这里被 `round` 了，账就对不上（见界面清单 §三 与基线 §3.3.1）。
+
+    ⚠️ **2026-10-16 口径变更**：`L` 是 **Σd**（岗位跟已建成地块走），**不再乘 u**。
+       所以本用例改成用「三级农业 d=1.5」来制造小数：`L = 1.5 → N = 3.0`。
+       旧写法（`u=0.5 → L = 0.75`）按新规则已经不对了。
     """
     cfg = load_config()
-    # 三级农业 d=1.5，u=0.5 → L = 0.75 → N = 1.5（带小数）
+    # 三级农业 d=1.5（已建成即占 1.5 个岗位）→ L = 1.5 → N = 3.0（带小数）
     st = state_with(plot("0,0", PlotType.AGRICULTURE, 3, product="A"))
     plan = Plan(player_id="p1", plot_plans={"0,0": PlotPlan("0,0", u=0.5)})
     pop = report.build_state(st, "p1", cfg, plan=plan)["population"]
 
-    assert abs(pop["labor_total"] - 0.75) < TOL, f"L 应为 0.75，实得 {pop['labor_total']}"
-    assert abs(pop["population"] - 1.5) < TOL, (
-        f"★ N 应为 1.5（不取整），实得 {pop['population']}"
+    assert abs(pop["labor_total"] - 1.5) < TOL, f"L 应为 1.5，实得 {pop['labor_total']}"
+    assert abs(pop["population"] - 3.0) < TOL, (
+        f"★ N 应为 3.0（不取整），实得 {pop['population']}"
+    )
+
+
+def test_idle_plot_still_feeds_people():
+    """★ 建成了但本季不申报开工（u=0）—— 人还在、还要吃饭（2026-10-16 用户拍板）。
+
+    旧口径下 u=0 等于"没雇人、不用吃饭"，玩家只要不安排开工就能规避粮食支出。
+    新口径：**岗位跟已建成地块走，工资才跟实际开工走。**
+    """
+    cfg = load_config()
+    st = state_with(plot("0,0"))                      # 一级资源地块，d=3
+    idle = Plan(player_id="p1", plot_plans={"0,0": PlotPlan("0,0", u=0.0)})
+    pop = report.build_state(st, "p1", cfg, plan=idle)["population"]
+
+    assert abs(pop["labor_total"] - 3.0) < TOL, f"岗位应仍是 3.0，实得 {pop['labor_total']}"
+    assert abs(pop["population"] - 6.0) < TOL, f"人口应仍是 6.0，实得 {pop['population']}"
+    assert pop["baseline_food"] > 0, "★ 人要吃饭：闲置季的 F_基准 必须大于 0"
+    assert abs(pop["labor_worked"] - 0.0) < TOL, (
+        f"本季实际开工量应为 0（工资按它算），实得 {pop['labor_worked']}"
     )
 
 

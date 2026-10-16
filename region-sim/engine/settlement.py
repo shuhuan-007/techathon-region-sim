@@ -140,6 +140,7 @@ def happiness_from_level(
     baseline_need: float,
     good_need: float,
     cfg: Config,
+    prev_happiness: float = 0.6,
 ) -> float:
     """由实际达成量算 H（§3.3.4）。**两段直线 + 一段封顶**。
 
@@ -148,6 +149,18 @@ def happiness_from_level(
         F < F_基准           H = 0.6 × (F / F_基准)                  斜率 0.6/F_基准
         F_基准 ≤ F < F_优秀   H = 0.6 + 0.4 × (F−F_基准)/(F_优秀−F_基准) 斜率 0.4/(F_优秀−F_基准)
         F ≥ F_优秀           H = 1.0                                 斜率 0
+
+    ★ **零需求边界（2026-10-16 用户拍板，修掉一个漏洞）**::
+
+        F_基准 = 0（没有任何"要吃饭"的地块）→ **保持上季 H**，即返回 `prev_happiness`。
+
+    ⚠️ 这里**曾经返回 1.0**，等于"一块地都不建"或"建了地整季不安排开工"
+       白拿满幸福度（下一季 `E_幸福 = 1.10`，而开局应是 0.90）。三方都反对它：
+       本文档下游口径要"保持上季值"、基线 §3.3.4 表"完全不投 → 0.00"、
+       基线 §3.3.5"首季没有上季 H → `H₀ = 0.6`"。默认值 0.6 正是首季那一档。
+
+       之所以**不能**简单地对 `F_基准 = 0` 套用第 1 段（`0.6 × F / F_基准`）：
+       分母为 0，会直接除零。
 
     ★ **中间段的斜率可以化简**（因为 `F_优秀 = 1.5 × F_基准`）::
 
@@ -162,7 +175,7 @@ def happiness_from_level(
     **两个锚点**：吃饱 → 0.60；吃好 → 1.00。**中间直线连接，不拐弯。**
     """
     if baseline_need <= 0:
-        return 1.0
+        return prev_happiness
     if achieved < baseline_need:
         return 0.6 * (achieved / baseline_need)
     if achieved >= good_need:
@@ -196,6 +209,7 @@ def plan_food_deduction(
     baseline_need: float,
     good_need: float,
     cfg: Config,
+    prev_happiness: float = 0.6,
 ) -> "FoodPlan":
     """**纯函数**：只算"会扣哪些、扣多少"，**不动库存**（§3.3.6）。
 
@@ -213,7 +227,9 @@ def plan_food_deduction(
        所以可以在求价之前先按数量把扣减算出来。
     """
     achieved = _achieved_food_level(available, baseline_need, good_need, cfg)
-    goodness = happiness_from_level(achieved, baseline_need, good_need, cfg)
+    goodness = happiness_from_level(
+        achieved, baseline_need, good_need, cfg, prev_happiness
+    )
 
     achieved_base = achieved_ge_baseline(available, baseline_need, cfg)
     achieved_good = achieved_ge_good(available, good_need, cfg)
@@ -291,7 +307,10 @@ def settle_food(
     player: PlayerState = state.players[player_id]
 
     available = {g: player.inventory.get(g, 0.0) for g in FOOD_GOODS}
-    plan = plan_food_deduction(available, baseline_need, good_need, cfg)
+    # ★ 零需求边界要"保持上季 H"，所以结算前先把上季值取出来（2026-10-16 用户拍板）
+    plan = plan_food_deduction(
+        available, baseline_need, good_need, cfg, player.last_happiness
+    )
 
     deducted: dict[str, float] = {}
     for g, want in plan.deducted.items():
