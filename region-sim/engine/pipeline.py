@@ -69,6 +69,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from engine import finance as F
 from engine import market as M
 from engine import production as P
 from engine import settlement as S
@@ -426,12 +427,15 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
         player = state.players[player_id]
         rep = reports[player_id]
         # 工资税：工资支出记税前总额，税记**回流收入**（§7.1）
-        tax = rep.wages * cfg.wage_tax_rate
+        #
+        # ⚠️ 账面口径是**两笔**（扣全额 → 再回流），**不是**直接扣 90%。
+        #    算式已抽到 `engine/finance.py`，口径说明见那个模块的头部。
+        tax = F.wage_tax(rep.wages, cfg)
         player.cash += tax
         rep.wage_tax_refund = tax
         rep.cash_after = player.cash
-        # GDP：有效产出价值（固定参考价）− 实际消耗的中间投入
-        rep.value_added = _value_added(rep, cfg)
+        # GDP：有效产出价值（固定参考价）− 实际消耗的中间投入（§7.5）
+        rep.value_added = F.value_added(rep, cfg)
 
     # ══ 第 9 步：结转 ══════════════════════════════════════
     for g, pr in prices.items():
@@ -529,30 +533,14 @@ def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Conf
 def _value_added(rep: QuarterReport, cfg: Config) -> float:
     """GDP 增加值（§7.5）。
 
-        增加值 = 有效产出价值 − 实际消耗的中间投入价值
-
-    - 用**固定统计价（参考价 P0）**，不随季度成交价变
-    - 工资**不**作中间投入再扣
-    - 原料**要**扣；经营费 c **要**扣
-    - 粮食扣减**也算**中间投入
-    - 贷款、拨款、税款**不计入**
+    ⚠️ **已迁移到 `engine/finance.py::value_added()`**（2026-10-16 第 4 步）。
+       这个薄壳保留只是为了不打断任何外部调用；
+       **新代码请直接调 `finance.value_added()`**。
+       口径说明（什么算中间投入、工资为什么不扣）见 `finance.py` 模块头。
     """
-    output_value = 0.0
-    for o in rep.production:
-        if o.output_goods is None:
-            continue
-        output_value += o.output_qty * cfg.price_of(o.output_goods)
+    import engine.finance as F
 
-    material_value = 0.0
-    for g, qty in (rep.bought_breakdown.get("production_input") or {}).items():
-        material_value += qty * cfg.price_of(g)
-
-    food_value = 0.0
-    if rep.food:
-        for g, qty in rep.food.deducted.items():
-            food_value += qty * cfg.price_of(g)
-
-    return output_value - material_value - rep.operating - food_value
+    return F.value_added(rep, cfg)
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -55,7 +55,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from engine import production, validate
+from engine import finance, production, validate
 from engine.loader import Config
 from engine.models import GameState, Plan
 from engine.pipeline import QuarterReport, SettlementError, preview
@@ -150,7 +150,7 @@ def build_state(
         "report": last_report.to_dict() if last_report else None,
 
         # ── 本季收支预览 ──
-        "projection": _projection(trial, trial_error),
+        "projection": _projection(trial, trial_error, cfg),
     }
 
     # ── 能不能推进（口径见模块头）──
@@ -321,11 +321,12 @@ def _market(
 
 
 def _projection(
-    trial: Optional[QuarterReport], trial_error: Optional[str]
+    trial: Optional[QuarterReport], trial_error: Optional[str], cfg: Config
 ) -> Optional[dict]:
     """本季收支预览（界面清单 §一 第 6 条「本季盈亏」）。
 
     ⚠️ 全部取自试算报告，**没有一行自己算的**。
+       GDP 那几项走 `finance.finance_summary()`（§7.1 / §7.5 的唯一实现）。
 
     三种情况：
 
@@ -338,7 +339,8 @@ def _projection(
             # 失败也要让前端有东西可显示（"本季收支：无法计算 —— 原因"）
             return {"error": trial_error}
         return None
-    return {
+
+    out = {
         "total_deduction": trial.total_deduction,
         "materials_cost": trial.materials_cost,
         "wages": trial.wages,
@@ -352,6 +354,15 @@ def _projection(
         "food": trial.food.to_dict() if trial.food else None,
         "error": trial_error,
     }
+
+    # 补上 finance 独有的几个派生量（税后净工资、GDP 的 P0 口径拆解）。
+    # ⚠️ 与上面重复的键以**报告原值**为准，不用 finance 重算的那份 ——
+    #    避免"同一件事两个来源"，将来对不上时无法判断该信谁。
+    fin = finance.finance_summary(trial, cfg)
+    for key in ("wage_tax", "wage_net", "output_value_at_p0", "material_value_at_p0"):
+        out[key] = fin[key]
+
+    return out
 
 
 def _settle_blockers(

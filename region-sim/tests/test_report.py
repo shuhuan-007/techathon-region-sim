@@ -125,6 +125,46 @@ def test_projection_prices_match_settlement():
         )
 
 
+def test_projection_includes_finance_derived_fields():
+    """本季收支预览要带上 `finance` 的派生量（工资税/净工资/GDP 的 P0 拆解）。
+
+    这几个数**只**在 `finance.py` 里有一份实现，report 直接取，不重算。
+    """
+    cfg = load_config()
+    st = state_with(plot("0,0"))
+    proj = report.build_state(st, "p1", cfg, plan=full_plan("0,0"))["projection"]
+
+    for key in ("wage_tax", "wage_net", "output_value_at_p0", "material_value_at_p0"):
+        assert key in proj, f"projection 缺 {key}：{sorted(proj)}"
+
+    # 甲区：工资 36 → 税 3.6、净 32.4；产出价值按 P0=24 算 = 96
+    assert abs(proj["wage_tax"] - 3.6) < TOL
+    assert abs(proj["wage_net"] - 32.4) < TOL
+    assert abs(proj["output_value_at_p0"] - 96.0) < TOL
+    assert abs(proj["wage_net"] - (proj["wages"] - proj["wage_tax"])) < TOL
+
+
+def test_projection_prefers_report_values_over_finance_recompute():
+    """★ 重复的键以**报告原值**为准，不用 finance 重算的那份。
+
+    否则同一件事有两个来源，将来对不上时无法判断该信谁。
+    """
+    cfg = load_config()
+    st = state_with(plot("0,0"))
+    proj = report.build_state(st, "p1", cfg, plan=full_plan("0,0"))["projection"]
+
+    shadow = st.deep_copy()
+    advance(shadow, {"p1": full_plan("0,0")}, cfg)
+    actual = shadow.raw_reports["p1"]
+
+    for key, want in (("value_added", actual.value_added),
+                      ("total_deduction", actual.total_deduction),
+                      ("sales_revenue", actual.sales_revenue),
+                      ("wages", actual.wages),
+                      ("operating", actual.operating)):
+        assert abs(proj[key] - want) < TOL, f"{key} 应取报告原值 {want}，实得 {proj[key]}"
+
+
 # ══════════════════════════════════════════════════════════════════
 # 二、只读
 # ══════════════════════════════════════════════════════════════════
