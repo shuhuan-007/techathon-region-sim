@@ -124,6 +124,8 @@ def run_plot(
     efficiency: float,
     cfg: Config,
     wage_rate: float,
+    wage_multiplier: float = 1.0,
+    operating_multiplier: float = 1.0,
 ) -> PlotOutcome:
     """算一块地一个季度的生产结果（§3.4 / §3.5）。**纯函数，不改状态。**
 
@@ -134,9 +136,22 @@ def run_plot(
     u           : 开工比例（0–1）
     efficiency  : E（四分量乘积，由 efficiency.py 算出）
     wage_rate   : 该活动的工资单价
+    wage_multiplier      : ★ 政策工资乘数（§11.9.3），默认 1.0 = 无政策
+    operating_multiplier : ★ 政策经营费乘数（§11.9.3），默认 1.0 = 无政策
 
     ⚠️ **本函数不判断"是否该开工"**。`u=0` 直接传 0 即可，
        产出、投入、劳动全为 0，经营费也为 0。
+
+    ⚠️ 两个乘数**默认 1.0** —— 直接调本函数的地方（M1 单点对账、
+       报告试算）行为不变；政策乘数由 `pipeline` 和 `policies` 决定，
+       这里只负责"乘上去"。
+
+    ⚠️ §11.9.3「计算位置」：
+         · 生产产量与商品投入使用**传进来的 `efficiency`**（= E_effective，
+           调用方已乘过政策效率乘数；本函数**不再**乘一次）；
+         · **劳动不乘 E**、也不乘政策效率乘数 → `labor = d × u`；
+         · 工资 = 原工资 × 政策工资乘数；
+         · 经营费 = (原公式，其中可变部分用 E_effective 算) × 政策经营费乘数。
     """
     if u < 0.0:
         raise ValueError(f"开工比例不能为负：地块 {plot.plot_id} 收到 u={u}")
@@ -151,6 +166,12 @@ def run_plot(
     # ★ 劳动**不乘 E** —— 只随开工比例变。
     labor = recipe.d * u
 
+    # ★ 政策乘数只作用于**工资**与**经营费**，不碰产量/投入/劳动。
+    #   ⚠️ `u = 0` 时 labor = 0 → wage = 0，再乘任何数还是 0
+    #      → 政策**不会**给停工地块凭空产生工资（§11.9.3 末条红线）。
+    wage = labor * wage_rate * wage_multiplier
+    op = operating_cost(recipe.c, u, efficiency, cfg) * operating_multiplier
+
     return PlotOutcome(
         plot_id=plot.plot_id,
         plot_type=plot.plot_type,
@@ -163,8 +184,8 @@ def run_plot(
         inputs=inputs,
         labor=labor,
         wage_rate=wage_rate,
-        wage=labor * wage_rate,
-        operating_cost=operating_cost(recipe.c, u, efficiency, cfg),
+        wage=wage,
+        operating_cost=op,
     )
 
 

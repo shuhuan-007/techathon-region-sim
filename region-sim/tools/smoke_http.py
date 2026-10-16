@@ -108,8 +108,10 @@ def main() -> int:
             check("结算成功", code == 200, str(body))
             st = body["state"]
             check("进入第 2 季", st["quarter"] == 2, str(st["quarter"]))
-            check("★ 扣款 144（80 现金 + H-A×1 @64）",
-                  abs(st["cash"] - 1056.0) < TOL, str(st["cash"]))
+            # ★ 2026-10-16 用户裁定：开局每类 3 个减免名额 × 0.50（只打现金费）。
+            #   于是这块新建一级农业实付 = 现金 40（原价 80 折半）+ 物资 64 = 104。
+            check("★ 扣款 104（折后现金 40 + H-A×1 @64）",
+                  abs(st["cash"] - 1096.0) < TOL, str(st["cash"]))
             check("地块已创建、状态在建", len(st["plots"]) == 1
                   and st["plots"][0]["status"] == "constructing", str(st["plots"]))
             check("产出建造时选定 = A",

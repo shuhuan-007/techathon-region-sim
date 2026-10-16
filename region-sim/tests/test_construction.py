@@ -271,16 +271,19 @@ def test_build_charges_cash_and_materials():
     st = fresh_state(cash=1200.0)
     r = run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.AGRICULTURE, 1, "A")]))
 
-    assert abs(r.construction_cash - 80.0) < TOL, f"现金费应为 80，实得 {r.construction_cash}"
+    # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
+    assert abs(r.construction_cash - 40.0) < TOL, f"折后现金费应为 40，实得 {r.construction_cash}"
     assert r.construction == {"H-A": 1.0}, f"物资应为 H-A×1，实得 {r.construction}"
-    # 物资款 = H-A 参考价 64
+    # 物资款 = H-A 参考价 64（物资不打折）
     assert abs(r.materials_cost - 64.0) < TOL, f"物资款应为 64，实得 {r.materials_cost}"
-    # 总扣款 = 80 + 64 = 144（= 基线 §5.2 的合计列）
-    assert abs(r.total_deduction - 144.0) < TOL, (
-        f"总扣款应为 144（= 现金 80 + 物资 64），实得 {r.total_deduction}"
+    # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
+    # 总扣款 = 40 + 64 = 104（现金打折不改变物资款）
+    assert abs(r.total_deduction - 104.0) < TOL, (
+        f"总扣款应为 104（= 折后现金 40 + 物资 64），实得 {r.total_deduction}"
     )
-    assert abs(st.players["p1"].cash - 1056.0) < TOL, (
-        f"期末现金应为 1200 − 144 = 1056，实得 {st.players['p1'].cash}"
+    # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
+    assert abs(st.players["p1"].cash - 1096.0) < TOL, (
+        f"期末现金应为 1200 − 104 = 1096，实得 {st.players['p1'].cash}"
     )
 
 
@@ -420,6 +423,185 @@ def test_build_on_occupied_land_is_upgrade_not_new():
         cfg, None, BuildOrder("0,0", PlotType.RESOURCE, 1)
     )
     assert w_new.work_id == "res_new" and abs(w_new.cash - 100) < TOL
+
+
+# ══════════════════════════════════════════════════════════════════
+# 五、★ 开局分类减免名额（§5.3；2026-10-16 用户裁定：每类 3 × 0.50）
+# ══════════════════════════════════════════════════════════════════
+#
+# 语义（《规则基线》§5.3）：名额按地块类型**独立**、只作用于**新建一级**、
+# 只打**现金费**（物资原样）、一次性且**跨季累计**、按 `plan.builds` 顺序消耗。
+
+
+def test_opening_discount_quota_is_configured():
+    """配置落地：每类 3 个名额 × 0.50（用户 2026-10-16 正式裁定）。"""
+    cfg = load_config()
+    assert cfg.opening_quota == {
+        "agriculture": 3, "resource": 3, "industry": 3, "service": 3,
+    }, f"每类名额应为 3，实得 {cfg.opening_quota}"
+    assert abs(cfg.opening_discount_rate - 0.5) < TOL, (
+        f"折扣率应为 0.50，实得 {cfg.opening_discount_rate}"
+    )
+
+
+def test_discount_fourth_new_agriculture_pays_full_price():
+    """★ (a) 同一季四块空地新建一级农业：前 3 块各付 40，第 4 块付原价 80。"""
+    st = fresh_state(cash=1200.0)
+    ids = ["0,0", "0,1", "0,2", "0,3"]
+    plan = Plan("p1", builds=[
+        BuildOrder(pid, PlotType.AGRICULTURE, 1, "A") for pid in ids
+    ])
+    # 逐条实付（顺序 = plan.builds 顺序，名额依次消耗）
+    # ⚠️ **必须在 `run()` 之前问** —— `build_cash_plan` 是纯函数，同一个 plan
+    #    在**结算之后**再问一次，看到的是"名额已被这一季用掉"的状态，
+    #    于是四条都变成原价（这正是它该有的确定性语义，不是 bug）。
+    #    引擎在 pipeline 第 5 步里也是"同一个 plan、同一次调用"里算钱+扣钱。
+    cfg = load_config()
+    rows = C.build_cash_plan(plan, st.players["p1"], cfg)
+    assert len(rows) == 4, f"应给 4 条明细，实得 {len(rows)}"
+    got = [(row["plot_id"], row["cash"], row["discounted"]) for row in rows]
+    want = [
+        ("0,0", 40.0, True), ("0,1", 40.0, True),
+        ("0,2", 40.0, True), ("0,3", 80.0, False),
+    ]
+    assert got == want, f"逐条实付应为 {want}，实得 {got}"
+
+    r = run(st, plan)
+
+    # 现金费：40 + 40 + 40 + 80 = 200（原价合计 320）
+    assert abs(r.construction_cash - 200.0) < TOL, (
+        f"四条农业现金费应为 200（3×40 + 80），实得 {r.construction_cash}"
+    )
+    # 物资：4 块 × H-A×1 = 4 × 64 = 256（物资不打折）
+    assert r.construction == {"H-A": 4.0}, f"物资应为 H-A×4，实得 {r.construction}"
+    assert abs(r.materials_cost - 256.0) < TOL, (
+        f"物资款应为 256，实得 {r.materials_cost}"
+    )
+    # 总分摊 = 200 + 256 = 456
+    assert abs(r.total_deduction - 456.0) < TOL, (
+        f"总扣款应为 456（= 现金 200 + 物资 256），实得 {r.total_deduction}"
+    )
+    assert abs(st.players["p1"].cash - (1200.0 - 456.0)) < TOL, (
+        f"期末现金应为 744，实得 {st.players['p1'].cash}"
+    )
+    # 用满 3 个名额
+    assert st.players["p1"].opening_quota_used.get("agriculture") == 3, (
+        f"农业已用名额应为 3，实得 {st.players['p1'].opening_quota_used}"
+    )
+    assert C.opening_quota_remaining(st.players["p1"], cfg, PlotType.AGRICULTURE) == 0
+
+
+def test_upgrade_pays_full_price_no_discount():
+    """★ (b) 升级不打折：已有一级农业做二级升级，实付 = 工程表**原价** 80。"""
+    cfg = load_config()
+    existing = mature("0,0", PlotType.AGRICULTURE, 1, product="A")
+    st = fresh_state(cash=1200.0, **{"0,0": existing})
+
+    r = run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.AGRICULTURE, 2, "A")]))
+
+    work = C.find_work_for_build(
+        cfg, existing, BuildOrder("0,0", PlotType.AGRICULTURE, 2, "A")
+    )
+    assert work.work_id == "agri_1_2", f"应走升级表，实得 {work.work_id}"
+    assert abs(r.construction_cash - work.cash) < TOL, (
+        f"升级实付应为原价 {work.cash}，实得 {r.construction_cash}"
+    )
+    assert abs(r.construction_cash - 80.0) < TOL, f"agri_1_2 现金费应为 80，实得 {r.construction_cash}"
+    # 升级不吃名额
+    assert st.players["p1"].opening_quota_used.get("agriculture", 0) == 0, (
+        f"升级不该消耗名额，实得 {st.players['p1'].opening_quota_used}"
+    )
+
+
+def test_materials_are_never_discounted():
+    """★ (c) 物资不打折：新建一级农业投入仍是 H-A×1（与不打折时相同）。"""
+    st = fresh_state(cash=1200.0)
+    r = run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.AGRICULTURE, 1, "A")]))
+
+    assert r.construction == {"H-A": 1.0}, f"物资应为 H-A×1，实得 {r.construction}"
+    assert abs(r.materials_cost - 64.0) < TOL, (
+        f"物资款应仍为 H-A 参考价 64（不打折），实得 {r.materials_cost}"
+    )
+    p = st.players["p1"].plots["0,0"]
+    assert p.construction_materials == {"H-A": 1.0}, (
+        f"地块记录的投入物资应不打折，实得 {p.construction_materials}"
+    )
+
+
+def test_quota_is_per_plot_type_not_shared():
+    """★ (d) 名额按类型独立：农业名额用满后，新建一级资源仍享折扣。"""
+    cfg = load_config()
+    st = fresh_state(cash=1200.0)
+    agri_ids = ["0,0", "0,1", "0,2"]
+    run(st, Plan("p1", builds=[
+        BuildOrder(pid, PlotType.AGRICULTURE, 1, "A") for pid in agri_ids
+    ]))
+    assert st.players["p1"].opening_quota_used.get("agriculture") == 3, "农业名额应用满"
+    assert C.opening_quota_remaining(st.players["p1"], cfg, PlotType.AGRICULTURE) == 0
+
+    # 同季再建一级资源（res_new 原价 100 → 折后 50）
+    plan = Plan("p1", builds=[BuildOrder("5,5", PlotType.RESOURCE, 1)])
+    r = run(st, plan)
+    assert abs(r.construction_cash - 50.0) < TOL, (
+        f"农业名额用满不影响资源，资源应仍享折扣付 50，实得 {r.construction_cash}"
+    )
+    assert st.players["p1"].opening_quota_used.get("resource") == 1, (
+        f"资源名额应记为 1，实得 {st.players['p1'].opening_quota_used}"
+    )
+    # 农业名额仍是满的、没被挪用
+    assert C.opening_quota_remaining(st.players["p1"], cfg, PlotType.AGRICULTURE) == 0
+
+
+def test_quota_accumulates_across_quarters():
+    """★ (e) 名额跨季累计：两季各建 2 块农业 → 第 4 块已无折扣。"""
+    st = fresh_state(cash=1200.0)
+    r1 = run(st, Plan("p1", builds=[
+        BuildOrder("0,0", PlotType.AGRICULTURE, 1, "A"),
+        BuildOrder("0,1", PlotType.AGRICULTURE, 1, "A"),
+    ]))
+    # 第 1 季：2 块都打折 → 40 + 40 = 80
+    assert abs(r1.construction_cash - 80.0) < TOL, (
+        f"第 1 季应两块都打折（80），实得 {r1.construction_cash}"
+    )
+
+    r2 = run(st, Plan("p1", builds=[
+        BuildOrder("0,2", PlotType.AGRICULTURE, 1, "A"),
+        BuildOrder("0,3", PlotType.AGRICULTURE, 1, "A"),
+    ]))
+    # 第 2 季：第 3 块是最后 1 个名额 → 40；第 4 块已超名额 → 原价 80
+    assert abs(r2.construction_cash - 120.0) < TOL, (
+        f"第 2 季应为 40 + 80 = 120（名额跨季累计），实得 {r2.construction_cash}"
+    )
+    assert st.players["p1"].opening_quota_used.get("agriculture") == 3, (
+        f"跨季累计应停在 3（不多记），实得 {st.players['p1'].opening_quota_used}"
+    )
+
+
+def test_opening_quota_used_survives_save_load_roundtrip():
+    """★ (f) 存档往返后已用名额仍在（否则读档就能无限刷折扣）。"""
+    st = fresh_state(cash=1200.0)
+    run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.AGRICULTURE, 1, "A")]))
+    assert st.players["p1"].opening_quota_used.get("agriculture") == 1
+
+    data = st.to_dict()
+    assert data["players"]["p1"]["opening_quota_used"] == {"agriculture": 1}, (
+        f"存档里应带上已用名额，实得 {data['players']['p1'].get('opening_quota_used')}"
+    )
+
+    st2 = GameState.from_dict(data)
+    assert st2.players["p1"].opening_quota_used == {"agriculture": 1}, (
+        f"读档后已用名额应保持，实得 {st2.players['p1'].opening_quota_used}"
+    )
+    # 读档后继续消耗：还剩 2 个名额
+    cfg = load_config()
+    assert C.opening_quota_remaining(st2.players["p1"], cfg, PlotType.AGRICULTURE) == 2
+    r = run(st2, Plan("p1", builds=[BuildOrder("1,1", PlotType.AGRICULTURE, 1, "A")]))
+    assert abs(r.construction_cash - 40.0) < TOL, (
+        f"读档后第 2 块仍应打折，实得 {r.construction_cash}"
+    )
+    assert st2.players["p1"].opening_quota_used.get("agriculture") == 2, (
+        f"读档后名额应累加，实得 {st2.players['p1'].opening_quota_used}"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════

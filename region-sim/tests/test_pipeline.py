@@ -678,14 +678,10 @@ def test_service_cap_end_to_end():
 def test_config_ready_no_longer_flags_settled_items():
     """`validate_config_ready()` 的缺失清单里，**不该再出现**已结清的三项。
 
-    这是"配置体检报告"的回归标记。三项的结清时间不同：
+    ★ 2026-10-16 深夜：**三项现在全部结清**（开局减免名额已由用户正式裁定：
+    每类 3 个名额 × 折扣 0.50）。所以这条从「还差一项」改成「一项都不该差」。
 
-      · **开局现金**（1200）      —— 第 1 步已拍板
-      · **建设表**（14 行）        —— 第 6 步已按基线 §5.2 录入
-      · **开局减免名额**           —— ⚠️ **确实还没设计**，应继续如实报出
-        （用户说 2/2/1 只是举例，不要照抄）
-
-    ⚠️ 前两项一旦在清单里重现，说明配置被改回去了。
+    ⚠️ 任何一项在清单里重现，都说明配置被改回去了。
     """
     from engine.loader import validate_config_ready
 
@@ -700,9 +696,17 @@ def test_config_ready_no_longer_flags_settled_items():
         f"★ 建设表已按基线 §5.2 录入 14 行，不该再报缺失。当前清单：{problems}\n"
         f"  ⚠️ 若这里失败，说明 construction.works 又被清空了。"
     )
-    assert "减免名额" in joined, (
-        f"开局减免名额**确实还没设计**（用户说 2/2/1 只是举例），应如实报出。"
-        f"当前清单：{problems}"
+    assert "减免名额" not in joined, (
+        f"★ 开局减免名额已于 2026-10-16 正式裁定（每类 3 个 × 0.50），"
+        f"不该再报未填。当前清单：{problems}\n"
+        f"  ⚠️ 若这里失败，说明 config.json 的 opening.discount_quota / "
+        f"discount_rate 又被清成 null 了。"
+    )
+    assert cfg.opening_quota == {
+        "agriculture": 3, "resource": 3, "industry": 3, "service": 3,
+    }, f"每类名额应为 3，实得 {cfg.opening_quota}"
+    assert abs(cfg.opening_discount_rate - 0.5) < 1e-9, (
+        f"折扣率应为 0.50，实得 {cfg.opening_discount_rate}"
     )
 
 

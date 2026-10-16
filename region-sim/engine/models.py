@@ -509,6 +509,14 @@ class WorldState:
     # 结构：{商品: [逐季价格]}，末位即"上期价"（last_price() 取的就是它）。
     price_history: dict[str, list[float]] = field(default_factory=dict)
 
+    # ★ 政策系统的确定性状态（§11.9.3）：{"seed": int, "mode": str, "seq": [已抽的季]}。
+    # ⚠️ **这个字段是 2026-10-16 深夜补的**：政策模块最初没有字段可用，
+    #    就把状态寄存在 `price_history["__policy__"]` 里 —— 结果撞上
+    #    `to_dict()` 的 `{g: list(v) ...}`（那是为"价格列表"写的），
+    #    读档时 dict 被拆成了 ["seed","seq","mode"]，**存档往返直接坏掉**。
+    #    **教训：找不到字段就先加字段，别借用语义不同的容器。**
+    policy_state: dict = field(default_factory=dict)
+
     # ── 价格查询 ────────────────────────────────────────
 
     def last_price(self, goods: str) -> float:
@@ -560,10 +568,19 @@ class WorldState:
             "market": {g: c.to_dict() for g, c in self.market.items()},
             "policies": [p.to_dict() for p in self.policies],
             "price_history": {g: list(v) for g, v in self.price_history.items()},
+            "policy_state": dict(self.policy_state),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "WorldState":
+        # ⚠️ 兼容早期存档：那一版把政策状态寄存在 price_history["__policy__"] 里。
+        #    这里把它搬进正式字段，并把那个保留键从价格表里摘掉。
+        hist = {g: list(v) for g, v in data.get("price_history", {}).items()}
+        policy_state = dict(data.get("policy_state") or {})
+        legacy = hist.pop("__policy__", None)
+        if not policy_state and isinstance(legacy, dict):
+            policy_state = dict(legacy)
+
         return cls(
             quarter=data.get("quarter", 1),
             rows=data.get("rows", 10), cols=data.get("cols", 10),
@@ -571,7 +588,8 @@ class WorldState:
             phase=WorldPhase(data.get("phase", "setup")),
             market={g: MarketCurve.from_dict(c) for g, c in data.get("market", {}).items()},
             policies=[Policy.from_dict(p) for p in data.get("policies", [])],
-            price_history={g: list(v) for g, v in data.get("price_history", {}).items()},
+            price_history=hist,
+            policy_state=policy_state,
         )
 
 

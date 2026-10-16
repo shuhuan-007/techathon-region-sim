@@ -1,16 +1,20 @@
-"""建设与升级 —— 工程表、路线解析、工期。
+"""建设与升级 —— 工程表、路线解析、工期、开局减免名额。
 
-依据《规则基线》§5.1（物资对应 / 产出路线建后不可更换）与 §5.2（一次性工程数值）。
+依据《规则基线》§5.1（物资对应 / 产出路线建后不可更换）、§5.2（一次性工程数值）
+与 §5.3（开局分类减免名额）。
 
 ═══════════════════════════════════════════════════════════════════
-本模块只做三件事
+本模块只做四件事
 ═══════════════════════════════════════════════════════════════════
 
   ① **查表**：`(类型, 当前等级, 目标等级, 路线)` → 一条 `Work`
   ② **解析路线**：工业是唯一要分岔的类型，`product` → `route`
   ③ **建工程**：把一条 `BuildOrder` 落到地块上（改状态的部分在 `pipeline`）
+  ④ **算钱**：`build_cash_plan()` 给出**本季每条建设指令实付多少现金**
+     （含 §5.3 开局减免判定；纯函数，不改任何状态）
 
-数值全在 `config.json` 的 `construction.works`（**14 行，来自基线 §5.2**），
+数值全在 `config.json` 的 `construction.works`（**14 行，来自基线 §5.2**）
+与 `opening.discount_quota` / `opening.discount_rate`（§5.3），
 本模块**不含任何字面量**。
 
 ═══════════════════════════════════════════════════════════════════
@@ -53,7 +57,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from engine.loader import Config, ConfigError
-from engine.models import Plot, PlotStatus, PlotType
+from engine.models import Plan, Plot, PlotStatus, PlotType
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -286,3 +290,125 @@ def build_steps(cfg: Config, plot: Optional[Plot], order) -> tuple[Work, dict[st
     """
     work = find_work_for_build(cfg, plot, order)
     return work, dict(work.materials)
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★ 开局分类减免名额（§5.3）—— 纯函数，只算钱，不改任何状态
+# ══════════════════════════════════════════════════════════════════
+#
+# 规则（《规则基线》§5.3，数值 2026-10-16 用户裁定：每类 3 个 × 0.50）：
+#
+#   · **名额按类型独立**：农业/资源/工业/服务各一份，用不完也**不可挪用**
+#   · **只作用于「新建一级」**：`work.is_new`（from_level=0）且 `to_level=1`；
+#     升级、二级以上工程一律原价
+#   · **折扣只打「现金费」那一项**：`work.cash` 折半，**物资按原样投入**（§5.1）
+#   · **名额一次性**：用掉就永久占用，跨季累计（`PlayerState.opening_quota_used`）
+#   · 一季内同一类型建第 4 块 → 前 3 块打折、第 4 块全价
+#     （按 `plan.builds` 的顺序依次消耗名额）
+#
+# ⚠️ **扣款与记账必须用同一个值**：`pipeline` 第 5 步先用
+#    `build_cash_plan()` 算总额去判"钱够不够"，判过之后用**同一份结果**
+#    扣钱与登记名额。绝不允许"判钱用原价、扣钱用折后价"（§11.3 不允许部分执行）。
+
+
+def _quota_of(cfg: Config, plot_type: PlotType) -> int:
+    """某类型的减免名额总数。
+
+    ⚠️ 配置只认**地块类型的字符串名**（`"agriculture"` 等），
+       因为 `config.json` 是纯数据、不认识 `PlotType` 枚举。
+    """
+    raw = (cfg.opening_quota or {}).get(plot_type.value)
+    if raw is None:
+        return 0
+    return max(0, int(raw))
+
+
+def _discount_rate(cfg: Config) -> float:
+    """折扣系数（0.50 = 现金费折半）。未配置 → 1.0（不打折）。
+
+    ⚠️ 配置缺失时**退回原价**而不是猜一个折扣：
+       猜出来的折扣会让对账失去意义，而且少收钱不会报错、只会静静地算错。
+    """
+    rate = cfg.opening_discount_rate
+    if rate is None:
+        return 1.0
+    return float(rate)
+
+
+def opening_quota_remaining(player, cfg: Config, plot_type: PlotType) -> int:
+    """某类型**还剩几个**减免名额（至少 0）。
+
+    给 UI 显示用（界面清单第 32 条「每类型一行：名额 / 已用 / 下一块享不享折扣」）。
+    """
+    used = int((getattr(player, "opening_quota_used", None) or {}).get(plot_type.value, 0))
+    return max(0, _quota_of(cfg, plot_type) - used)
+
+
+def is_opening_discount(work: Work, player, cfg: Config, plot_type: PlotType,
+                        consumed: int) -> bool:
+    """这条工程**本季这一个地块**能不能吃减免名额。
+
+    参数
+    ----
+    consumed : 本季**在这个地块之前**、同类型已经用掉的名额数
+               （按 `plan.builds` 的顺序数，见 `build_cash_plan`）
+    """
+    # ① 只作用于「新建一级」：升级、二级以上工程不打折（§5.3）
+    if not (work.is_new and work.to_level == 1):
+        return False
+    # ② 名额按类型独立，且**跨季累计**（用掉就永久占用）
+    if consumed >= _quota_of(cfg, plot_type):
+        return False
+    # ③ 名额没配（0 个）→ 不打折（缺配置不猜折扣）
+    if _discount_rate(cfg) >= 1.0:
+        return False
+    return True
+
+
+def build_cash_plan(plan: Plan, player, cfg: Config) -> list[dict]:
+    """★ **本季每条建设指令实际要付的现金**（含开局减免判定，§5.3）。
+
+    这是"配置写了必须生效"的落点：`config.json` 的
+    `opening.discount_quota` / `opening.discount_rate` 在这里被真正消费。
+
+    返回**逐条**的清单（顺序 = `plan.builds` 的顺序）：
+
+        [{"plot_id", "work", "plot_type", "cash", "list_cash",
+          "discounted", "consumed_after"}, ...]
+
+      · `cash`        —— **实付**现金费（折后价）
+      · `list_cash`   —— 工程表原价（`work.cash`）
+      · `discounted`  —— 这一条是否吃了名额
+      · `consumed_after` —— 算完这一条之后，该类型的已用名额数
+
+    ⚠️ **纯函数**：不扣钱、不写 `player.opening_quota_used`、不改地块。
+       "登记名额使用量"由 `pipeline` 在**扣款成功之后**做（见 §5.3 一次性语义）。
+    """
+    rate = _discount_rate(cfg)
+    consumed: dict[str, int] = {}
+    rows: list[dict] = []
+
+    for order in plan.builds:
+        plot = player.plots.get(order.plot_id)
+        work = find_work_for_build(cfg, plot, order)
+        ptype = order.plot_type
+
+        # ★ 名额**跨季累计**：已用 = 存档里已登记的 + 本季在它之前已经用掉的。
+        #   ⚠️ 只数本季是错的 —— 那样每一季都会重新得到 3 个名额。
+        already = int((getattr(player, "opening_quota_used", None) or {}).get(ptype.value, 0))
+        used_before = already + consumed.get(ptype.value, 0)
+        hit = is_opening_discount(work, player, cfg, ptype, used_before)
+        if hit:
+            consumed[ptype.value] = consumed.get(ptype.value, 0) + 1
+
+        rows.append({
+            "plot_id": order.plot_id,
+            "work": work,
+            "plot_type": ptype,
+            "list_cash": work.cash,
+            "cash": work.cash * rate if hit else work.cash,
+            "discounted": hit,
+            "consumed_after": used_before + (1 if hit else 0),
+        })
+
+    return rows

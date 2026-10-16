@@ -281,18 +281,36 @@
 
   "opening": {
     "_comment": [
-      "⚠️ 开局分类减免名额（§5.3）：机制已定，数值待设计。",
-      "   用户说 2/2/1 只是举例，不要照抄。null = 未定。",
-      "   旧方案 discount_by_type_count（按品种数给 0/10/20/30%）已作废。"
+      "★ 2026-10-16 用户正式裁定：每类 3 个名额、折扣 原价 × 0.50（独立建设现金费）。",
+      "   §5.3 机制：名额按类型独立、只作用于「新建一级」、只在开局吃、不可挪用。",
+      "   ⚠️ 折扣只打「现金费」那一项，物资按原样投入（不打折）。",
+      "   ⚠️ 旧方案 discount_by_type_count（按品种数给 0/10/20/30%）已作废。"
     ],
     "discount_quota": {
-      "agriculture": null,
-      "resource": null,
-      "industry": null,
-      "service": null
+      "agriculture": 3,
+      "resource": 3,
+      "industry": 3,
+      "service": 3
     },
-    "discount_rate": null
+    "discount_rate": 0.5
   },
 
-  "policies": []
+  "policies": {
+    "_comment": [
+      "★ 政策系统（《规则基线》§11.9.3）。一局 20 季，每季开始抽 1 项，四项各 25%，",
+      "   允许连续抽到同一项，仅当季有效、不累计，第一季也抽，读档不重抽。",
+      "⚠️ 四项政策本身、概率 25%、作用范围都是**规则**，不能在配置里增删 ——",
+      "   改它们要先改基线 §11.9.3。这里**只**允许覆盖乘数数值（平衡数值）。",
+      "⚠️ 幂等：留空 {} / 删掉本段，engine/policies.py 里的 §11.9.3 原值即生效。",
+      "⚠️ 种子与模式不在配置里，存在存档的 world.price_history['__policy__']：",
+      "   {\"seed\": 20261016, \"mode\": \"random\"|\"regular\", \"seq\": [...]}。",
+      "   mode = \"regular\" 时恒为「常规环境」（乘数全 1），M1 锚点用它钉死。"
+    ],
+    "mode": "random",
+    "multipliers": {
+      "production_incentive": { "efficiency_multiplier": 1.10, "wage_multiplier": 1.15 },
+      "lean_operation":       { "efficiency_multiplier": 0.95, "operating_multiplier": 0.90 },
+      "livelihood_first":     { "wage_multiplier": 1.10 }
+    }
+  }
 }

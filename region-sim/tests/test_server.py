@@ -126,7 +126,8 @@ def test_full_quarter_cycle():
     c = Client()
     c.new_game("g1")
 
-    # 建造（新建一级农业 = 80 现金 + H-A×1 = 144）
+    # 建造（新建一级农业 = 原价 80 现金，开局减免折半 → 40 + H-A×1 = 104）
+    # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
     code, body = c.build("g1", "3,4")
     assert code == 200, body
     assert body["state"]["can_settle"] is True, body["state"]["settle_blockers"]
@@ -137,7 +138,8 @@ def test_full_quarter_cycle():
     assert body["report"] is not None, "结算后应给出报告"
     st = body["state"]
     assert st["quarter"] == 2, f"结算后应进入第 2 季，实得 {st['quarter']}"
-    assert abs(st["cash"] - 1056.0) < TOL, f"1200−144=1056，实得 {st['cash']}"
+    # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
+    assert abs(st["cash"] - 1096.0) < TOL, f"1200−104=1096，实得 {st['cash']}"
     assert len(st["plots"]) == 1, "新建后应有一块地"
     assert st["plots"][0]["status"] == "constructing"
 

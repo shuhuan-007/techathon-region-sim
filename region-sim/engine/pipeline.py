@@ -72,6 +72,7 @@ from typing import Optional
 from engine import construction as C
 from engine import finance as F
 from engine import market as M
+from engine import policies as POL
 from engine import production as P
 from engine import settlement as S
 from engine.efficiency import EfficiencyBreakdown, compute_efficiency
@@ -123,6 +124,10 @@ class QuarterReport:
 
     food: Optional[S.FoodResult] = None
 
+    # ★ 本季政策（§11.9.3）。`None` = 未启用/未抽。
+    #   前端"弹窗告知政策"读这里，不用自己去翻 `world.policies`。
+    policy: Optional[dict] = None
+
     cash_before: float = 0.0
     cash_after: float = 0.0
     value_added: float = 0.0              # GDP（增加值）
@@ -152,6 +157,7 @@ class QuarterReport:
             "unsold_cleared": dict(self.unsold_cleared),
             "discarded": dict(self.discarded),
             "food": self.food.to_dict() if self.food else None,
+            "policy": dict(self.policy) if self.policy else None,
             "cash_before": self.cash_before,
             "cash_after": self.cash_after,
             "value_added": self.value_added,
@@ -167,18 +173,96 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
     """**唯一实现**。`advance` 与 `preview` 都走这里。
 
     ⚠️ 会**就地修改** `state`（含 `state.report`）。试算请传副本。
+
+    ★ **失败即无痕**（§11.3「不产生部分状态变更」）：第 0 步**只抽不落盘**，
+      抽到的政策临时挂在内存里；`policy_state` 到第 5 步扣款成功之后才写。
+      任何一步抛错（资金不足、合同未实现……）→ 临时挂载被撤掉，
+      `state.to_dict()` 与调用前**逐字节相同**。
     """
     if not plans:
         raise SettlementError("没有任何玩家的计划，无法结算")
 
     reports: dict[str, QuarterReport] = {}
 
+    # ══ 第 0 步：★ 政策抽取（§11.9.3「每季开始」） ══════════
+    #
+    # 基线原文：**每季开始** —— 上季政策到期 → 随机抽取本季政策 →
+    # 保存抽取结果 → 弹窗告知 → 玩家看 AI 建议后制定计划。
+    #
+    # ⚠️ 所以抽签在**第 1 步之前**（"期初更新与公告"里的"公告"）。
+    # ⚠️ **第一季也抽**；**每季恰好一项**；**允许连续抽到相同政策**。
+    # ⚠️ **幂等**：本季已经抽过就直接返回，**不重抽** ——
+    #    "重新打开界面或读取同一季度存档不重新抽取"由它保证。
+    #    于是 `preview()`（深拷贝后跑同一份 `_run`）只会重放**同一条**政策，
+    #    试算与真结算的数字必然一致。
+    #
+    # ══════════════════════════════════════════════════════════════
+    # ★ 2026-10-16 修复：抽签与落盘**分开**（§11.3「不产生部分状态变更」）
+    # ══════════════════════════════════════════════════════════════
+    #
+    # 原先这里直接调 `POL.ensure_season_policy()`，**当场落盘**；而资金检查在
+    # **第 5 步**。于是"资金不足"抛错时世界已经被改了：
+    #
+    #     world.policies      [] → [本季政策]
+    #     world.policy_state  {} → {seed, mode, seq:[本季]}
+    #
+    # 违反基线 §11.3「扣款失败不应留下部分状态变更」。
+    #
+    # ⇒ 现在**第 0 步只抽、只放内存**；真正的提交（写 `policy_state`
+    #   与 `world.policies`）挪到**第 5 步扣款成功之后**（见下）。
+    #
+    # ⚠️ 第 0 步仍然要先把政策放进 `world.policies`：本季的效率 / 工资 /
+    #    经营费乘数都按它算（`_apply_efficiency_multiplier`、
+    #    `POL.wage_multiplier` ...），而它们在**第 3、4 步**就要用到。
+    #    这笔"临时挂上去"的记录在**任何失败路径上都撤掉** → 见 `_rollback()`。
+    pending_policy, drawn_now = POL.draw_season_policy(state.world)
+    if drawn_now and pending_policy is not None:
+        # 临时挂载：**只挂 `world.policies`**，`policy_state` 一个字都不写。
+        # ⚠️ 用 append 而非 insert：位置不影响 `active_policies()` 的判定，
+        #    而 append 让"撤掉"就是一次 O(1) 的 pop（下面的 `_rollback`）。
+        state.world.policies.append(pending_policy)
+
+    try:
+        return _run_body(state, plans, cfg, reports, pending_policy, drawn_now)
+    except BaseException:
+        _rollback(state, pending_policy, drawn_now)
+        raise
+
+
+def _run_body(
+    state: GameState,
+    plans: dict[str, Plan],
+    cfg: Config,
+    reports: dict[str, QuarterReport],
+    pending_policy,
+    drawn_now: bool,
+) -> GameState:
+    """`_run` 的**第 1 步到第 9 步**（第 0 步的政策抽签已由 `_run` 做完）。
+
+    ⚠️ 从 `_run` 里拆出来**只为一件事**：让"第 1–9 步整段可能抛错"能被
+       `_run` 的 try 整个罩住 —— 任何一步失败都要撤销第 0 步的临时挂载
+       （§11.3「不产生部分状态变更」）。**公式与顺序逐字未动。**
+
+    ⚠️ 就地修改 `state`；`reports` 是调用方给的**同一个** dict（被填满后
+       `_run` 之外的调用方也能看到）。
+    """
     # ══ 第 1 步：期初更新与公告 ═════════════════════════════
     for player_id in sorted(plans):
         _advance_construction(state, player_id, cfg)
 
     # ══ 第 3 步：算效率 E（服务走独立分支） ═══════════════
     # ⚠️ 必须在生产之前算，且用**上一季**的 H。
+    #
+    # ★ 政策效率乘数（§11.9.3「计算位置」）：
+    #     E_base      = 原有效率公式的计算结果      ← compute_efficiency
+    #     E_effective = E_base × 政策效率乘数       ← 下面这一行
+    #   ⚠️ 乘数**只作用于商品生产地块**（研究 R / 本地服务 J 不受影响）；
+    #   ⚠️ 乘数在**原有效率结果之后**应用，**不回写**邻接/幸福/磨合分量，
+    #      更不碰邻接的 40% 上限（§11.9.3 明写）。
+    #   ⚠️ 存进 `efficiencies` 的 **E_effective** ——
+    #      `EfficiencyBreakdown.efficiency` 是四分量乘积（E_base），
+    #      所以这里换成一个显式携带 E_effective 的副本，
+    #      让报告里报的 E 与生产真正用的 E **是同一个数**。
     efficiencies: dict[str, dict[str, EfficiencyBreakdown]] = {}
     for player_id, plan in plans.items():
         player = state.players[player_id]
@@ -187,7 +271,12 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
             plot = player.plots[pid]
             if plot.status is not PlotStatus.RUNNING:
                 continue
-            per_plot[pid] = compute_efficiency(state, player_id, plot, cfg)
+            eff = compute_efficiency(state, player_id, plot, cfg)
+            recipe = cfg.recipe(plot.plot_type, plot.level, plot.product)
+            commodity = POL.is_commodity_plot(recipe.output, cfg)
+            per_plot[pid] = _apply_efficiency_multiplier(
+                eff, POL.efficiency_multiplier(state.world, commodity)
+            )
         efficiencies[player_id] = per_plot
 
     # ══ 第 4 步：生产 ══════════════════════════════════════
@@ -212,7 +301,23 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
             recipe = cfg.recipe(plot.plot_type, plot.level, plot.product)
             wage_rate = cfg.wage_for(plot.plot_type, plot.level, plot.product)
             eff = efficiencies[player_id][pid]
-            outs.append(P.run_plot(plot, recipe, u, eff.efficiency, cfg, wage_rate))
+            commodity = POL.is_commodity_plot(recipe.output, cfg)
+            # ★ 政策工资 / 经营费乘数（§11.9.3「计算位置」）：
+            #     wage_payment   = 原工资计算结果 × 政策工资乘数
+            #     operating_cost = (原经营费公式用 E_effective 算出的结果)
+            #                      × 政策经营费乘数
+            #   ⚠️ `E_effective` 已经在上面的 `eff.efficiency` 里；
+            #      `production.operating_cost()` 收的就是它，所以经营费
+            #      的"用 E_effective 算"**自动成立**，这里只需再乘减免。
+            #   ⚠️ **停工（u=0）的地块在上面就被 `continue` 掉了**，
+            #      所以政策不可能给"本该不发工资"的地块凭空加出工资
+            #      （§11.9.3 末条红线）。
+            wage_mult = POL.wage_multiplier(state.world, commodity)
+            op_mult = POL.operating_multiplier(state.world, commodity)
+            outs.append(P.run_plot(
+                plot, recipe, u, eff.efficiency, cfg, wage_rate,
+                wage_multiplier=wage_mult, operating_multiplier=op_mult,
+            ))
         outcomes[player_id] = outs
 
     # ══ 第 4.5 步：买入汇总与求价 ══════════════════════════
@@ -318,61 +423,28 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
     prices = M.settle_prices(state.world, total_bought, total_sold)
 
     # ══ 第 5 步：一次性扣款（物资 + 工程现金费 + 工资 + 经营费） ★ ═════
-    for player_id, plan in plans.items():
-        player = state.players[player_id]
-        bill = M.buy_bill(state.world, bought_by_player[player_id])
+    #
+    # ⚠️ **这一步是失败点**（资金不足 → `SettlementError`）。它抛错时由
+    #    `_run` 的 try 兜住 —— 第 0 步临时挂上的政策会被撤销，
+    #    世界状态与调用前**逐字节相同**（§11.3「不产生部分状态变更」）。
+    _deduct_all_players(
+        state, plans, cfg,
+        outcomes=outcomes,
+        bought_by_player=bought_by_player,
+        breakdown_by_player=breakdown_by_player,
+        sold_by_player=sold_by_player,
+        contracted_by_player=contracted_by_player,
+        efficiencies=efficiencies,
+        populations=populations,
+        prices=prices,
+        reports=reports,
+    )
 
-        wages = sum(o.wage for o in outcomes[player_id])
-        operating = sum(o.operating_cost for o in outcomes[player_id])
-        # ★ 工程现金费：**不含物资**（物资在上面的 bill 里），§5.1 工程现金口径
-        build_cash = _construction_cash(plan, player, cfg)
-        total = bill.total + wages + operating + build_cash
-
-        if total > player.cash + 1e-9:
-            raise SettlementError(
-                f"资金不足：{player_id} 本季需扣 {total:.2f}，手上只有 {player.cash:.2f}。\n"
-                f"  物资款 {bill.total:.2f} + 工资 {wages:.2f} + "
-                f"经营费 {operating:.2f} + 工程现金费 {build_cash:.2f}\n"
-                f"  → 请减少采购、降低开工比例，或先卖掉存货。\n"
-                f"  ⚠️ 规则不允许透支：结算一次性扣款时必须够钱。"
-            )
-
-        player.cash -= total
-
-        reports[player_id] = QuarterReport(
-            quarter=state.world.quarter,
-            player_id=player_id,
-            production=outcomes[player_id],
-            efficiency={pid: e.to_dict() for pid, e in efficiencies[player_id].items()},
-            population=populations[player_id],
-            bought=bought_by_player[player_id],
-            bought_breakdown=breakdown_by_player[player_id],
-            sold=sold_by_player[player_id],
-            contracted_out=contracted_by_player[player_id],
-            prices={g: pr.to_dict() for g, pr in prices.items()},
-            buy_bill=bill,
-            materials_cost=bill.total,
-            wages=wages,
-            operating=operating,
-            construction_cash=build_cash,
-            construction=dict(breakdown_by_player[player_id].get("construction") or {}),
-            total_deduction=total,
-            cash_before=player.cash + total,
-        )
-
-        # ══════════════════════════════════════════════════════════
-        # ★ 产出**默认全部是供给**，不进库存（没有仓库）
-        # ══════════════════════════════════════════════════════════
-        # 买进来的东西分三类，**只有口粮进库存**：
-        #   · 生产原料   → 第 4 步生产时**当场消耗**，不是库存
-        #   · 建设物资   → 进工程项目，不是库存
-        #   · 居民口粮   → 落到库存，等第 7.5 步被吃掉
-        #
-        # 口粮 = 自产顶上的 + 缺口买入的（两者合起来正好是玩家申报的 `food`）
-        for g, q in (breakdown_by_player[player_id]["household_food_from_own"] or {}).items():
-            player.add_inventory(g, q)
-        for g, q in (breakdown_by_player[player_id]["household_food_shortfall"] or {}).items():
-            player.add_inventory(g, q)
+    # ★ **扣款全部成功之后**才提交政策状态（§11.9.3「保存抽取结果」）：
+    #   写 `world.policy_state`（seed/mode/seq）+ 确认政策留在 `world.policies`。
+    #   ⚠️ 第 0 步只"临时挂"了 `world.policies`，**`policy_state` 到这一刻才写**。
+    if drawn_now and pending_policy is not None:
+        POL.commit_season_policy(state.world, pending_policy)
 
     # ══ 第 6 步：产品分配与工程投入 ════════════════════════
     for player_id, plan in plans.items():
@@ -393,11 +465,10 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
                 raise SettlementError(
                     f"商品 {g!r} 有产出 {qty}，但求价时没有把它算进去（内部错误）"
                 )
-            # 触底时只卖得掉 sellable 那部分；其余清理、不产生收入（§4.1）
-            effective = min(qty, pr.sellable) if pr.at_floor else qty
-            revenue += effective * pr.price
-            if pr.at_floor and qty > effective:
-                rep.unsold_cleared[g] = rep.unsold_cleared.get(g, 0.0) + (qty - effective)
+            # ✅ 触底也全量成交（§4.1，2026-10-16 深夜用户裁定：
+            #    "价格碰地板判定为全按地板价卖出就行了。就当是全国统一收购。"）
+            #    价格碰地板只压低单价，**不减少销量**，所以这里不再截断。
+            revenue += qty * pr.price
 
         player.cash += revenue
         rep.sales_revenue = revenue
@@ -466,6 +537,198 @@ def _run(state: GameState, plans: dict[str, Plan], cfg: Config) -> GameState:
 # ══════════════════════════════════════════════════════════════════
 
 
+def _policy_report(world) -> Optional[dict]:
+    """本季政策的报告条目（前端弹窗读它，§11.9.3）。
+
+    ⚠️ 加上**展开后的乘数**，前端就不用自己去查政策表 —— 与"前端只显示、
+       零计算"的约定一致。
+    """
+    pid = POL.active_policy_id(world)
+    if pid is None:
+        return None
+    d = POL.def_for(pid)
+    row = d.to_dict()
+    row["multipliers_applied"] = {
+        "efficiency": POL.efficiency_multiplier(world, True),
+        "wage_commodity": POL.wage_multiplier(world, True),
+        "operating": POL.operating_multiplier(world, True),
+    }
+    return row
+
+
+def _rollback(state: GameState, policy, drawn_now: bool) -> None:
+    """★ 失败路径：撤掉第 0 步**临时挂上**的那条政策，让世界回到调用前。
+
+    与第 5 步成功后的 `POL.commit_season_policy()` 互为反操作。
+    两者一起保证基线 §11.3「**不产生部分状态变更**」——
+    任何一步抛错（资金不足、合同未实现……）之后，
+    `st.to_dict()` 与调用前**逐字节相同**。
+
+    ⚠️ 只撤**本季新抽的**那条（`drawn_now=True`）：
+       已经是存档里既有政策的季（读档 / 重开界面）压根没动过它，不能撤。
+
+    ⚠️ `world.policy_state` 本来就没写（第 0 步走的是只读的
+       `POL.draw_season_policy()`），所以这里**不需要**回滚它 ——
+       这正是把 `rng_state()`（会就地补缺省值）换成 `_read_seed()` 的原因。
+
+    ⚠️ **本函数只负责第 0 步的挂载**。第 1 步之后各步（工期推进、扣现金、
+       进口粮……）的写入**不在这里回滚** —— 它们是**扣款前**的正常推进还是
+       **扣款后**的遗留，取决于失败点，语义不同。
+       ⚠️ **已知边界**：第 6/7 步之后若再抛错，`world.quarter` 之前的写入
+       （比如第 1 步的工期推进）不会自动撤销。要根治得整局快照回滚，
+       那是比本缺陷大得多的改动 —— 这里按任务书范围只堵第 0 步这一处。
+    """
+    if not drawn_now or policy is None:
+        return
+    try:
+        state.world.policies.remove(policy)
+    except ValueError:
+        # 已经被撤过 / 从没挂上（防御性：绝不因清理动作本身再抛一个错）
+        pass
+
+
+def _deduct_all_players(
+    state: GameState,
+    plans: dict[str, Plan],
+    cfg: Config,
+    *,
+    outcomes: dict[str, list[P.PlotOutcome]],
+    bought_by_player: dict[str, dict[str, float]],
+    breakdown_by_player: dict[str, dict[str, dict]],
+    sold_by_player: dict[str, dict[str, float]],
+    contracted_by_player: dict[str, dict[str, float]],
+    efficiencies: dict[str, dict[str, EfficiencyBreakdown]],
+    populations: dict[str, PopulationResult],
+    prices: dict,
+    reports: dict[str, QuarterReport],
+) -> None:
+    """★ 第 5 步：一次性扣款（物资 + 工程现金费 + 工资 + 经营费）。
+
+    从 `_run` 里抽出来**只为一件事**：让"这一步可能抛错"在 `_run` 里
+    看得见（`_run` 用 try 包住它，抛错时撤销临时挂载的政策）。
+    公式、顺序、判钱与扣钱的口径**与抽取前逐字相同**。
+
+    ⚠️ **就地修改** `state`（扣现金、登记减免名额、记报告、进口粮）。
+    """
+    for player_id, plan in plans.items():
+        player = state.players[player_id]
+        bill = M.buy_bill(state.world, bought_by_player[player_id])
+
+        wages = sum(o.wage for o in outcomes[player_id])
+        operating = sum(o.operating_cost for o in outcomes[player_id])
+        # ★ 工程现金费：**不含物资**（物资在上面的 bill 里），§5.1 工程现金口径
+        # ★ 2026-10-16 用户裁定（§5.3）：每类 3 个开局减免名额 × 0.50，
+        #   只打「现金费」那一项，物资按原样投入。
+        #   ⚠️ **判钱与扣钱必须是同一个数** —— 两者都用 `build_cash`，
+        #      绝不允许一个用原价、一个用折后价。
+        build_cash, quota_hits = _construction_cash(plan, player, cfg)
+        total = bill.total + wages + operating + build_cash
+
+        if total > player.cash + 1e-9:
+            raise SettlementError(
+                f"资金不足：{player_id} 本季需扣 {total:.2f}，手上只有 {player.cash:.2f}。\n"
+                f"  物资款 {bill.total:.2f} + 工资 {wages:.2f} + "
+                f"经营费 {operating:.2f} + 工程现金费 {build_cash:.2f}\n"
+                f"  → 请减少采购、降低开工比例，或先卖掉存货。\n"
+                f"  ⚠️ 规则不允许透支：结算一次性扣款时必须够钱。"
+            )
+
+        player.cash -= total
+
+        # ★ 名额只在**扣款成功之后**才登记（§5.3 一次性、用掉就永久占用）。
+        #   放在这里而不是 `_invest_construction()` 里，是因为第 6 步已经在
+        #   扣款之后 —— 万一以后加了新的失败点，"钱没扣、名额却没了"不会发生。
+        for ptype_value in quota_hits:
+            player.opening_quota_used[ptype_value] = (
+                int(player.opening_quota_used.get(ptype_value, 0)) + 1
+            )
+
+        reports[player_id] = QuarterReport(
+            quarter=state.world.quarter,
+            player_id=player_id,
+            production=outcomes[player_id],
+            efficiency={pid: e.to_dict() for pid, e in efficiencies[player_id].items()},
+            population=populations[player_id],
+            bought=bought_by_player[player_id],
+            bought_breakdown=breakdown_by_player[player_id],
+            sold=sold_by_player[player_id],
+            contracted_out=contracted_by_player[player_id],
+            prices={g: pr.to_dict() for g, pr in prices.items()},
+            buy_bill=bill,
+            materials_cost=bill.total,
+            wages=wages,
+            operating=operating,
+            construction_cash=build_cash,
+            construction=dict(breakdown_by_player[player_id].get("construction") or {}),
+            total_deduction=total,
+            cash_before=player.cash + total,
+            policy=_policy_report(state.world),
+        )
+
+        # ══════════════════════════════════════════════════════════
+        # ★ 产出**默认全部是供给**，不进库存（没有仓库）
+        # ══════════════════════════════════════════════════════════
+        # 买进来的东西分三类，**只有口粮进库存**：
+        #   · 生产原料   → 第 4 步生产时**当场消耗**，不是库存
+        #   · 建设物资   → 进工程项目，不是库存
+        #   · 居民口粮   → 落到库存，等第 7.5 步被吃掉
+        #
+        # 口粮 = 自产顶上的 + 缺口买入的（两者合起来正好是玩家申报的 `food`）
+        for g, q in (breakdown_by_player[player_id]["household_food_from_own"] or {}).items():
+            player.add_inventory(g, q)
+        for g, q in (breakdown_by_player[player_id]["household_food_shortfall"] or {}).items():
+            player.add_inventory(g, q)
+
+
+def _apply_efficiency_multiplier(
+    eff: EfficiencyBreakdown, multiplier: float
+) -> EfficiencyBreakdown:
+    """把政策效率乘数应用在**原有效率结果之后**（§11.9.3「计算位置」）。
+
+        E_base      = eff.efficiency（四分量乘积）
+        E_effective = E_base × 政策效率乘数
+
+    ⚠️ **不回写分量**：`adjacency / happiness / ramp_up / research_multiplier`
+       原样保留 —— 基线明写"效率乘数在原有效率结果之后应用，**不回写邻接
+       参数**"，且"政策**不改变**邻接分项的 40% 上限"。
+       所以这里只换掉那个**派生属性** `efficiency`，
+       而且必须新建对象（`frozen=False` 的 dataclass，但共享引用会污染调用方）。
+
+    ⚠️ `multiplier == 1.0` 时**原样返回**，连对象都不换 ——
+       常规环境下 M1 拿到的 `EfficiencyBreakdown` 与改动前**逐位相同**。
+    """
+    if multiplier == 1.0:
+        return eff
+    scaled = EfficiencyBreakdown(
+        plot_id=eff.plot_id,
+        adjacency=eff.adjacency,                 # ← 分量**不动**（不回写）
+        happiness=eff.happiness,
+        ramp_up=eff.ramp_up,
+        research_multiplier=eff.research_multiplier,
+        linked_neighbors=eff.linked_neighbors,
+        adjacency_bonus=eff.adjacency_bonus,
+        adjacency_capped=eff.adjacency_capped,
+        is_service=eff.is_service,
+        service_rate=eff.service_rate,
+        contributions=list(eff.contributions),
+    )
+    # `efficiency` 是只读 property → 用子类覆盖，保持"报告里的 E =
+    # 生产真正用的 E"这一条不变式（否则 UI 显示的 E 会与实际产量脱节）。
+    scaled.__class__ = _ScaledEfficiency
+    object.__setattr__(scaled, "_effective", eff.efficiency * multiplier)
+    return scaled
+
+
+class _ScaledEfficiency(EfficiencyBreakdown):
+    """带政策乘数的 `EfficiencyBreakdown`（只覆盖 `efficiency` 这个派生量）。"""
+
+    _effective: float = 1.0
+
+    @property
+    def efficiency(self) -> float:
+        return self._effective
+
+
 def _contract_deliveries(plan: Plan) -> dict[str, float]:
     """★ **合同通道**：本季通过合同直接交付给别的玩家、**不进公开市场**的量。
 
@@ -505,23 +768,38 @@ def _contract_deliveries(plan: Plan) -> dict[str, float]:
     )
 
 
-def _construction_cash(plan: Plan, player, cfg: Config) -> float:
-    """本季要付的**工程现金费**（§5.1 工程现金口径）。
+def _construction_cash(plan: Plan, player, cfg: Config) -> tuple[float, list[str]]:
+    """本季要付的**工程现金费**（§5.1 工程现金口径）+ 吃掉的减免名额。
 
         工程现金支出 = 其他工程费用 + 实际外购工程物资成本
 
     ⚠️ **工程表里的现金费不含物资**（§5.2 表头写明），
        物资在 `_construction_materials()` 那边按商品单独买、单独算钱。
        两者加起来才是这一行工程的"按参考价合计"。
+
+    ★ 2026-10-16 用户裁定（基线 §5.3）：**每类 3 个减免名额、折扣 0.50**，
+      只作用于「新建一级」（`work.is_new` 且 `to_level == 1`），
+      **只打现金费那一项**，物资按原样投入；名额按类型独立、跨季累计、
+      用掉就永久占用（存在 `PlayerState.opening_quota_used`）。
+
+    返回
+    ----
+    (实付现金总额, 本季**新吃掉**的名额类型列表——每次命中一个算一个，
+     顺序 = `plan.builds` 的顺序，`["agriculture", "agriculture", ...]`）
+
+    ⚠️ 判定只认 `plan.builds` 的顺序：同一季农业建 4 块 → 前 3 块折后价、
+       第 4 块全价（**不是**按地块 ID 排序，玩家的指令顺序就是消耗顺序）。
+
+    ⚠️ 本函数**不改任何状态**（`opening_quota_used` 由第 5 步扣款成功后登记），
+       所以"钱不够 → 抛错"时不会留下"名额被偷走"的脏状态（§11.3）。
     """
     if not plan.builds:
-        return 0.0
+        return 0.0, []
 
-    total = 0.0
-    for order in plan.builds:
-        work, _materials = C.build_steps(cfg, player.plots.get(order.plot_id), order)
-        total += work.cash
-    return total
+    rows = C.build_cash_plan(plan, player, cfg)
+    total = sum(r["cash"] for r in rows)
+    hits = [r["plot_type"].value for r in rows if r["discounted"]]
+    return total, hits
 
 
 def _construction_materials(plan: Plan, player, cfg: Config) -> dict[str, float]:

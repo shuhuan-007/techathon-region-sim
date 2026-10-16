@@ -325,6 +325,10 @@ class Config:
     opening_quota: dict[str, Optional[int]] = field(default_factory=dict)
     opening_discount_rate: Optional[float] = None
 
+    # ★ 政策（§11.9.3）：开局模式 + 乘数数值覆盖。见 policies.py。
+    policy_mode: Optional[str] = None
+    policy_multipliers: dict = field(default_factory=dict)
+
     # ── 访问器 ──────────────────────────────────────────
 
     def recipe(self, plot_type: PlotType, level: int,
@@ -444,7 +448,14 @@ class Config:
         return sorted(self.market)
 
     def new_world(self) -> WorldState:
-        """造一个开局世界状态（第 1 季、SETUP 阶段、市场曲线就位）。"""
+        """造一个开局世界状态（第 1 季、SETUP 阶段、市场曲线就位）。
+
+        ★ 政策模式：本方法**不**开启随机抽取，一切按 `engine/policies.py`
+          的缺省（`regular` = 恒常规环境）走 —— 因为 M1 夹具与单点对账
+          都用 `new_world()` 造世界，锚点必须钉死。
+          正式对局在开局入口显式调 `policies.set_policy_mode(world, "random")`，
+          或直接调 `policies.apply_config_mode(world, cfg)`。
+        """
         from engine.models import WorldPhase
 
         return WorldState(
@@ -612,6 +623,15 @@ def load_config(path: str | Path | None = None) -> Config:
     opening = raw.get("opening", {})
     cfg.opening_quota = dict(opening.get("discount_quota", {}))
     cfg.opening_discount_rate = opening.get("discount_rate")
+
+    # ── 政策（§11.9.3）──────────────────────────────────
+    # ⚠️ 四项政策本身、25% 概率、作用范围都是**规则**，不在 config 里增删；
+    #    这里只读两样：开局模式（random/regular）与乘数数值覆盖。
+    #    `mode` 作用见 `engine/policies.py`：正式对局用 "random"（每季抽），
+    #    "regular" 恒为常规环境（测试/单点对账用）。
+    pol = raw.get("policies") or {}
+    cfg.policy_mode = pol.get("mode")
+    cfg.policy_multipliers = dict(pol.get("multipliers") or {})
 
     _validate(cfg)
     return cfg
