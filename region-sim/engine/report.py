@@ -90,9 +90,24 @@ def build_state(
        并说明"尚未提交计划"。
     """
     player = state.player(player_id)
-    last_report: Optional[QuarterReport] = None
+
+    # ══════════════════════════════════════════════════════════════
+    # ★ 上季报告有**两个来源**，要都认
+    # ══════════════════════════════════════════════════════════════
+    #
+    #   raw_reports —— 刚结算完那一刻的**对象**形态（进内存才有）
+    #   report      —— **dict** 形态，存档里存的就是它
+    #
+    # ⚠️ 只认 `raw_reports` 是个真实的 bug：
+    #    存档不保存 `raw_reports`（它是中间产物），所以**读档后**
+    #    `raw_reports` 是空的 → 界面上的"📋 上季报告"变成空白，
+    #    玩家会以为程序把账吞了。
+    #    `storage/base.py` 已经把 `report` 存下来了，这里必须回退去取。
+    last_report: Optional[dict] = None
     if state.raw_reports and player_id in state.raw_reports:
-        last_report = state.raw_reports[player_id]
+        last_report = state.raw_reports[player_id].to_dict()
+    elif state.report and player_id in state.report:
+        last_report = state.report[player_id]
 
     # ══════════════════════════════════════════════════════════════
     # ★ 先校验，再试算（顺序不能反）
@@ -147,7 +162,7 @@ def build_state(
         "market": _market(state, cfg, trial),
 
         # ── 上季报告（原样给，前端零计算）──
-        "report": last_report.to_dict() if last_report else None,
+        "report": last_report,
 
         # ── 本季收支预览 ──
         "projection": _projection(trial, trial_error, cfg),

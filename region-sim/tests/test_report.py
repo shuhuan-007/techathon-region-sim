@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from engine import report
+from engine import pipeline, report
 from engine.loader import load_config
 from engine.models import (
     GameState,
@@ -125,7 +125,51 @@ def test_projection_prices_match_settlement():
         )
 
 
-def test_projection_includes_finance_derived_fields():
+def test_report_survives_storage_reload():
+    """★★ **读档后 `/state` 里的上季报告必须还在**。
+
+    ⚠️ 这条钉住一个真实 bug（本轮修掉）：
+
+       `build_state` 原先**只认 `state.raw_reports`**（对象形态）。
+       但存档不保存 `raw_reports`（它是结算的中间产物），存的是
+       `state.report`（dict 形态）。于是**读档后 `raw_reports` 是空的** →
+       界面上的「📋 上季报告」变成空白，玩家会以为程序把账吞了。
+
+       修法：`raw_reports` 没有就回退去取 `state.report`。
+    """
+    from storage import MemoryStorage
+
+    cfg = load_config()
+    st = state_with(plot("0,0"))
+    plan = full_plan("0,0")
+    pipeline.advance(st, {"p1": plan}, cfg)
+
+    # 结算后（内存里）应当有报告
+    assert report.build_state(st, "p1", cfg)["report"] is not None
+
+    # 存档 → 读档 → raw_reports 没了，但 report 要能顶上
+    store = MemoryStorage()
+    store.save("g1", st)
+    reloaded = store.load("g1")
+    assert reloaded.raw_reports == {}, "存档不该保留 raw_reports（中间产物）"
+    assert reloaded.report, "存档应保存 report"
+
+    out = report.build_state(reloaded, "p1", cfg)
+    assert out["report"] is not None, (
+        "★ 读档后上季报告丢了 —— 界面上会变成空白"
+    )
+    assert out["report"]["quarter"] == 1
+    assert abs(out["report"]["cash_after"] - st.players["p1"].cash) < TOL
+
+
+def test_report_is_none_before_any_settlement():
+    """还没结算过 → `report` 是 `None`（不编一个空报告）。"""
+    cfg = load_config()
+    st = state_with(plot("0,0"))
+    assert report.build_state(st, "p1", cfg)["report"] is None
+
+
+
     """本季收支预览要带上 `finance` 的派生量（工资税/净工资/GDP 的 P0 拆解）。
 
     这几个数**只**在 `finance.py` 里有一份实现，report 直接取，不重算。
