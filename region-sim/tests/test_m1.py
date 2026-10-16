@@ -7,34 +7,41 @@
     python tests/test_m1.py
 
 ═══════════════════════════════════════════════════════════════════
-⚠️ 本文件记录了一处**文档锚点与规则不一致**的发现
+★ 2026-10-16 重算记录
 ═══════════════════════════════════════════════════════════════════
 
-《规则基线》§8.1 的 M1 表写：
+原 §8.1 的 M1 表写「乙区原料费 = 72、生产总支出 = 157、增加值 = 93」，
+与**同文件 §8.2 的「G 季度成本 = 215」自相矛盾**。
 
-    区域乙（G 工厂）：原料费用 = **72**，生产总支出 = **157**
-
-但按**当前配方表**（§2.3）与参考价算：
+按**当前配方表**（§2.3）与参考价算：
 
     工业 1 级 G 的投入 = C×2 + D×1 + F×3
     参考价 C=16 / D=26 / F=24
     → 2×16 + 1×26 + 3×24 = 32 + 26 + 72 = **130**
 
-而 **§8.2 静态成本四点**自己写的是「G 季度成本 = **215**」：
+而 §8.2 自己写的是「G 季度成本 = **215**」：
 
     130（原料）+ 45（工资）+ 40（经营费）= 215  ✅ 与 130 一致
 
-**所以 §8.1 的 72/157 与 §8.2 的 215 互相矛盾**，而 §8.2 与配方表一致。
-M1 表里 72 只算了 F×3，漏了 C×2 与 D×1。
+**所以 §8.1 与 §8.2 互相矛盾，而 §8.2 与配方表一致。**
+旧表的 72 只算了 F×3，漏了 C×2 与 D×1。
 
-《规则基线》§11.6 数据纪律写得很清楚：
+《规则基线》§11.6 数据纪律：
 
     历史测试数字只属于其对应规则版本，应根据最终规则**重新生成测试预期**，
     **不能反向修改规则迁就旧数字**。
 
-所以本文件**不**把 72/157 当作断言，而是：
-  · 断言**规则能确定的部分**（产出、工资、经营费、甲区全部数字）
-  · 把**有争议的**部分单独列出来，标成 `KNOWN_DIVERGENCE`
+所以 §8.1 已按配方表**重新生成**（2026-10-16），本文件跟随：
+
+    甲：原料 0    总支出 66    增加值 66
+    乙：原料 130  总支出 215   增加值 110
+    增加值合计 = 176
+
+**结算价与期末现金**依赖弹性 `Es`/`Ed`（config 里仍为 `null`），
+故以公式表示，弹性到位后可直接代入：
+
+    甲：期末现金 = 1000 − 66  + 4·P_F + 3.60
+    乙：期末现金 = 1000 − 215 + 5·P_G + 4.50
 """
 
 from __future__ import annotations
@@ -139,15 +146,19 @@ def test_yi_wage_and_operating_match_anchor():
     assert abs(o.operating_cost - 40.0) < TOL, f"经营费应为 40，实得 {o.operating_cost}"
 
 
-def test_yi_material_cost_diverges_from_m1_table():
-    """★ 记录分歧：M1 表写 72，按配方+参考价应为 130。
+def test_yi_material_cost_is_130():
+    """★ 乙区原料费 = **130**（配方 §2.3 + 参考价），不是旧表的 72。
 
-    这不是"测试失败"，是**把发现固定下来**：
-      · 配方 §2.3：C×2 + D×1 + F×3
-      · 参考价：C=16, D=26, F=24
-      · → 130
-    而 §8.2 静态成本四点的「G = 215」= 130 + 45 + 40，**与 130 一致**。
-    所以 §8.1 的 72 是**漏算 C、D** 的旧值。
+    工业 1 级 G 的投入 = C×2 + D×1 + F×3
+    参考价 C=16 / D=26 / F=24
+    → 2×16 + 1×26 + 3×24 = 32 + 26 + 72 = **130**
+
+    这与 **§8.2 静态成本四点**的「G 季度成本 = 215」自洽：
+        130（原料）+ 45（工资）+ 40（经营费）= 215  ✅
+
+    旧表的 72 只算了 F×3，漏了 C、D。按 §11.6 数据纪律
+    「历史测试数字只属于其对应规则版本，应**重新生成**测试预期，
+    **不能反向修改规则迁就旧数字**」，此处以配方表为准。
     """
     cfg = load_config()
     plot = mature("0,1", PlotType.INDUSTRY, 1, product="G")
@@ -162,14 +173,45 @@ def test_yi_material_cost_diverges_from_m1_table():
     assert abs(material - 130.0) < TOL, f"按配方应为 130，实得 {material}"
 
     # 与 §8.2 静态成本四点自洽（这是**独立**的文档锚点）
-    assert abs((material + o.wage + o.operating_cost) - 215.0) < TOL, \
-        "G 季度成本应为 215（§8.2），与 §8.1 的 157 矛盾"
+    total = material + o.wage + o.operating_cost
+    assert abs(total - 215.0) < TOL, f"G 季度成本应为 215（§8.2），实得 {total}"
 
-    # 与 §8.1 的旧值对比，明确记录差异
-    M1_TABLE_MATERIAL = 72.0
-    M1_TABLE_TOTAL = 157.0
-    assert abs(material - M1_TABLE_MATERIAL) > 1.0, "若这里不再分歧，说明配方被改过"
-    assert abs((material + o.wage + o.operating_cost) - M1_TABLE_TOTAL) > 1.0
+    # 旧表的 72/157 已被证伪（漏算 C、D），不应再复现
+    assert abs(material - 72.0) > 1.0, "72 是漏算 C、D 的旧值"
+    assert abs(total - 157.0) > 1.0, "157 是漏算 C、D 的旧值"
+
+
+def test_value_added_matches_regenerated_anchor():
+    """增加值（GDP）：甲 66 / 乙 110 / **合计 176**（§8.1 重算值）。
+
+        增加值 = 有效产出价值（**固定参考价**） − 中间投入（原料 + 经营费 c）
+
+    ⚠️ 工资**不**作中间投入再扣（§7.5）。
+    """
+    cfg = load_config()
+    P0 = {g: c.P0 for g, c in cfg.market.items()}
+
+    cases = [
+        ("甲", PlotType.RESOURCE, 1, None, 66.0),
+        ("乙", PlotType.INDUSTRY, 1, "G", 110.0),
+    ]
+    total_va = 0.0
+    for name, ptype, level, product, expected in cases:
+        plot = mature("0,0", ptype, level, product=product)
+        rec = cfg.recipe(ptype, level, product)
+        wage_rate = cfg.wage_for(ptype, level, product)
+        o = P.run_plot(plot, rec, 1.0, 1.0, cfg, wage_rate)
+
+        out_value = o.output_qty * P0[o.output_goods]
+        material = o.material_cost(P0)
+        va = out_value - material - o.operating_cost
+        assert abs(va - expected) < TOL, (
+            f"{name} 增加值应为 {expected}，实得 {va}"
+            f"（产出价值 {out_value} − 原料 {material} − 经营费 {o.operating_cost}）"
+        )
+        total_va += va
+
+    assert abs(total_va - 176.0) < TOL, f"增加值合计应为 176，实得 {total_va}"
 
 
 def test_static_cost_four_points():
@@ -283,41 +325,47 @@ def _print_reconciliation() -> None:
     P0 = {g: c.P0 for g, c in cfg.market.items()}
 
     print("=" * 70)
-    print("M1 对账（按当前《规则基线》+ config.json 实算）")
+    print("M1 对账（按当前《规则基线》§8.1 重算值 + config.json 实算）")
     print("=" * 70)
 
     cases = [
-        ("甲 (F)", PlotType.RESOURCE, 1, None, 0.0, 36.0, 30.0, 66.0),
-        ("乙 (G)", PlotType.INDUSTRY, 1, "G", 72.0, 45.0, 40.0, 157.0),
+        ("甲 (F)", PlotType.RESOURCE, 1, None, 0.0, 36.0, 30.0, 66.0, 66.0),
+        ("乙 (G)", PlotType.INDUSTRY, 1, "G", 130.0, 45.0, 40.0, 215.0, 110.0),
     ]
-    for name, ptype, level, product, d_mat, d_wage, d_op, d_total in cases:
+    for name, ptype, level, product, d_mat, d_wage, d_op, d_total, d_va in cases:
         plot = mature("0,0", ptype, level, product=product)
         rec = cfg.recipe(ptype, level, product)
         w = cfg.wage_for(ptype, level, product)
         o = P.run_plot(plot, rec, 1.0, 1.0, cfg, w)
         mat = o.material_cost(P0)
         tot = mat + o.wage + o.operating_cost
+        out_value = o.output_qty * P0[o.output_goods]
+        va = out_value - mat - o.operating_cost
 
         def mark(actual, doc):
-            return "" if abs(actual - doc) < TOL else "   <<< 与 §8.1 不一致"
+            return "" if abs(actual - doc) < TOL else "   <<< 不一致"
 
         print(f"\n【{name}】u=1  E=1")
         print(f"  产出        {o.output_goods} x {o.output_qty}")
-        print(f"  商品投入    {o.inputs}")
+        print(f"  商品投入    {o.inputs or '无'}")
         print(f"  原料费      {mat:<8} §8.1 写 {d_mat}{mark(mat, d_mat)}")
         print(f"  工资        {o.wage:<8} §8.1 写 {d_wage}{mark(o.wage, d_wage)}")
         print(f"     └ 劳动 {o.labor} × 单价 {o.wage_rate}")
         print(f"  经营费      {o.operating_cost:<8} §8.1 写 {d_op}{mark(o.operating_cost, d_op)}")
         print(f"  生产总支出  {tot:<8} §8.1 写 {d_total}{mark(tot, d_total)}")
+        print(f"  增加值      {va:<8} §8.1 写 {d_va}{mark(va, d_va)}")
+        print(f"     └ = 有效产出价值 {out_value} − 原料 {mat} − 经营费 {o.operating_cost}")
 
     print("\n" + "-" * 70)
-    print("★ 分歧说明：§8.1 的 72/157 只算了 F×3，漏了 C×2 + D×1。")
-    print("  配方 §2.3 是 C×2 + D×1 + F×3 = 2×16+1×26+3×24 = 130")
-    print("  而 §8.2 静态成本四点「G = 215」= 130+45+40 —— 与 130 自洽。")
-    print("  → §8.1 与 §8.2 互相矛盾，§8.2 与配方表一致。")
-    print("  → 按 §11.6，应重新生成 M1 预期，不迁就旧数字。")
+    print("2026-10-16 重算说明：旧表的乙区原料费 72 只算了 F×3，")
+    print("  漏了 C×2 + D×1。配方 §2.3 = C×2+D×1+F×3 = 2×16+1×26+3×24 = 130，")
+    print("  与 §8.2 的「G = 215」= 130+45+40 自洽。")
+    print("  按 §11.6，应重新生成 M1 预期，不迁就旧数字。")
     print("-" * 70)
     print("\n价格一步：Es/Ed 仍未填，无法求价（这是设计如此，不是 bug）")
+    print("  弹性到位后即可代入：")
+    print("    甲：期末现金 = 1000 − 66  + 4·P_F + 3.60")
+    print("    乙：期末现金 = 1000 − 215 + 5·P_G + 4.50")
     for g in ("F", "G"):
         c = cfg.market[g]
         print(f"  {g}: P0={c.P0} Q0={c.Q0} Es={c.Es} Ed={c.Ed}")
