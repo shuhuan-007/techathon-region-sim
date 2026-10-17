@@ -164,9 +164,32 @@ def test_report_none_returns_none():
     assert N.narrate_report(None, client=FakeClient(REPORT_OK)) is None
 
 
-def test_report_bad_response_does_not_fabricate():
-    out = N.narrate_report({"quarter": 4}, client=FakeClient("这季还行。"))
-    assert out["ok"] is False and "text" not in out
+def test_report_accepts_plain_markdown():
+    """★ 财报那一路**本来就该是 Markdown**，不是 JSON（2026-10-17 真跑后修的）。
+
+    `report.md` 提示词原文要求「输出供玩家阅读的**中文 Markdown 解读**」。
+    第一次真跑时模型照做了、给了一份很像样的 Markdown，我们却按 JSON 判它
+    `bad_response` 把好东西扔了 —— 那是**我们的对接错误**。
+    现在：拿不到 JSON 就把 Markdown 原文当正文收下，并如实标"无溯源表"。
+    """
+    md = ("# 第1季度财报解读\n\n## 季度概览\n本季主要结算事项为地块建设。\n\n"
+          "- 期初现金 1200.00，期末现金 978.00\n- 扣除合计 222.00")
+    out = N.narrate_report({"quarter": 1}, client=FakeClient(md))
+    assert out["ok"] is True, f"Markdown 应被接收，实得 {out.get('error')}"
+    assert out["text"].startswith("# 第1季度财报解读")
+    assert "978.00" in out["text"], "正文必须原样保留"
+    assert out["facts_used"] == {}
+    assert "Markdown" in out.get("warning", ""), "要如实标出没有溯源表"
+
+
+def test_news_still_rejects_free_text():
+    """⚠️ 新闻那一路**仍然严格**：它的提示词要求合法 JSON，不许网开一面。
+
+    report 放宽不等于 news 放宽 —— 两条的提示词契约本来就不同。
+    """
+    out = N.narrate_news({"quarter": 3}, client=FakeClient("本季价格触底。"))
+    assert out["ok"] is False and out["error"] == "bad_response"
+    assert "headline" not in out and "body" not in out
 
 
 # ══════════════════════════════════════════════════════════════════

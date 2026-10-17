@@ -244,8 +244,25 @@ def _generate(
     obj, problem = parse_model_json(content)
 
     if obj is None:
-        # ⚠️ 这里**绝不**把模型那段自由文本当作叙事返回 —— 提示词要求的是
-        #    「只有三个顶层字段的合法 JSON」，解析不出来就是没拿到，如实报错。
+        # ⚠️ 两路的**提示词契约本来就不一样**（2026-10-17 真跑后修的）：
+        #    · news.md  要求「只返回一个合法 JSON 对象，只有三个顶层字段」
+        #      → 解析不出来就是没拿到，**绝不**把那段自由文本当叙事返回。
+        #    · report.md 要求「输出供玩家阅读的**中文 Markdown 解读**」
+        #      → **它本来就不该是 JSON**！第一次真跑时模型老老实实给了
+        #        一份很像样的 Markdown，我们却按 JSON 判它 bad_response，
+        #        把好东西扔了 —— 那是**我们的对接错误**，不是模型不听话。
+        #      所以 report 这一路：拿不到 JSON 就**把 Markdown 原文当正文收下**。
+        if kind == "report" and str(content).strip():
+            return {
+                "kind": "report",
+                "quarter": quarter,
+                "ok": True,
+                "model": model,
+                "text": str(content).strip(),
+                "facts_used": {},          # 纯 Markdown 返回值里没有溯源表
+                "warning": "模型按提示词返回了 Markdown（非 JSON），已按正文接收；"
+                           "本份没有 facts_used 溯源。",
+            }
         return _failure(kind, quarter, "bad_response",
                         f"{problem}。原文前 200 字：{str(content).strip()[:200]}",
                         model=model)

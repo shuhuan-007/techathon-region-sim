@@ -108,7 +108,7 @@ class GameSession:
 
     # ── 读 ────────────────────────────────────────────────
 
-    def state_for(self, player_id: str) -> dict:
+    def state_for(self, player_id: str, *, with_narratives: bool = True) -> dict:
         """给前端的只读状态快照（**已算好的数字**，前端零计算）。
 
         ✅ 2026-10-16：改为调用 `engine.report.build_state()`。
@@ -121,9 +121,16 @@ class GameSession:
         ★ 2026-10-17：叙事（新闻/财报解读）在这层**锁外**准备——
            调 `ai.narrate` 要碰模型（几十秒），**绝不在 `self.lock` 里做**；
            先 `_narratives_for()`（锁外、按季缓存），再把结果递给引擎只转发。
+
+        ★ 2026-10-17 修（实测抓到的）：`with_narratives=False` —— **不生成、也不读缓存**。
+           为什么需要：`app.py` 的 `end_quarter` / `next_quarter` 响应体里都带
+           `state_for()`，于是"点结算"顺手就调了两路模型，**实测单次 173 秒**，
+           而且那时 phase 还是 REPORT（用户裁定是"结算后、下季行动前生成"）。
+           结算与推进季度**只返回数字**，叙事留给下一次真正读 `/api/state`
+           （也就是玩家进入下季、动手之前）去生成。
         """
         # ── 锁外：要不要生成本季叙事（一次拿公平快照，决定后调模型）──
-        narratives = self._narratives_for(player_id)
+        narratives = self._narratives_for(player_id) if with_narratives else None
 
         with self.lock:
             return report.build_state(

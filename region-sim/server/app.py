@@ -366,14 +366,20 @@ class App:
         return {
             "ok": True,
             "report": rep.to_dict() if rep is not None else None,
-            "state": session.state_for(player_id),
+            # ⚠️ with_narratives=False：结算响应**不生成叙事**。
+            #    否则这行会让「点结算」顺手调两路模型（2026-10-17 实测 +173 秒）。
+            #    叙事等玩家进入下季、真正读 /api/state 时再生成
+            #    （用户裁定：结算后、下季行动前）。
+            "state": session.state_for(player_id, with_narratives=False),
         }
 
     def next_quarter(self, body: dict) -> dict:
         session = self.registry.get(_need(body, "game"))
         player_id = _need(body, "player")
         session.start_next_quarter()
-        return {"ok": True, "state": session.state_for(player_id)}
+        # 同上：推进季度只返数字，不在这里等模型。
+        return {"ok": True,
+                "state": session.state_for(player_id, with_narratives=False)}
 
     def build_options(self, params: dict) -> dict:
         """建造面板的下拉选项（**前端零计算**）。
