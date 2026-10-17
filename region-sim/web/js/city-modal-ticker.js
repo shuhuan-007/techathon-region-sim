@@ -18,11 +18,12 @@ window.APP = window.APP || {};
     const plots = (STATE.plots || []);
     const running = plots.filter(p => p && p.status === 'running').length;
     const cons   = plots.filter(p => p && p.status === 'constructing').length;
-    /* STATE.happiness 是 0-1 小数；population.N 是小数（引擎保留，按显示惯例取 1 位）；
-       cash 直接取整。 */
+    /* STATE.happiness 是 0-1 小数；population_count 是标量（report.py:272-277
+       始终有值，与 plan 无关，引擎保留小数，按显示惯例取 1 位）；cash 直接取整。
+       旧键 STATE.population.N 不存在（N 不是 PopulationResult 子键），已废弃。 */
     const happy = (STATE.happiness != null) ? Math.round(STATE.happiness * 100) : null;
-    const pop   = (STATE.population && STATE.population.N != null)
-                  ? STATE.population.N.toFixed(1) : null;
+    const pop   = (STATE.population_count != null)
+                  ? Number(STATE.population_count).toFixed(1) : null;
     const cash  = (STATE.cash != null) ? Math.round(STATE.cash) : null;
     const q     = STATE.quarter;
     const items = [];

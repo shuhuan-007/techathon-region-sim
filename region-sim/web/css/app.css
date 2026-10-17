@@ -340,3 +340,62 @@
   left:50% !important; top:50% !important;
   animation:flyCircle 14s linear forwards;
 }
+
+/* ===== 天上报表层 (city-modal-sky) ==============================
+   z-index 3 介于 ticker(z:2) 与 header(z:10) 之间。
+   层面面板:视觉上"挂在天上"(顶部居中)。透明 + 边框 + 背阴影
+   让玩家仍能看出底下的 3D 模型。pointer-events:none 必守,
+   不挡 OrbitControls。 */
+#city-sky{
+  position:absolute;
+  top:3%;
+  left:50%;
+  transform:translateX(-50%);
+  max-width:min(760px, 90%);
+  max-height:88%;
+  overflow-y:auto;
+  z-index:3;
+  pointer-events:none;
+  background:rgba(10, 16, 24, 0.72);
+  backdrop-filter:blur(10px) saturate(0.85);
+  -webkit-backdrop-filter:blur(10px) saturate(0.85);
+  border:1px solid rgba(255,255,255,0.14);
+  border-radius:8px;
+  padding:14px 22px;
+  color:rgba(255,255,255,0.85);
+  font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size:12px;
+  line-height:1.55;
+  box-shadow:0 8px 40px rgba(0,0,0,0.6), 0 2px 6px rgba(0,0,0,0.4);
+  animation:skyIn 0.6s cubic-bezier(.2,.7,.3,1) forwards;
+}
+@keyframes skyIn{
+  0%   { opacity:0; transform:translateX(-50%) translateY(-12%) scale(0.98); }
+  100% { opacity:1; transform:translateX(-50%) translateY(0)    scale(1)   ; }
+}
+#city-sky .sky-title{
+  font-size:14px; font-weight:600; letter-spacing:0.08em;
+  color:rgba(255,255,255,0.95);
+  text-shadow:0 1px 2px rgba(0,0,0,0.5);
+  margin-bottom:10px;
+  border-bottom:1px solid rgba(255,255,255,0.15);
+  padding-bottom:6px;
+}
+#city-sky .sky-sec{ margin:10px 0; }
+#city-sky .sky-hd{
+  font-size:11px; text-transform:uppercase; letter-spacing:0.1em;
+  color:rgba(255,255,255,0.55);
+  margin-bottom:4px;
+}
+#city-sky table{ width:100%; border-collapse:collapse; }
+#city-sky td{ padding:2px 0; border-bottom:1px dashed rgba(255,255,255,0.06); }
+#city-sky td.k{ width:60%; color:rgba(255,255,255,0.65); }
+#city-sky td.v{ width:40%; text-align:right; font-weight:500;
+                color:rgba(255,255,255,0.92); font-variant-numeric:tabular-nums; }
+#city-sky .sky-note{
+  margin-top:8px; font-size:11px; color:rgba(255,255,255,0.5);
+  font-style:italic;
+}
+#city-sky::-webkit-scrollbar{ width:6px; }
+#city-sky::-webkit-scrollbar-track{ background:transparent; }
+#city-sky::-webkit-scrollbar-thumb{ background:rgba(255,255,255,0.2); border-radius:3px; }

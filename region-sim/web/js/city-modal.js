@@ -41,6 +41,7 @@ window.APP = window.APP || {};
   let _camera = null;          // THREE.PerspectiveCamera
   let _controls = null;        // THREE.OrbitControls
   let _plotGroup = null;
+  let _wasteGroup = null;      // 简陋荒地（一块薄片 box，不占 gltf）
   let _ground = null;
   let _enabled = true;
   let _failedUrls = {};
@@ -55,6 +56,29 @@ window.APP = window.APP || {};
   const CELL_SPACING = 1.0;
   const GRID_CENTER = 5.0;
 
+  /* 已拍板（2026-10-18 v4）：视野 = 已有地块 bbox 扩到正方形并加 padding。
+     埋 DISPLAY bbox = [minRow..maxRow] × [minCol..maxCol] 追加到正方形：
+     side = max(w, h) + 2 * PAD_CELLS （PAD_CELLS=1）；
+     side 至少 = 3（太小形态沒；最多 = 10（全图）。
+     输入：cells = [{row, col}, ...]。无 cell 返回 null。 */
+  function _cityViewBBox(cells){
+    if (!cells || !cells.length) return null;
+    let minR = Infinity, maxR = -Infinity, minC = Infinity, maxC = -Infinity;
+    cells.forEach(({ row, col }) => {
+      if (row < minR) minR = row;
+      if (row > maxR) maxR = row;
+      if (col < minC) minC = col;
+      if (col > maxC) maxC = col;
+    });
+    const w = maxC - minC + 1, h = maxR - minR + 1;
+    const PAD = 1;
+    const side = Math.min(10, Math.max(3, Math.max(w, h) + PAD * 2));
+    const cx = (minC + maxC + 1) / 2;
+    const cz = (minR + maxR + 1) / 2;
+    /* 方形中心不动 */
+    return { cx, cz, side };
+  }
+
   function _open(){
     const m = document.getElementById('city-modal');
     if (!m) return;
@@ -65,6 +89,8 @@ window.APP = window.APP || {};
     _startLoop();
     /* 数据飞字层：只读 STATE、零侵入 */
     if (window.APP && APP.cityTicker && APP.cityTicker.start) APP.cityTicker.start();
+    /* 天上报表层(完整经营报表) */
+    if (window.APP && APP.citySky && APP.citySky.open) APP.citySky.open();
   }
 
   function _close(){
@@ -73,6 +99,7 @@ window.APP = window.APP || {};
     _isOpen = false;
     _stopLoop();
     if (window.APP && APP.cityTicker && APP.cityTicker.stop) APP.cityTicker.stop();
+    if (window.APP && APP.citySky && APP.citySky.close) APP.citySky.close();
     /* 不 destroy gltf cache——下次打开还能复用；不清 _plotGroup，让
        下次打开瞬间可以一次性把旧场面替换掉而不是空白闪烁。 */
   }
@@ -174,6 +201,8 @@ window.APP = window.APP || {};
 
     _plotGroup = new THREE.Group();
     _scene.add(_plotGroup);
+    _wasteGroup = new THREE.Group();
+    _scene.add(_wasteGroup);
     _gltfLoader = new THREE.GLTFLoader();
   }
 
@@ -328,6 +357,11 @@ window.APP = window.APP || {};
     while (_plotGroup.children.length){
       _plotGroup.remove(_plotGroup.children[0]);
     }
+    if (_wasteGroup){
+      while (_wasteGroup.children.length){
+        _wasteGroup.remove(_wasteGroup.children[0]);
+      }
+    }
 
     const cellById = {};
     (MAP.cells || []).forEach(c => { if (c && c.plot_id) cellById[c.plot_id] = c; });
@@ -344,6 +378,7 @@ window.APP = window.APP || {};
     /* 2026-10-18 反馈 2：跟踪"已有地块的 bbox 中心"代替全局 GRID_CENTER=5。
        收集所有 plot 的 (row,col)，结束后把 controls.target / camera 跟过去。 */
     const placedCenters = [];  // [{x, z}] 每个 plot 中心
+    const placedCells   = [];  // [{row, col}] 每个 plot 网格坐标（_cityViewBBox 用）
     (STATE.plots || []).forEach(p => {
       const pid = p.plot_id;
       const cell = cellById[pid];
@@ -359,6 +394,7 @@ window.APP = window.APP || {};
       const x = col * CELL_SPACING + CELL_SPACING / 2;
       const z = row * CELL_SPACING + CELL_SPACING / 2;
       placedCenters.push({ x, z });
+      placedCells.push({ row, col });
       tasks.push(
         _loadGlb(key).then(gltf => {
           _placeGlb(gltf, x, z);
@@ -370,22 +406,72 @@ window.APP = window.APP || {};
       await Promise.allSettled(tasks);
     }
 
-    /* 把 OrbitControls target / camera 跟到已有地块 bbox 中心。
-       只有 1 块时 target 就是该地块中心；多块时取均值（≈bbox 中点）。
-       无 plot 时回退 GRID_CENTER。 */
-    if (placedCenters.length && _controls){
-      let cx = 0, cz = 0;
-      placedCenters.forEach(c => { cx += c.x; cz += c.z; });
-      cx /= placedCenters.length;
-      cz /= placedCenters.length;
-      /* 把 camera 平移等价量，保持"控制视角不变"手感 */
-      const dx = cx - _controls.target.x;
-      const dz = cz - _controls.target.z;
-      _controls.target.set(cx, 0, cz);
-      _camera.position.x += dx;
-      _camera.position.z += dz;
-      _camera.lookAt(cx, 0, cz);
-      _controls.update();
+    /* ── 视野方形 + 荒地填充（2026-10-18 v4 拍板）──────────────
+       1. 用 _cityViewBBox 拿 {cx, cz, side}；
+       2. _ground 用 scale 改成 side×side，position 移到 (cx, -0.01, cz)；
+       3. OrbitControls target 跟到 (cx, 0, cz)，camera 平行平移；
+       4. side ≤ 6 时，对 bbox 方形内"既不是 STATE.plots 也不是 MAP.cells 任一 asset"
+          的 (row,col)，生成简陋荒地（深棕薄片 box）。
+       无 plot 时保持原 GRID_CENTER=5、底盘 20×20 不变。 */
+    const view = _cityViewBBox(placedCells);
+    if (view){
+      const { cx, cz, side } = view;
+      /* 1) 底盘：用 scale 缩放替代重建，原 PlaneGeometry 尺寸保持 side=20 */
+      const scaleRatio = side / 20;
+      if (_ground){
+        _ground.scale.set(scaleRatio, 1, scaleRatio);
+        _ground.position.set(cx, -0.01, cz);
+      }
+      /* 2) controls target / camera */
+      if (_controls){
+        const dx = cx - _controls.target.x;
+        const dz = cz - _controls.target.z;
+        _controls.target.set(cx, 0, cz);
+        _camera.position.x += dx;
+        _camera.position.z += dz;
+        _camera.lookAt(cx, 0, cz);
+        _controls.update();
+      }
+      /* 3) 荒地：side ≤ 6 才堆；更大索密度反成噪音 */
+      if (side <= 6 && _wasteGroup){
+        /* 造一份"已占用格子"字典：STATE.plots ∪（MAP.cells 里 c.asset 非空） */
+        const occupied = {};
+        (STATE.plots || []).forEach(p => { if (p && p.plot_id) occupied[p.plot_id] = true; });
+        (MAP.cells || []).forEach(c => {
+          if (c && c.plot_id && c.asset) occupied[c.plot_id] = true;
+        });
+        /* 方形在 row/col 上的覆盖范围：
+           center=(minC+maxC+1)/2, side=…；左下角
+             colStart = round(cx - side/2), rowStart = round(cz - side/2)。
+           只生成完全落在 [0, 9] 内的格子。 */
+        const colStart = Math.round(cx - side / 2);
+        const rowStart = Math.round(cz - side / 2);
+        for (let r = rowStart; r < rowStart + side; r++){
+          for (let c = colStart; c < colStart + side; c++){
+            if (r < 0 || c < 0 || r > 9 || c > 9) continue;
+            const id = r + ',' + c;
+            if (occupied[id]) continue;
+            /* 简陋荒地：薄 Box，无贴图无 glb */
+            const w = CELL_SPACING * 0.95;
+            const h = 0.04;
+            const geo = new THREE.BoxGeometry(w, h, w);
+            const mat = new THREE.MeshStandardMaterial({
+              color: 0x4a4036, roughness: 1.0, metalness: 0.0,
+            });
+            const m = new THREE.Mesh(geo, mat);
+            m.position.set(c * CELL_SPACING + CELL_SPACING / 2, 0.02, r * CELL_SPACING + CELL_SPACING / 2);
+            m.receiveShadow = true;
+            m.castShadow = false;
+            _wasteGroup.add(m);
+          }
+        }
+      }
+    } else {
+      /* 无 plot：底盘还原到 GRID_CENTER=5、20×20 */
+      if (_ground){
+        _ground.scale.set(1, 1, 1);
+        _ground.position.set(GRID_CENTER, -0.01, GRID_CENTER);
+      }
     }
   }
 

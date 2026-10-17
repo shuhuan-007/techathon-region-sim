@@ -82,8 +82,12 @@ function renderTop(){
   $("s-quarter").textContent = `${s.quarter} / ${s.total_quarters}`;
   $("s-cash").textContent    = fmt(s.cash);
   $("s-happy").textContent   = fmt(s.happiness);
-  const p = s.population;
-  $("s-pop").textContent = p ? `${fmt(p.labor_total,1)} / ${fmt(p.population,1)}` : "—";
+  /* ★ 2026-10-17 后端新键（report.py:272-277）：jobs / population_count
+     是「始终有值的标量」，与 u / plan 无关，未提交 plan 也拿得到 ——
+     旧键 s.population 在 plan=None 时是 null，会让顶栏"—"成常驻。 */
+  const jobs = (s.jobs != null) ? s.jobs : 0;
+  const popc = (s.population_count != null) ? s.population_count : 0;
+  $("s-pop").textContent = `${fmt(jobs,1)} / ${fmt(popc,1)}`;
   $("s-eff").textContent = s.efficiency == null ? "—" : "×" + fmt(s.efficiency);
 
   const phaseName = {collecting:"行动阶段", resolving:"结算中", report:"月报阶段"}[s.phase] || s.phase;
