@@ -139,9 +139,18 @@ def test_full_quarter_cycle():
     st = body["state"]
     assert st["quarter"] == 2, f"结算后应进入第 2 季，实得 {st['quarter']}"
     # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
-    assert abs(st["cash"] - 1096.0) < TOL, f"1200−104=1096，实得 {st['cash']}"
+    # 2026-10-17 起每季 +subsidy（默认 120）补贴进账面 → 1200−104+120=1216
+    subsidy = body["report"]["subsidy"]
+    assert abs(st["cash"] - (1096.0 + subsidy)) < TOL, (
+        f"1200−104+补贴{subsidy}={1096.0 + subsidy}，实得 {st['cash']}"
+    )
     assert len(st["plots"]) == 1, "新建后应有一块地"
-    assert st["plots"][0]["status"] == "constructing"
+    # 2026-10-17 用户拍板：本季投钱投料也算一季工期。
+    #   1 级农业工期 1 季 → **当季完工**，所以结算后状态应为 running（不再是在建）。
+    #   旧断言是 "constructing"（旧口径要等下季才完工），已按新规则更新。
+    assert st["plots"][0]["status"] == "running", (
+        f"1 季工期当季完工，应为 running，实得 {st['plots'][0]['status']}"
+    )
 
     # 进入下一季
     code, body = c.post("/api/next_quarter", {"game": "g1", "player": "p1"})

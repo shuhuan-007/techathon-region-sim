@@ -44,7 +44,9 @@
   .pill{font-size:11px; padding:2px 8px; border-radius:10px; background:var(--panel2); color:var(--dim);}
 
   /* ── 布局 ─────────────────────────────────────────────── */
-  .grid{display:grid; grid-template-columns:minmax(340px,1fr) minmax(300px,380px); gap:12px;}
+  /* ★ 三栏：地图/建造 | 本季安排 | AI 秘书侧栏。窄屏自动退化为上下堆叠。 */
+  .grid{display:grid; grid-template-columns:minmax(340px,1fr) minmax(300px,380px) minmax(300px,360px); gap:12px;}
+  @media(max-width:1280px){.grid{grid-template-columns:minmax(340px,1fr) minmax(300px,380px);} #ai-panel{grid-column:1 / -1;}}
   @media(max-width:900px){.grid{grid-template-columns:1fr;}}
   .panel{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:12px; margin-bottom:12px;}
   .row{display:flex; gap:8px; align-items:center;}
@@ -69,6 +71,20 @@
   .agri{background:#16261a;} .resource{background:#26221a;}
   .industry{background:#1a2230;} .service{background:#241a26;}
   .research{background:#1d1a2e;}
+  /* ★ 本地待建（**只在草稿里、还没递交**）—— 与"在建"的虚线橙区分开：
+       用青色虚线 + 「待建」，让玩家一眼看出"我这季打算动这几块"。 */
+  .cell.planned{
+    border-style:dashed; border-width:2px; border-color:var(--accent);
+    background:#101c28; color:var(--accent);
+  }
+  .cell.planned .lt{color:var(--accent);}
+  .cell.planned .sub{color:var(--accent); opacity:.85;}
+  /* 选中那格要更醒目（现有 sel 之上再叠一圈影子）。 */
+  .cell.sel{
+    outline:2px solid var(--accent); outline-offset:-1px;
+    box-shadow:0 0 0 2px #0a1017, 0 0 14px 1px var(--accent);
+    z-index:2;
+  }
 
   /* ── 表格 ─────────────────────────────────────────────── */
   table{width:100%; border-collapse:collapse; font-size:12px;}
@@ -136,6 +152,50 @@
   details.facts-src{margin-top:8px;}
   details.facts-src > summary{cursor:pointer;}
   details.facts-src table{margin-top:4px;}
+
+  /* ── AI 秘书聊天框（侧栏对话框）────────────────────────────
+     ⑤号改造：一个输入框 + 一个发送按钮 + 对话气泡流（可滚动）。
+     气泡按角色（你 / 秘书）两边排，下面一条一条堆。 */
+  #ai-panel{display:flex; flex-direction:column;}
+  #ai-chat{
+    flex:1; min-height:200px; max-height:520px; overflow-y:auto;
+    display:flex; flex-direction:column; gap:8px;
+    padding:8px 2px; margin:8px 0;
+  }
+  .bubble{
+    max-width:88%; padding:8px 11px; border-radius:10px; font-size:13px;
+    white-space:pre-wrap; word-break:break-word; line-height:1.5;
+  }
+  .bubble.me{
+    align-self:flex-end; background:var(--accent); color:#04121f;
+    border-bottom-right-radius:3px;
+  }
+  .bubble.ai{
+    align-self:flex-start; background:var(--panel2); color:var(--ink);
+    border:1px solid var(--line); border-bottom-left-radius:3px;
+  }
+  .bubble.ai.warn{border-color:var(--warn);} .bubble.ai.bad{border-color:var(--bad);}
+  .bubble .who{
+    display:block; font-size:10px; color:var(--dim); margin-bottom:3px;
+  }
+  .bubble.me .who{color:#0a2942;}
+  .bubble .sys{font-size:11px; color:var(--dim); margin-top:6px;}
+  #ai-input-row{display:flex; gap:6px; align-items:flex-end;}
+  #ai-input{
+    flex:1; resize:none; min-height:38px; max-height:120px;
+    font-family:inherit; line-height:1.4;
+  }
+
+  /* ── 结算流水（等待时逐条涌现的结算细节）────────────────── */
+  #state-loading .flow{
+    text-align:left; margin:10px auto 0; max-width:300px;
+    max-height:240px; overflow-y:auto; font-size:12px; line-height:1.55;
+  }
+  #state-loading .flow div{opacity:0; animation:flow-in .35s ease-out forwards;}
+  @keyframes flow-in{ from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:none;} }
+  #state-loading .flow .good{color:var(--good);}
+  #state-loading .flow .warn{color:var(--warn);}
+  #state-loading .flow .dim{color:var(--dim);}
 </style>
 </head>
 <body>
@@ -188,36 +248,7 @@
           </p>
         </div>
 
-        <!-- ★ AI 建议 —— 只起草；确认后由玩家走 /api/submit（§11.4，AI 无 commit）。
-             位置：地图正下方。默认收起成一行标题，点标题展开（见 JS toggleAiPanel）。 -->
-        <div class="panel" id="ai-panel" style="border-style:dashed;">
-          <button id="ai-toggle" type="button"
-                  style="width:100%;text-align:left;font-weight:600;border:none;background:transparent;padding:0">
-            🤖 AI 建议 <span class="muted" id="ai-toggle-hint">（点击展开）</span>
-            <span style="float:right" id="ai-toggle-arrow">▾</span>
-          </button>
-          <div id="ai-body" class="hidden">
-          <div class="row" style="margin:8px 0">
-            <input id="ai-question"
-                   placeholder="（可空）例：这季先建什么？口粮要不要多买？"
-                   style="flex:1">
-            <button id="btn-ai-ask">问 AI</button>
-            <button id="btn-ai-draft" class="primary"
-                    title="让 AI 自己起草一份计划，填入左侧「本季安排 / 建造 / 口粮」表单，你可以再改">
-              ✍️ 让 AI 起草一份
-            </button>
-          </div>
-          <div id="ai-status" class="muted" style="margin:0 0 8px"></div>
-          <div id="ai-result"></div>
-          <p class="muted" style="margin:8px 0 0">
-            「问 AI」＝只给建议，不动表单。<br>
-            「✍️ 让 AI 起草一份」＝AI 写一份计划<b>填入左边表单</b>，<b>绝不自动提交</b>——
-            你改完再自己点「下达建设指令 / ▶ 推进本季度」（§11.4，AI 无 commit）。
-          </p>
-          </div>
-        </div>
-
-        <div class="panel" id="build-panel">
+        <div class="panel">
           <h2>建造 / 升级 <span class="muted" id="build-at"></span></h2>
           <p class="muted" id="quota-strip" style="margin:0 0 8px;font-size:12px"></p>
           <div class="row" style="margin-bottom:8px">
@@ -250,7 +281,7 @@
         </div>
       </div>
 
-      <!-- 右：地块安排 + 口粮 + 报告 -->
+      <!-- 中：地块安排 + 口粮 + 报告 -->
       <div>
         <div class="panel">
           <h2>本季安排</h2>
@@ -280,7 +311,6 @@
           <p class="muted" style="margin:8px 0 0" id="proj-note">—</p>
         </div>
 
-        <!-- ★ AI 建议 —— 只起草；确认后由玩家走 /api/submit（§11.4，AI 无 commit）。 -->
         <!-- ★ 区域新闻（Q 结算后由 ai.narrate 生成；前端**只显示**，不算一个数） -->
         <div class="panel" id="news-panel">
           <h2>📰 区域新闻</h2>
@@ -298,18 +328,37 @@
           <div id="report-body" class="muted">还没有结算过（第 1 季结算后出现）。</div>
         </div>
       </div>
+
+      <!-- ★ 右：AI 秘书侧栏（一个聊天式对话框，§11.4：AI 只起草，提交永远是玩家的动作） -->
+      <div class="panel" id="ai-panel">
+        <h2 style="margin:0 0 4px">🤖 AI 秘书</h2>
+        <p class="muted" style="margin:0 0 8px;font-size:12px">
+          问问题、要建议、让它起草本季计划都行 —— 它会直接帮你填到界面里，
+          <b>绝不自动提交</b>（改完自己点「▶ 推进本季度」）。
+        </p>
+        <div id="ai-chat"></div>
+        <div id="ai-input-row">
+          <textarea id="ai-input" rows="2"
+            placeholder="例：『这季先建什么？』『帮我起草一份，先建农业和口粮田』"></textarea>
+          <button id="btn-ai-send" class="primary" style="white-space:nowrap">发送</button>
+        </div>
+        <div id="ai-status" class="muted" style="margin:6px 0 0"></div>
+      </div>
     </div>
   </div>
 </div>
 
 <div id="toast"></div>
 
-<!-- 慢请求加载态：默认隐藏；fetch 耗时 > SL_DELAY_MS 才显形（见 JS）。 -->
+<!-- 慢请求加载态：默认隐藏；fetch 耗时 > SL_DELAY_MS 才显形（见 JS）。
+     ★ ⑥号改造：结算时**先把回包里的结算细节逐条涌现在这里**，
+     再进入"写新闻/财报"的等待 —— 等待过程被信息流填满。 -->
 <div id="state-loading" class="hidden" role="status" aria-live="polite">
   <div class="box">
     <div class="spin" aria-hidden="true"></div>
-    <div class="t">正在撰写本季新闻与财报解读……</div>
-    <div class="s">首次约需 1–3 分钟，请稍候。页面没有卡死，是模型正在生成。</div>
+    <div class="t" id="sl-title">正在撰写本季新闻与财报解读……</div>
+    <div class="s" id="sl-sub">首次约需 1–3 分钟，请稍候。页面没有卡死，是模型正在生成。</div>
+    <div class="flow" id="sl-flow"></div>
     <div class="elapsed">已等待 <span id="sl-elapsed">0</span> 秒</div>
   </div>
 </div>
@@ -395,6 +444,169 @@ function hideStateLoading(){
   setActionButtonsDisabled(false);
 }
 
+/* ══════════════════════════════════════════════════════════
+   ★ ⑥ 等待时把结算细节**逐条涌现**（替代干等）
+   ══════════════════════════════════════════════════════════
+   数据源（**全部是引擎给的**，前端零编）：
+     · POST /api/end_quarter 的回包 `report`（结算结束**立刻**有）
+     · 季度结算字段：production / sold / total_deduction / sales_revenue /
+       cash_before / cash_after / value_added / food.happiness / policy ……
+       （《QuarterReport.to_dict》）
+   流程（"推进本季度"按下时）：submit → end_quarter（**立刻**拿到 report）
+     → 先把 report 里的关键项**每 ~320ms 一条**逐条推给还没显形的加载框
+     → 推完报告（或根本没有报告）→ 标题切成"正在撰写新闻…"，进入 /api/state
+       的首读等待（model 生成可能要 1–3 分钟）。
+   ⚠️ **绝不"编"任何一条**：只在引擎真给了那个字段才上一行；
+     一个字段都没有（比如还有些"在建尚未完工"）就只推"结算第 N 季"那一行，
+     加载框快速滑过而**不会当成报错**。 */
+
+/* 让加载框立刻显形（不走 2.5s 延迟），标题换成"结算第 N 季…"。
+   专给"推进本季度"用；普通 refresh 还是走延迟。 */
+function showStateLoadingNow(title, sub){
+  /* 已经在显示（等 2.5s 那个 setTimeout 还没触发）→ 直接抢占。 */
+  if (_slTimer){ clearTimeout(_slTimer); _slTimer = null; }
+  const el = $("state-loading");
+  el.classList.remove("hidden");
+  if (title) $("sl-title").textContent = title;
+  if (sub)   $("sl-sub").textContent   = sub;
+  $("sl-elapsed").textContent = "0";
+  const flow = $("sl-flow"); if (flow) flow.innerHTML = "";
+  setActionButtonsDisabled(true);
+  if (!_slTick){
+    _slTick = setInterval(() => {
+      const s = Math.floor((Date.now() - _slStart) / 1000);
+      $("sl-elapsed").textContent = String(s);
+    }, 1000);
+  }
+}
+
+/* 回"撰写新闻/财报"那一档标题。state 首读等待时用。 */
+function setStateLoadingNarrative(){
+  $("sl-title").textContent = "正在撰写本季新闻与财报解读……";
+  $("sl-sub").textContent   = "首次约需 1–3 分钟，请稍候。页面没有卡死，是模型正在生成。";
+}
+
+/* 推一条进结算流水（只在加载框已显形时能看到；没显形就静默）。
+   kind ∈ "" | "good" | "warn" | "dim"。 */
+function pushSettlementLine(text, kind){
+  const flow = $("sl-flow");
+  if (!flow) return;
+  const div = document.createElement("div");
+  if (kind) div.className = kind;
+  div.textContent = text;
+  flow.appendChild(div);
+  flow.scrollTop = flow.scrollHeight;
+}
+
+/* 从引擎的 report 提取"逐条涌现"的那几行。**一个字段一个字段地查**：
+   有就上、没有就跳；绝不替引擎"总结"任何东西（那是 AI 的事）。
+   行序按《基线》季度推进的顺序：建成 → 生产 → 扣款 → 收入 → 期末现金 → 幸福度 → 政策。 */
+function settlementLinesFromReport(r){
+  if (!r || typeof r !== "object") return [];
+  const lines = [];
+  /* 季度头 */
+  lines.push({text:`结算第 ${r.quarter} 季…`, kind:"dim"});
+  /* 建成（production 里没有"建成"行——它是"在产"；建成走 construction_left=0。
+     引擎没单独给"建成"清单，所以这里**不上**建成行——只上真实存在的。） */
+
+  /* 生产：每块地一行 */
+  const prod = Array.isArray(r.production) ? r.production : [];
+  const producing = prod.filter(o => o && (o.output_qty || o.u));
+  if (producing.length){
+    producing.forEach(o => {
+      const u  = (o.u != null) ? Math.round(Number(o.u)*100) : null;
+      const bits = [];
+      if (u != null) bits.push(`开工 ${u}%`);
+      if (o.output_goods) bits.push(`产出 ${o.output_goods} ×${fmt(o.output_qty,1)}`);
+      const suffix = bits.length ? `（${bits.join(" · ")}）` : "";
+      lines.push({
+        text:`✓ 生产：${o.plot_id}（${TYPE_CN[o.plot_type]||o.plot_type||"?"}${o.level||""}${o.product?"·"+o.product:""}）${suffix}`,
+        kind:"good",
+      });
+    });
+  } else {
+    lines.push({text:"· 本季无生产（没开工/没地块）", kind:"dim"});
+  }
+
+  /* 卖出：X_t 每商品一行 */
+  const sold = r.sold && typeof r.sold === "object" ? r.sold : {};
+  const soldKeys = Object.keys(sold);
+  if (soldKeys.length){
+    soldKeys.sort().forEach(g => {
+      const qty = Number(sold[g]);
+      if (!(qty > 0)) return;
+      const price = r.prices && r.prices[g] && r.prices[g].price;
+      const priceTxt = (price != null) ? ` @ ${fmt(price)}` : "";
+      lines.push({text:`✓ 成交：卖出 ${g} ×${fmt(qty,1)}${priceTxt}`, kind:"good"});
+    });
+  } else {
+    lines.push({text:"· 本季无卖出", kind:"dim"});
+  }
+
+  /* 扣款三件套（材料 / 工资 / 经营）+ 一次性扣款 */
+  const anyCost = (r.materials_cost || r.wages || r.operating || r.total_deduction) != null;
+  if (anyCost){
+    lines.push({
+      text:`✓ 扣款：材料 ${fmt(r.materials_cost)} ／ 工资 ${fmt(r.wages)} ／ 经营 ${fmt(r.operating)}`,
+      kind:"",
+    });
+    if (r.total_deduction != null){
+      lines.push({text:`✓ 一次性扣款：${fmt(r.total_deduction)}`, kind:""});
+    }
+    if (r.wage_tax_refund){
+      lines.push({text:`✓ 工资税回流：+${fmt(r.wage_tax_refund)}`, kind:"good"});
+    }
+  }
+
+  /* 收入 */
+  if (r.sales_revenue != null){
+    lines.push({text:`✓ 销售收入（本季价）：+${fmt(r.sales_revenue)}`, kind:"good"});
+  }
+
+  /* 期末现金（现金变化最直观的一行） */
+  if (r.cash_before != null && r.cash_after != null){
+    lines.push({
+      text:`✓ 现金：${fmt(r.cash_before)} → ${fmt(r.cash_after)}`,
+      kind:"good",
+    });
+  }
+
+  /* 增加值（GDP 参考价口径） */
+  if (r.value_added != null){
+    lines.push({text:`✓ 增加值 GDP（参考价）：${fmt(r.value_added)}`, kind:""});
+  }
+
+  /* 幸福度 */
+  const h = r.food && r.food.happiness;
+  if (h != null){
+    lines.push({text:`✓ 幸福度：${fmt(h)}`, kind:""});
+  }
+
+  /* 政策（本季抽到的） */
+  if (r.policy && r.policy.announcement){
+    lines.push({text:`✓ 政策：${String(r.policy.announcement)}`, kind:"warn"});
+  }
+
+  return lines;
+}
+
+/* 让 lines 每 ~320ms 上一条（"流水"感）。返回一个 Promise：推完才 resolve。
+   若玩家根本就没展开加载框（report 极快返回），也会把行推完——没问题，
+   下一次 hideStateLoading 时整张框被撤掉，玩家看不到"曾经滚过一堆"。 */
+function streamSettlementLines(lines, intervalMs){
+  return new Promise(resolve => {
+    if (!lines || !lines.length){ resolve(); return; }
+    let i = 0;
+    const step = () => {
+      if (i >= lines.length){ resolve(); return; }
+      const l = lines[i++];
+      pushSettlementLine(l.text, l.kind);
+      setTimeout(step, intervalMs == null ? 320 : intervalMs);
+    };
+    step();
+  });
+}
+
 /* 会重复触发"拉状态"或"上交计划"的按钮（建造按钮走自身 disabled 流，单独管）。 */
 /* ★ 「推进本季度」什么时候可点（2026-10-17 修）：
  *
@@ -416,7 +628,7 @@ function settleEnabled(s){
   return true;
 }
 
-const _SL_BTNS = ["btn-settle","btn-next","btn-runall","btn-stopall","btn-load","btn-new","btn-ai-ask","btn-ai-draft"];
+const _SL_BTNS = ["btn-settle","btn-next","btn-runall","btn-stopall","btn-load","btn-new","btn-ai-send"];
 function setActionButtonsDisabled(off){
   _SL_BTNS.forEach(id => {
     const b = $(id);
@@ -471,8 +683,10 @@ $("btn-new").onclick = async () => {
   try{
     const r = await api("POST", "/api/new_game", { game_id: gid, player_id: PLAYER });
     GAME = gid; resetPlan(); selected = null;
+    AI_LOG.length = 0;             // 新对局 → 秘书对话也从零开始
     $("main").classList.remove("hidden");
     toast(`已开新局 ${gid}`, "ok");
+    aiGreet();
     await refreshGames(); await refresh();
   }catch(e){ fail(e); }
 };
@@ -481,7 +695,9 @@ $("btn-load").onclick = async () => {
   const gid = ($("sel-games").value || $("in-game").value).trim();
   if (!gid) return toast("先选一个存档");
   GAME = gid; resetPlan(); selected = null;
+  AI_LOG.length = 0;             // 换档 → 秘书对话也从零开始
   $("main").classList.remove("hidden");
+  aiGreet();
   await refresh();
 };
 
@@ -571,6 +787,16 @@ function renderMap(){
   el.style.gridTemplateColumns = `repeat(${MAP.cols}, minmax(0,1fr))`;
   const byId = displayPlots(MAP, STATE);
 
+  /* ★ ②号改造：本地 plan.builds（**只在草稿、还没递交**）也要在地图上显影。
+       与"已递交的影子"（virtual_plots）分开档位：
+         已递交 → 引擎给的"constructing"虚线橙；
+         只在草稿 → 前端的"planned"虚线青 + 「待建」。
+       玩家一眼看出："这几块是我这季打算动的"。 */
+  const plannedById = {};
+  (plan.builds || []).forEach(b => {
+    if (b && b.plot_id) plannedById[b.plot_id] = b;
+  });
+
   el.innerHTML = MAP.cells.map(c => {
     // ★ 缺陷 2：cell 直接带 status（引擎 build_map 已补）。优先用 cell 自己的
     //   status；空地上叠的"前影"（virtual_plots）也会带 status=constructing，
@@ -580,6 +806,7 @@ function renderMap(){
     const status = cellStatus || (p && p.status);
     const isConstructing = status === "constructing";
     const isRunning = status === "running";
+    const planned = plannedById[c.plot_id];  // 只在草稿里的待建指令
 
     const cls = ["cell"];
     if (p || cellStatus){
@@ -588,11 +815,21 @@ function renderMap(){
       if (pt) cls.push("mine", pt);
       if (isConstructing) cls.push("constructing");
       if (isRunning) cls.push("running");
+    } else if (planned){
+      /* 只在草稿里的待建（引擎还没影子）—— 不上"mine/类型色"
+         （那是"已经是你的"的信号），只上 planned（待建青）。 */
+      cls.push("planned");
     }
     if (selected === c.plot_id) cls.push("sel");
     let inner;
-    if (!p && !cellStatus){
+    if (!p && !cellStatus && !planned){
       inner = `+`;
+    } else if (planned && !p && !cellStatus){
+      /* 待建格：类型短码 + "待建"，产物也写上（比如"农·A"）。 */
+      const pt = planned.plot_type;
+      const prod = planned.product;
+      inner = `<span class="lt">${TYPE_CN[pt] || "?"}·待建</span>`
+            + `<span class="sub">${prod || "（未选产出）"}</span>`;
     } else {
       const pt = c.plot_type || (p && p.plot_type);
       const lvl = (p && p.level != null) ? p.level : (c.level != null ? c.level : 0);
@@ -1175,10 +1412,24 @@ $("btn-settle").onclick = async () => {
   try{
     const r = await api("POST", "/api/submit", {game:GAME, player:PLAYER, plan: publicPlan()});
     STATE = r.state; renderAll();
-    await api("POST", "/api/end_quarter", {game:GAME, player:PLAYER});
-    /* 这一发 GET /api/state 是"首读"—— 会首发两路叙事生成（1–3 分钟）。
-       提前点亮加载态；紧跟着的 refresh() 只会叠 depth 不会再插一遍。 */
-    showStateLoadingDelayed();
+
+    /* ★ ⑥号改造：结算本身就**先点亮加载框**、标题换成"结算第 N 季…"。
+       玩家按下按钮立刻看到事情在发生（不等 2.5s）。 */
+    _slStart = Date.now();          // 与 showStateLoadingDelayed 同源，让秒表从这里起
+    showStateLoadingNow(`结算第 ${STATE.quarter} 季…`, "正在推进工程 / 生产 / 求价 / 扣款——引擎在真算，请稍候。");
+    pushSettlementLine(`结算第 ${STATE.quarter} 季…`, "dim");
+
+    const eq = await api("POST", "/api/end_quarter", {game:GAME, player:PLAYER});
+
+    /* end_quarter 一回包，立刻把 report 里的关键项**每 ~320ms 一条**逐条涌上。
+       "**全部数字来自引擎**（`QuarterReport.to_dict`），前端只负责挑与摆"。 */
+    const reportForStream = (eq && eq.report) || null;
+    const lines = settlementLinesFromReport(reportForStream);
+    /* 头一行已 push 过（上面那行），这里跳过 lines[0]（它就是"结算第 N 季…"）。 */
+    await streamSettlementLines(lines.slice(1), 320);
+
+    /* 流完 → 标题切回"撰写新闻/财报"，进入 /api/state 的**首读**等待（模型生成）。 */
+    setStateLoadingNarrative();
     let st;
     try{
       st = await api("GET", "/api/state", null, {game:GAME, player:PLAYER});
@@ -1211,21 +1462,28 @@ $("btn-report").onclick = () => {
 };
 
 /* ══════════════════════════════════════════════════════════
-   五、AI 建议（§11.4：AI 只起草，提交永远是玩家的动作）
+   五、AI 秘书 —— **一个聊天式对话框**（§11.4：AI 只起草，提交永远是玩家的动作）
 
-   两按钮共用一个内核：
-     · btn-ai-ask   → draft=false（不传），AI 只给建议，绝不动表单；
-     · btn-ai-draft → draft=true，AI 起草一份计划 —— 拿到后【填入】既有
-       plan 状态（左列的建造/本季安排/口粮立刻显形），玩家可以继续改；
-       提交仍只有玩家手动点「▶ 推进本季度」一条路。
+   ⑤号改造：去掉「问 AI / 让 AI 起草」两个按钮。一个输入框 + 一个发送。
+   前端**不猜**玩家到底想要建议还是草案 —— **一律带 `draft: true` 发**：
+     · 玩家说"帮我起草/安排一下" → 模型出 JSON 草案，前端直接落到界面（⑧）。
+     · 玩家只是闲聊/问问题     → 模型也会正常返回 summary，
+       `suggested_plan` 为 null（后端「draft=True 时模型没给出能解析的 JSON」
+       本身就是一条正常路径，照样答总结）。
+   后端契约（不变）：
+     adv.summary          —— 人话建议（draft 成功时是"起草好了"的一句说明）。
+     adv.suggested_plan   —— Plan 形状 dict 或 null。
+     adv.plan_issues      —— 起草过不了校验时的五要素问题清单（suggested_plan 为 null）。
+     adv.plan_source      —— "model" | "preview" | null。
 
-   填入的字段映射（与 /api/submit 的 plan 同形，suggested_plan 形状由后端保证）：
-     { player_id, plot_plans:{}, purchases:{}, food:{}, builds:[], contracts:[] }
-   前端**容错**：缺哪个键就空哪个键，绝不自己造默认值。
+   ⑧号改造：拿到 suggested_plan 就**直接落到界面**——
+   不显示 JSON 代码块，不留「填入左边表单」按钮。
+   落进去的只是一份**草稿**：地图上标出这些待建（青虚线 ·②）、
+   本季安排/口粮/顶栏实时扣款立刻跟着变，玩家可以接着改。
+   提交仍然只有玩家手动点「▶ 推进本季度」一条路。
    ══════════════════════════════════════════════════════════ */
-let AI_LAST_PLAN = null;   // 最近一次 AI 给出的 suggested_plan（仅为显示/溯源，不再是"采纳"按钮的载荷）
 
-/* 把 AI 起草的 suggested_plan 填入前端既有的待提交计划（plan）。
+/* 把 AI 起草的 suggested_plan 落进前端既有的待提交 plan（与 /api/submit 同形）。
    地图/建造面板/本季安排/口粮/预览 全靠既有 renderAll() 显示。 */
 function applySuggestedPlan(sp){
   resetPlan();
@@ -1237,172 +1495,159 @@ function applySuggestedPlan(sp){
   plan.contracts  = Array.isArray(sp && sp.contracts) ? sp.contracts : [];
 }
 
-async function askAI(draft){
+/* ── 对话气泡（历史只存内存；本页内保留）──────────────────── */
+const AI_LOG = [];   // [{role:"me"|"ai", text:str, cls:""|"warn"|"bad", sys:str}]
+
+function aiBubble(role, text, cls, sys){
+  AI_LOG.push({role, text, cls: cls || "", sys: sys || ""});
+  renderAiChat();
+}
+
+function renderAiChat(){
+  const el = $("ai-chat");
+  if (!el) return;
+  el.innerHTML = AI_LOG.map(m => {
+    const who = m.role === "me" ? "你" : "秘书";
+    return `<div class="bubble ${m.role === "me" ? "me" : "ai"} ${m.cls}">` +
+           `<span class="who">${who}</span>${esc(m.text)}` +
+           (m.sys ? `<div class="sys">${esc(m.sys)}</div>` : "") +
+           `</div>`;
+  }).join("");
+  el.scrollTop = el.scrollHeight;
+}
+
+/* 草稿落进界面后立刻显形的"秘书同页播报"（不进对话流）——
+   只告诉她动了哪几样，让她知道"草稿已经替你填好了"。 */
+function draftSummaryLines(sp){
+  const bits = [];
+  const nb = Array.isArray(sp.builds) ? sp.builds.length : 0;
+  const np = sp.plot_plans && typeof sp.plot_plans === "object" ? Object.keys(sp.plot_plans).length : 0;
+  const nf = sp.food       && typeof sp.food       === "object" ? Object.keys(sp.food).length       : 0;
+  const npy= sp.purchases  && typeof sp.purchases  === "object" ? Object.keys(sp.purchases).length  : 0;
+  if (nb) bits.push(`${nb} 条建造`);
+  if (np) bits.push(`${np} 块地的开工`);
+  if (nf) bits.push(`${nf} 项口粮`);
+  if (npy) bits.push(`${npy} 项采购`);
+  return bits.length ? bits.join("、") : "一份空计划";
+}
+
+/* 发送按钮 —— 统一带 draft:true。 */
+$("btn-ai-send").onclick = async () => {
   if (!GAME) return toast("先开局 / 读档，AI 要有局面才能出主意。", "warn");
-  const q = $("ai-question").value.trim();
-  const askBtn = $("btn-ai-ask"), draftBtn = $("btn-ai-draft"), status = $("ai-status");
-  const busyBtn = draft ? draftBtn : askBtn;
+  const input = $("ai-input");
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = "";
+  aiBubble("me", q);
 
-  // 双按钮一起锁，防连点把两路请求都点出去
-  askBtn.disabled = true; draftBtn.disabled = true;
-  status.textContent = draft
-    ? "正在让 AI 起草计划…（真调模型可能要几十秒，请稍候，页面没死）"
-    : "正在问 AI…（真调模型可能要几十秒，请稍候，页面没死）";
+  const sendBtn = $("btn-ai-send"), status = $("ai-status");
+  sendBtn.disabled = true;
+  status.textContent = "秘书在想…（真调模型可能要几十秒，请稍候，页面没死）";
   status.style.color = "var(--warn)";
-  $("ai-result").innerHTML = "";
 
-  const body = { game: GAME, player: PLAYER };
-  if (q) body.question = q;
-  if (draft) body.draft = true;      // ⚠️ 不传 = false，与后端"默认 false 行为不变"对齐
-
+  const body = { game: GAME, player: PLAYER, question: q, draft: true };
   let resp;
   try{
     resp = await api("POST", "/api/ai/advise", body);
   }catch(e){
-    /* 分支①：网络层失败（fetch 抛错 / 非 JSON / HTTP 层错误）——人话，不崩 */
     status.textContent = "";
     status.style.color = "";
-    $("ai-result").innerHTML =
-      `<p style="color:var(--bad);margin:0">⚠️ 这次没能联系上 AI 服务：` +
-      `${e.message || e}。</p>` +
-      `<p class="muted" style="margin:6px 0 0">可能是网关没在跑或网络抖动——可以再点一次。</p>`;
-    askBtn.disabled = false; draftBtn.disabled = false;
+    sendBtn.disabled = false;
+    aiBubble("ai",
+      `⚠️ 这次没能联系上 AI 服务：${e.message || e}。\n可能是网关没在跑或网络抖动——再发一次就行。`,
+      "bad");
     return;
   }
-  askBtn.disabled = false; draftBtn.disabled = false;
+  sendBtn.disabled = false;
   status.style.color = "";
 
   const adv = (resp && resp.advice) || (resp && resp.ok === false ? resp : null);
+
+  /* —— ok:true —— */
   if (adv && adv.ok === true && (adv.summary || "").trim()){
-    /* 分支②：ok:true 且 summary 非空 → 显示建议。
-       后端契约（任务 B 前置）：
-         adv.suggested_plan  → 计划 dict 或 null
-         adv.plan_source     → "model" | "preview" | null
-         adv.plan_issues     → 模型起草过不了校验时的 issues 清单（suggested_plan 此时为 null） */
-    const summary = String(adv.summary).replace(/</g,"&lt;");  // 不引 esc，防上方函数未到此作用域
-    AI_LAST_PLAN = (adv.suggested_plan && typeof adv.suggested_plan === "object")
+    const summary = String(adv.summary);
+    const sp = (adv.suggested_plan && typeof adv.suggested_plan === "object")
       ? adv.suggested_plan : null;
-    const planSource = adv.plan_source || null;                 // model / preview / null
     const planIssues = Array.isArray(adv.plan_issues) ? adv.plan_issues : null;
+    const model = adv.model || "";
+    const ruleKey = adv.rule_key ? "§" + adv.rule_key : "";
 
-    status.textContent =
-      `已拿到${draft ? "起草" : "建议"}（模型：${adv.model || "—"}` +
-      `${adv.rule_key ? "　规则节：§" + adv.rule_key : ""}）`;
-
-    let html = `<div style="white-space:pre-wrap;word-break:break-word">${summary}</div>`;
-
-    /* —— 子分支 ②a：plan_issues 非空 → 起草失败，只显示问题，绝不填入 —— */
+    /* ②a：起草过不了校验 → 只把问题说给玩家，**绝不落进表单**。 */
     if (planIssues && planIssues.length){
-      html +=
-        `<div class="msg" style="border-left-color:var(--bad);margin-top:10px">` +
-        `<b>AI 起草的计划过不了校验</b>（已忽略，没填入表单）：` +
-        `<ul style="margin:6px 0 0;padding-left:1.2em">` +
-        planIssues.map(i => {
-          const code = (i && i.code) || "";
-          const msg  = (i && i.message) || String(i);
-          return `<li>${code ? `<span class="tag">${String(code).replace(/</g,"&lt;")}</span> ` : ""}` +
-                 `${String(msg).replace(/</g,"&lt;")}</li>`;
-        }).join("") +
-        `</ul><div class="muted" style="margin-top:6px">可以换一句话再让 AI 起草一次。</div></div>`;
-      AI_LAST_PLAN = null;
-    }
-    /* —— 子分支 ②b：有 suggested_plan —— 草稿（不管 draft 真不真）—— */
-    else if (AI_LAST_PLAN){
-      const srcTxt = planSource === "preview" ? "（来自你传入的预览计划）"
-                   : planSource === "model"   ? "（AI 自己起草的）"
-                   : "";
-      /* 草案 JSON 展示 + 仅在 draft=true 模式下给「填入」按钮 */
-      html +=
-        `<div class="msg" style="border-left-color:var(--accent);margin-top:10px">` +
-        `<b>AI 起草了一份计划</b>${srcTxt}（<b>只是数据，未执行</b>）：` +
-        `<pre style="margin:6px 0;font-size:11px;white-space:pre-wrap;word-break:break-all">${
-          JSON.stringify(AI_LAST_PLAN, null, 1).replace(/</g,"&lt;")}</pre>` +
-        `<div class="muted">${(adv.next_step || "").replace(/</g,"&lt;")}</div></div>`;
-
-      if (draft){
-        /* ★ 起草模式：按钮语义 = 填入表单（可继续改），不是提交。 */
-        html += `<button id="btn-ai-apply" class="primary" style="margin-top:8px">` +
-                `⬇ 填入左边表单（我可以再改）</button>` +
-                `<p class="muted" style="margin:6px 0 0">` +
-                `填入后：建造/本季安排/口粮都会显出这份草案；` +
-                `<b>不会自动提交</b> —— 你必须改完再自己点「▶ 推进本季度」。</p>`;
-      } else {
-        /* 非起草却出现了 plan（preview 回显）：纯提示，不给填入按钮（与旧「采纳」按钮区别开） */
-        html += `<p class="muted" style="margin:8px 0 0">` +
-                `（这是回显 / 试算结果，不写入表单。要 AI 起草请点「✍️ 让 AI 起草一份」。）</p>`;
-      }
-    } else {
-      /* —— 子分支 ②c：只有建议，没计划 —— */
-      html += `<p class="muted" style="margin:8px 0 0">（这次 AI 没起草具体计划，只给了建议。）</p>`;
+      status.textContent = "";
+      const lines = planIssues.map(i => {
+        const code = (i && i.code) || "";
+        const msg  = (i && i.message) || String(i);
+        return `· ${code ? "[" + code + "] " : ""}${msg}`;
+      }).join("\n");
+      aiBubble("ai",
+        `${summary}\n\n${lines}\n\n可以换一句话再让我起草一次。`,
+        "bad",
+        model ? `模型：${model}${ruleKey ? " · " + ruleKey : ""}` : "");
+      return;
     }
 
-    if (adv.evidence && adv.evidence.length){
-      html += `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer">` +
-        `数字来源（evidence，${adv.evidence.length} 条）</summary>` +
-        `<table style="margin-top:4px"><thead><tr><th>来源</th><th>字段</th><th>值</th></tr></thead><tbody>` +
-        adv.evidence.map(ev =>
-          `<tr><td>${String(ev.source||"").replace(/</g,"&lt;")}</td>` +
-          `<td>${String(ev.field||"").replace(/</g,"&lt;")}</td>` +
-          `<td class="num">${typeof ev.value === "object"
-              ? JSON.stringify(ev.value).replace(/</g,"&lt;")
-              : (ev.value == null ? "—" : String(ev.value).replace(/</g,"&lt;"))}</td></tr>`
-        ).join("") + `</tbody></table></details>`;
-    }
-    $("ai-result").innerHTML = html;
+    /* ②b：拿到一份能用的草案 → **直接落到界面**，不显示 JSON。 */
+    if (sp){
+      /* 落进去之前先看玩家本地**已有**的草稿子：如果玩家自己已经在攒计划，
+         AI 这份会把他的草稿**整个替换**。给一句提醒，免得玩家以为计划凭空变了。 */
+      const hadLocal = !planEmpty();
+      applySuggestedPlan(sp);
+      selected = null;
+      renderAll();
+      /* ★ 只触发只读试算（/api/simulate），**没有提交**。
+         提交仍只有玩家手动点「▶ 推进本季度」一条路。 */
+      schedulePreview();
 
-    /* ★ 填入按钮的处理：写入 plan → 重画 → toast。绝不调 /api/submit。 */
-    const apply = $("btn-ai-apply");
-    if (apply) apply.onclick = async () => {
-      apply.disabled = true;
-      try{
-        applySuggestedPlan(AI_LAST_PLAN);
-        selected = null;
-        renderAll();
-        /* ★ 只触发只读试算（/api/simulate），不再走 /api/submit。
-           填入后也**没提交** —— 由玩家自己点「▶ 推进本季度」。 */
-        schedulePreview();
-        toast("AI 草案已填入左边表单（试算中）。\n" +
-              "⚠️ 还没提交 —— 你可以继续改，改完自己点「▶ 推进本季度」。", "ok");
-      }finally{
-        apply.disabled = false;
-      }
-    };
-  } else if (adv && adv.ok === false){
-    /* 分支③：AI 不可用（200 + ok:false）→ detail 人话 */
-    AI_LAST_PLAN = null;
-    status.textContent = "";
-    const tag = adv.error ? `<span class="tag">${String(adv.error).replace(/</g,"&lt;")}</span> ` : "";
-    $("ai-result").innerHTML =
-      `<p style="color:var(--warn);margin:0">${tag}${String(adv.detail || "AI 这次没给出可用回答。").replace(/</g,"&lt;")}</p>` +
-      `<p class="muted" style="margin:6px 0 0">可以再点一次。</p>`;
-  } else {
-    /* 分支④：拿到响应但形状出乎意料（不崩，明说） */
-    AI_LAST_PLAN = null;
-    status.textContent = "";
-    $("ai-result").innerHTML =
-      `<p style="color:var(--warn);margin:0">⚠️ AI 服务的应答形状出乎意料，没拿到可用的建议。` +
-      `可以再点一次。</p>`;
+      status.textContent = `已拿到草案（${draftSummaryLines(sp)}）` +
+        (model ? ` · 模型：${model}` : "");
+
+      aiBubble("ai",
+        summary,
+        "",
+        (model ? `模型：${model}${ruleKey ? " · " + ruleKey : ""}` : "") +
+        `\n——这是 AI 起草的，你可以改；提交仍由你点「▶ 推进本季度」。` +
+        (hadLocal ? `\n（提醒：这次把你之前在攒的本地草稿**整个替换**了。）` : ""));
+      return;
+    }
+
+    /* ②c：只给了人话建议，没起草计划（闲聊、答疑、模型没编出 JSON 都走这）。 */
+    status.textContent = model ? `已拿到建议 · 模型：${model}` : "已拿到建议";
+    aiBubble("ai", summary, "",
+      model ? `模型：${model}${ruleKey ? " · " + ruleKey : ""}` : "");
+    return;
   }
-}
 
-$("btn-ai-ask").onclick = () => askAI(false);
-$("btn-ai-draft").onclick = () => askAI(true);
+  /* —— ok:false：AI 不可用 / 空回答 / 网关抖 —— */
+  status.textContent = "";
+  if (adv && adv.ok === false){
+    const tag = adv.error ? `[${adv.error}] ` : "";
+    aiBubble("ai",
+      `${tag}${adv.detail || "AI 这次没给出可用回答。"}\n\n可以再发一次。`,
+      "warn");
+  } else {
+    aiBubble("ai",
+      "⚠️ AI 服务的应答形状出乎意料，没拿到可用的建议。可以再发一次。",
+      "warn");
+  }
+};
 
-/* ★ AI 面板折叠（地图正下方，默认收起成一行标题）。状态只存内存。 */
-function toggleAiPanel(open){
-  const body = $("ai-body");
-  const hint = $("ai-toggle-hint");
-  const arrow = $("ai-toggle-arrow");
-  if (!body || !hint || !arrow) return;
-  const willOpen = (open != null) ? open : body.classList.contains("hidden");
-  body.classList.toggle("hidden", !willOpen);
-  hint.textContent = willOpen ? "（点击收起）" : "（点击展开）";
-  arrow.textContent = willOpen ? "▾" : "▸";   // ▾ 展开 / ▸ 收起（第一格就是收起）
+/* 输入框里 Ctrl/Cmd+Enter 也发送（回车换行、快捷键提交，桌面惯例）。 */
+$("ai-input").addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter"){
+    e.preventDefault();
+    $("btn-ai-send").click();
+  }
+});
+
+/* 开局/读档后第一次在秘书框里给一句问候（没有历史时才给）。 */
+function aiGreet(){
+  if (AI_LOG.length) return;
+  aiBubble("ai",
+    "你好，我是你的 AI 秘书。问问题、要建议、让我起草本季计划都行。\n" +
+    "我起草的计划会**直接填到界面**上，你可以再改；" +
+    "**提交永远由你点「▶ 推进本季度」**（§11.4，我无 commit）。");
 }
-$("ai-toggle").onclick = () => toggleAiPanel();
-/* 玩家点到两个 AI 按钮时确保面板处于展开（看不见结果就没法用）。 */
-$("btn-ai-ask").addEventListener("click", () => toggleAiPanel(true), true);
-$("btn-ai-draft").addEventListener("click", () => toggleAiPanel(true), true);
 
 /* 启动 */
 refreshGames();
@@ -1410,6 +1655,7 @@ if (new URLSearchParams(location.search).get("game")){
   GAME = new URLSearchParams(location.search).get("game");
   $("in-game").value = GAME;
   $("main").classList.remove("hidden");
+  aiGreet();
   refresh();
 }
 </script>

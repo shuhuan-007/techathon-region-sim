@@ -260,8 +260,11 @@ def test_new_build_creates_the_plot():
 
     assert "0,0" in st.players["p1"].plots, "新建后应出现地块"
     p = st.players["p1"].plots["0,0"]
-    assert p.status is PlotStatus.CONSTRUCTING
-    assert p.construction_left == 1, "一级农业工期 1 季"
+    # 2026-10-17 用户拍板：本季投钱投料也算一季工期 → 1 季工程当季完工
+    assert p.status is PlotStatus.RUNNING, (
+        f"一级农业工期 1 季，投钱投料的当季度完工，实得 {p.status}"
+    )
+    assert p.construction_left == 0, "当季完工后剩余工期应为 0"
     assert p.target_level == 1
     assert p.product == "A", "★ 产出建造时选定"
 
@@ -282,36 +285,39 @@ def test_build_charges_cash_and_materials():
         f"总扣款应为 104（= 折后现金 40 + 物资 64），实得 {r.total_deduction}"
     )
     # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
-    assert abs(st.players["p1"].cash - 1096.0) < TOL, (
-        f"期末现金应为 1200 − 104 = 1096，实得 {st.players['p1'].cash}"
+    # 2026-10-17 起每季 +subsidy（默认 120）补贴进账面 → 期末 = 运营账 + 1×补贴
+    assert abs(st.players["p1"].cash - (1096.0 + r.subsidy)) < TOL, (
+        f"期末现金应为 1200 − 104 + 补贴 {r.subsidy} = {1096.0 + r.subsidy}，"
+        f"实得 {st.players['p1'].cash}"
     )
 
 
 def test_construction_completes_after_quarters():
-    """★ 工期一到就完工，等级落地、磨合从完工起算。"""
+    """★ 工期一到就完工，等级落地、磨合从完工起算。
+
+    2026-10-17 用户拍板：本季投钱投料也算一季工期
+    → 1 季工程**建成当季即完工**（无需再空跑一季）。
+    """
     st = fresh_state()
     run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.RESOURCE, 1)]))
     p = st.players["p1"].plots["0,0"]
-    assert p.construction_left == 1, "一级资源工期 1 季"
-
-    run(st, Plan("p1"))                      # 空计划 = 只推进工期
-    p = st.players["p1"].plots["0,0"]
-    assert p.status is PlotStatus.RUNNING, f"应已完工，实得 {p.status}"
+    assert p.status is PlotStatus.RUNNING, f"1 季工程当季完工，实得 {p.status}"
+    assert p.construction_left == 0, "当季完工后剩余工期应为 0"
     assert p.level == 1, "完工后等级落地"
     assert p.running_quarters == 0, "★ 磨合从【首次可用】起算（完工本季 = 0）"
 
 
 def test_multi_quarter_construction_waits():
-    """多季工期要等够季数才算完工（新建一级工业 = 2 季）。"""
+    """多季工期要等够季数才算完工（新建一级工业 = 2 季）。
+
+    2026-10-17 用户拍板：投钱投料的当季算第 1 季
+    → 2 季工程建成时 left=1，下季空跑后完工。
+    """
     st = fresh_state()
     run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.INDUSTRY, 1, "G")]))
     p = st.players["p1"].plots["0,0"]
-    assert p.construction_left == 2, "工业 G 工期 2 季"
-
-    run(st, Plan("p1"))
-    p = st.players["p1"].plots["0,0"]
-    assert p.status is PlotStatus.CONSTRUCTING, "才 1 季，不该完工"
-    assert p.construction_left == 1
+    assert p.status is PlotStatus.CONSTRUCTING, "2 季工程当季不完工"
+    assert p.construction_left == 1, "投钱投料的当季算第 1 季 → 剩余 1"
 
     run(st, Plan("p1"))
     p = st.players["p1"].plots["0,0"]
@@ -361,15 +367,22 @@ def test_materials_are_booked_into_construction_not_inventory():
 
 
 def test_build_while_constructing_is_rejected():
-    """★ 在建的地块**不能再下一条建设指令**（由 validate 挡住）。"""
+    """★ 在建的地块**不能再下一条建设指令**（由 validate 挡住）。
+
+    ⚠️ 2026-10-17 起"投钱投料当季算一季工期"→ 1 季工程建成即完工，
+       不再处于"在建"状态。故改用 **2 季工期**的新建一级工业（G）
+       来构造"在建中"的场景，保住这条意图。
+    """
     from engine import validate
 
     cfg = load_config()
     st = fresh_state()
-    run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.AGRICULTURE, 1, "A")]))
+    run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.INDUSTRY, 1, "G")]))
+    p = st.players["p1"].plots["0,0"]
+    assert p.status is PlotStatus.CONSTRUCTING, "2 季工业建成当季应在建"
 
     player = st.players["p1"]
-    plan2 = Plan("p1", builds=[BuildOrder("0,0", PlotType.AGRICULTURE, 2, "A")])
+    plan2 = Plan("p1", builds=[BuildOrder("0,0", PlotType.INDUSTRY, 2, "H-A")])
     issues = validate.validate_plan(plan2, player, cfg)
     assert {i.code for i in issues} == {"plot_already_constructing"}, (
         f"实得：{[(i.code, i.message[:40]) for i in issues]}"
@@ -481,8 +494,10 @@ def test_discount_fourth_new_agriculture_pays_full_price():
     assert abs(r.total_deduction - 456.0) < TOL, (
         f"总扣款应为 456（= 现金 200 + 物资 256），实得 {r.total_deduction}"
     )
-    assert abs(st.players["p1"].cash - (1200.0 - 456.0)) < TOL, (
-        f"期末现金应为 744，实得 {st.players['p1'].cash}"
+    # 2026-10-17 起每季 +subsidy（默认 120）补贴进账面
+    assert abs(st.players["p1"].cash - (1200.0 - 456.0 + r.subsidy)) < TOL, (
+        f"期末现金应为 744 + 补贴 {r.subsidy} = {1200.0 - 456.0 + r.subsidy}，"
+        f"实得 {st.players['p1'].cash}"
     )
     # 用满 3 个名额
     assert st.players["p1"].opening_quota_used.get("agriculture") == 3, (

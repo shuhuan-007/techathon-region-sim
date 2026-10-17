@@ -295,6 +295,17 @@
     "discount_rate": 0.5
   },
 
+  "economy": {
+    "_comment": [
+      "★ 2026-10-17 用户拍板：每季固定给每个玩家 +120 现金补贴（转移支付，不是产值）。",
+      "   · 落点在 engine/pipeline.py「第 8 步之后、写 cash_after 之前」，只给现金，",
+      "     不碰 value_added（增加值）与 sales_revenue（销售收入）。",
+      "   · 缺省 120.0：本键缺失时 engine/loader.py 会兜底（与 0/None 同义时视为未配置）。",
+      "   · 属于【转移支付】，不计入 GDP，不进市场求价，不改任何效率。"
+    ],
+    "quarterly_subsidy": 120.0
+  },
+
   "policies": {
     "_comment": [
       "★ 政策系统（《规则基线》§11.9.3）。一局 20 季，每季开始抽 1 项，四项各 25%，",

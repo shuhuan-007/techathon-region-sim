@@ -131,6 +131,10 @@ class QuarterReport:
     cash_before: float = 0.0
     cash_after: float = 0.0
     value_added: float = 0.0              # GDP（增加值）
+    # ★ 2026-10-17 用户拍板：每季固定补贴（默认 120.0，可在 config.economy.quarterly_subsidy 调）。
+    #   ⚠️ 这是**转移支付**，不是产值：只进玩家现金账面与 report.subsidy，
+    #      **不进 value_added / sales_revenue / 市场求价 / GDP**。
+    subsidy: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -161,6 +165,9 @@ class QuarterReport:
             "cash_before": self.cash_before,
             "cash_after": self.cash_after,
             "value_added": self.value_added,
+            # ★ 2026-10-17 用户拍板：只加字段，不改既有字段名/含义。
+            #   新闻/财报的提示词输入契约 `QuarterReport.to_dict()` 的既有键一个不动。
+            "subsidy": self.subsidy,
         }
 
 
@@ -593,9 +600,30 @@ def _run_body(
         tax = F.wage_tax(rep.wages, cfg)
         player.cash += tax
         rep.wage_tax_refund = tax
-        rep.cash_after = player.cash
         # GDP：有效产出价值（固定参考价）− 实际消耗的中间投入（§7.5）
         rep.value_added = F.value_added(rep, cfg)
+
+    # ══ 第 8.5 步：每季固定补贴 ★ 2026-10-17 用户拍板 ═══════════════════
+    #
+    #   每个玩家每季 +cfg.quarterly_subsidy（默认 120.0）现金。
+    #
+    # ⚠️ 落点：第 8 步税收与 GDP 算完之后、cash_after 落账之前 ——
+    #   即"扣款/结算之后、写报告之前"（用户口径），让 subsidy 体现在
+    #   state.report 的 cash_after 里，也能被新闻/财报读到。
+    #
+    # ⚠️ 补贴是**转移支付**，不是产值：
+    #     · 不改 value_added（GDP，在上一行已经算完，补贴不参与）
+    #     · 不改 sales_revenue（销售收入，第 7 步已写完）
+    #     · 不进市场求价、不改价格、不改效率、不改任何已算好的中间量
+    #   它的唯一作用是给现金账面注入一笔钱，并在 report.subsidy 字段如实记录。
+    for player_id, plan in plans.items():
+        player = state.players[player_id]
+        rep = reports[player_id]
+        subsidy = float(cfg.quarterly_subsidy)
+        player.cash += subsidy
+        rep.subsidy = subsidy
+        # ★ cash_after 是"季末玩家手上实际现金"，必须含补贴。
+        rep.cash_after = player.cash
 
     # ══ 第 9 步：结转 ══════════════════════════════════════
     for g, pr in prices.items():
@@ -1104,6 +1132,31 @@ def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Conf
 
         # ② 启动工期 + 定下产出/路线（建后不可更换，§5.1）
         C.start_work(plot, work, order.product)
+
+        # ══════════════════════════════════════════════════════════
+        # ★ 2026-10-17 用户拍板：本季投钱投料也算一季工期
+        # ══════════════════════════════════════════════════════════
+        #
+        # 以前：第 1 步 `_advance_construction` 本季已跑过（那时地块还不存在），
+        #   工期要等到下季才第一次递减 →「1 季工程」要等两季才完工、第 3 季才能生产。
+        #
+        # 现在：第 6 步一旦 start_work 立即扣 1 季工期，归零则当场切 RUNNING：
+        #
+        #     1 季工程  →  当季 CONSTRUCTING→RUNNING（本季完工见报，下季可开工生产）
+        #     2 季工程  →  当季 left=1（下季第 1 步递减→0、完工、当季即可生产）
+        #
+        # ⚠️ 本函数是第 6 步、生产在第 4 步：当季完工的地块本季不会有产出
+        #   （生产窗口已过），这是正确口径，与任务书红线一致。
+        #
+        # ⚠️ 它覆盖掉旁边那段 2026-10-17 的"已回滚"备注 ——
+        #   那段是基线口径下的保护，现在用户推翻基线把它改为新口径，
+        #   就**保留 start_work 之后立即扣 1 季**这条路径（本段注释写清缘由）。
+        if plot.construction_left > 0:
+            plot.construction_left -= 1
+        if plot.construction_left <= 0:
+            plot.status = PlotStatus.RUNNING
+            plot.level = plot.target_level
+            plot.running_quarters = 0     # 磨合从完工本季起算
 
 
 def _value_added(rep: QuarterReport, cfg: Config) -> float:

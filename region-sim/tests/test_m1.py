@@ -441,12 +441,44 @@ def test_m1_full_account():
         assert abs(r.sales_revenue - revenue) < 1e-9, (
             f"{name} 销售收入应为 {revenue}，实得 {r.sales_revenue}"
         )
-        assert abs(st.players["p1"].cash - cash) < 1e-9, (
-            f"{name} 期末现金应为 {cash}，实得 {st.players['p1'].cash}"
+        # M1 锚点是运营净值，**不含**每季补贴（2026-10-17 新增的转移支付）；
+        # 断言时把补贴扣掉再比，这样锚点数字一个都不用改，
+        # 同时证明补贴没混进运营账。
+        assert abs((st.players["p1"].cash - r.subsidy) - cash) < 1e-9, (
+            f"{name} 期末现金（运营口径，扣除补贴 {r.subsidy}）应为 {cash}，"
+            f"实得 {st.players['p1'].cash - r.subsidy}（账面 {st.players['p1'].cash}）"
         )
         assert abs(r.value_added - va) < TOL, (
             f"{name} 增加值应为 {va}，实得 {r.value_added}"
         )
+
+
+def test_m1_subsidy_is_transfer_not_output():
+    """★ 每季补贴（默认 120）是**转移支付**，不是产值。
+
+    断言三件事：
+      1. `r.subsidy` 等于 config 的每季补贴值（`cfg.quarterly_subsidy`，默认 120）；
+      2. 补贴**不**出现在 `sales_revenue`（销售收入只来自卖货）；
+      3. 补贴**不**出现在 `value_added`（GDP 不含转移支付）。
+    """
+    from engine import pipeline
+
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
+    r = st.raw_reports["p1"]
+
+    assert abs(r.subsidy - cfg.quarterly_subsidy) < 1e-9, (
+        f"报告里的补贴应等于 cfg.quarterly_subsidy（{cfg.quarterly_subsidy}），"
+        f"实得 {r.subsidy}"
+    )
+    # 甲区运营锚点：销售收入 94.08、增加值 66 —— 都不含补贴
+    assert abs(r.sales_revenue - 94.08) < 1e-9, (
+        f"★ 补贴不得混进销售收入：应为 94.08，实得 {r.sales_revenue}"
+    )
+    assert abs(r.value_added - 66.0) < TOL, (
+        f"★ 补贴不得混进增加值：应为 66，实得 {r.value_added}"
+    )
 
 
 def test_m1_production_is_the_supply():
@@ -490,7 +522,6 @@ def test_m1_production_inputs_are_consumed_not_stored():
 
 
 def _print_reconciliation() -> None:
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     cfg = load_config()
     P0 = {g: c.P0 for g, c in cfg.market.items()}
 
@@ -541,5 +572,34 @@ def _print_reconciliation() -> None:
         print(f"  {g}: P0={c.P0} Q0={c.Q0} Es={c.Es} Ed={c.Ed}")
 
 
+def _run_all() -> int:
+    """跑全部 `test_*` 断言（与其他测试文件的 runner 同款写法）。
+
+    ⚠️ 2026-10-17 修复：以前 `__main__` 只调 `_print_reconciliation()`，
+       15 条断言一条都没跑过 —— M1 锚点的守护是假的。现在先跑断言、
+       逐条 PASS/FAIL（失败带期望 vs 实际），再打对账表。
+    """
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    mod = sys.modules[__name__]
+    names = sorted(n for n in dir(mod) if n.startswith("test_"))
+    ok = fail = 0
+    print("=" * 68)
+    print("M1 断言（锚点守护）")
+    print("=" * 68)
+    for n in names:
+        try:
+            getattr(mod, n)()
+            print(f"  PASS  {n}")
+            ok += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  FAIL  {n}\n        {type(e).__name__}: {e}")
+            fail += 1
+    print(f"\n{ok} passed, {fail} failed, {len(names)} total")
+    return 1 if fail else 0
+
+
 if __name__ == "__main__":
+    rc = _run_all()
+    print()
     _print_reconciliation()
+    raise SystemExit(rc)

@@ -238,15 +238,38 @@ def test_default_timeout_is_300():
     )
 
 
-def test_default_max_tokens_is_at_least_6000():
-    """★ 默认 max_tokens 必须 ≥6000（kimi-k3 推理要 ~2000+，得留出正文余量）。"""
-    import inspect
-    sig = inspect.signature(llm_client.chat_completions)
-    default_max_tokens = sig.parameters["max_tokens"].default
-    assert default_max_tokens >= 6000, (
-        f"max_tokens 默认应 ≥6000（实测 completion_tokens=2544、其中推理 2325 + "
-        f"正文 219；2000 会被推理烧光让 content 为空），现在是 {default_max_tokens}"
-    )
+def test_default_max_tokens_is_2000_and_configurable():
+    """★ 2026-10-17：默认 max_tokens 必须 == 2000，且 `AI_MAX_TOKENS` 可覆盖。
+
+    历史：kimi-k3 是推理模型，2000 会被内部 reasoning 烧光、content 吐不出字，
+    所以当年把默认抬到 6000。qwen-flash **不是**推理模型，2000 已远远够——再
+    大就是白白按量计费。本测试锁的是新口径。
+    """
+    import os
+    saved = os.environ.get("AI_MAX_TOKENS")
+    os.environ.pop("AI_MAX_TOKENS", None)
+    try:
+        llm_client._reset_dotenv_cache()
+        assert llm_client.max_tokens_default() == 2000, (
+            f"qwen-flash 不是推理模型，默认应为 2000，现在是 {llm_client.max_tokens_default()}"
+        )
+        # chat_completions 的位置参数默认应是 None（让 max_tokens_default 生效）
+        import inspect
+        sig = inspect.signature(llm_client.chat_completions)
+        assert sig.parameters["max_tokens"].default is None, (
+            f"chat_completions 的 max_tokens 默认应为 None（让 AI_MAX_TOKENS 生效），"
+            f"现在是 {sig.parameters['max_tokens'].default}"
+        )
+        # 覆盖：环境变量 4000 → max_tokens_default 也跟着变
+        os.environ["AI_MAX_TOKENS"] = "4000"
+        llm_client._reset_dotenv_cache()
+        assert llm_client.max_tokens_default() == 4000
+    finally:
+        if saved is None:
+            os.environ.pop("AI_MAX_TOKENS", None)
+        else:
+            os.environ["AI_MAX_TOKENS"] = saved
+        llm_client._reset_dotenv_cache()
 
 
 def test_llm_result_has_diagnostic_fields():

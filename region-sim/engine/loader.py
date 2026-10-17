@@ -325,6 +325,10 @@ class Config:
     opening_quota: dict[str, Optional[int]] = field(default_factory=dict)
     opening_discount_rate: Optional[float] = None
 
+    # ★ 2026-10-17 用户拍板：每季固定补贴（转移支付，不是产值，不进 GDP、不进市场求价）。
+    #   默认 120.0；config.economy.quarterly_subsidy 可覆盖。口径说明见 pipeline.py 第 8.X 步注释。
+    quarterly_subsidy: float = 120.0
+
     # ★ 政策（§11.9.3）：开局模式 + 乘数数值覆盖。见 policies.py。
     policy_mode: Optional[str] = None
     policy_multipliers: dict = field(default_factory=dict)
@@ -623,6 +627,23 @@ def load_config(path: str | Path | None = None) -> Config:
     opening = raw.get("opening", {})
     cfg.opening_quota = dict(opening.get("discount_quota", {}))
     cfg.opening_discount_rate = opening.get("discount_rate")
+
+    # ── 经济（§2026-10-17 补贴）──────────────────────────
+    # ★ 只加读取，不改既有字段语义（红线：loader 只增不改）。
+    #   缺省时用 Config 字段默认 120.0；显式 null / 0 也走默认（视为"未配置"）。
+    #   ⚠️ 它是转移支付：不是产值，不进 value_added，不进 sales_revenue，
+    #      不改市场求价。它只影响玩家现金账面（注入源头）与 report.subsidy。
+    eco = raw.get("economy", {}) or {}
+    sub = eco.get("quarterly_subsidy")
+    if sub is not None:
+        # ⚠️ 包含 0.0：显式写 0 = 关掉补贴，不回退默认。
+        try:
+            cfg.quarterly_subsidy = float(sub)
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"economy.quarterly_subsidy 必须是数值，实得 {sub!r}。"
+            ) from None
+    # `sub is None` → 保持 Config 字段的默认 120.0（2026-10-17 用户拍板）。
 
     # ── 政策（§11.9.3）──────────────────────────────────
     # ⚠️ 四项政策本身、25% 概率、作用范围都是**规则**，不在 config 里增删；
