@@ -122,11 +122,8 @@ function showStateLoadingNow(title, sub){
   }
 }
 
-/* 回"撰写新闻/财报"那一档标题。state 首读等待时用。 */
-function setStateLoadingNarrative(){
-  $("sl-title").textContent = "正在撰写本季新闻与财报解读……";
-  $("sl-sub").textContent   = "首次约需 1–3 分钟，请稍候。页面没有卡死，是模型正在生成。";
-}
+/* 2026-10-18：叙事已从 /api/state 拆到 /api/narratives（后台生成）。
+   这里不再有“撰写新闻/财报”那档首读等待；数字先出，叙事后到。 */
 
 /* 推一条进结算流水（只在加载框已显形时能看到；没显形就静默）。
    kind ∈ "" | "good" | "warn" | "dim"。 */
@@ -170,6 +167,19 @@ function settlementLinesFromReport(r){
     lines.push({text:"· 本季无生产（没开工/没地块）", kind:"dim"});
   }
 
+  /* 工程：本季工程现金费 + 实际投入物资（r.construction 是 {商品:数量}）。
+     ★ 2026-10-18 补：玩家要求结算时能看到“工程情况”。 */
+  const cons = (r.construction && typeof r.construction === "object") ? r.construction : {};
+  const consKeys = Object.keys(cons);
+  if ((r.construction_cash || 0) > 0 || consKeys.length){
+    const mats = consKeys.sort()
+      .map(g => `${g}×${fmt(cons[g],1)}`).join("、") || "无";
+    lines.push({
+      text:`✓ 工程：现金 ${fmt(r.construction_cash || 0)} ／ 物资 ${mats}`,
+      kind:"",
+    });
+  }
+
   /* 卖出：X_t 每商品一行 */
   const sold = r.sold && typeof r.sold === "object" ? r.sold : {};
   const soldKeys = Object.keys(sold);
@@ -178,7 +188,7 @@ function settlementLinesFromReport(r){
       const qty = Number(sold[g]);
       if (!(qty > 0)) return;
       const price = r.prices && r.prices[g] && r.prices[g].price;
-      const priceTxt = (price != null) ? ` @ ${fmt(price)}` : "";
+      const priceTxt = (price != null) ? ` @ ${fmt(price)}（本季终价）` : "";
       lines.push({text:`✓ 成交：卖出 ${g} ×${fmt(qty,1)}${priceTxt}`, kind:"good"});
     });
   } else {

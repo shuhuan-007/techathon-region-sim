@@ -86,6 +86,7 @@ from engine.models import (  # noqa: E402
     PlotPlan,
     PlotType,
 )
+from engine.pipeline import SettlementError  # noqa: E402
 from engine.validate import PlanRejected  # noqa: E402
 from server.registry import GameRegistry  # noqa: E402
 from server.session import Conflict  # noqa: E402
@@ -244,9 +245,39 @@ class App:
         }
 
     def state(self, params: dict) -> dict:
+        """`/state` —— 数字快照。**默认不生成新闻/财报叙事**。
+
+        ★ 2026-10-18：叙事生成从「/state 首读同步阻塞」里拆出去。
+          真调模型时两路叙事要 1–3 分钟；把它们挂在 /state 上，会让
+          「点结算 → 拉状态」卡两分钟，玩家以为结算很慢（其实引擎一瞬间）。
+          现在 /state 默认只回**已有**缓存（通常为 null），前端先渲染数字，
+          再单独打 `GET /api/narratives` 在后台生成。
+          `?narratives=1` 仍保留旧的同步生成行为（给需要一步到位的调用方）。
+        """
         session = self.registry.get(_need(params, "game"))
         player_id = params.get("player", "p1")
-        return {"ok": True, "state": session.state_for(player_id)}
+        want_narratives = str(params.get("narratives", "0")).lower() in (
+            "1", "true", "yes", "on"
+        )
+        return {
+            "ok": True,
+            "state": session.state_for(
+                player_id, with_narratives=want_narratives
+            ),
+        }
+
+    def narratives(self, params: dict) -> dict:
+        """`GET /api/narratives` —— **单独**生成本季新闻 + 财报解读。
+
+        这是把「结算/状态刷新」与「模型叙事」解耦的入口：
+          · 前端**不 await 它来渲染数字**；数字先出来，这个在后台跑；
+          · 返回 `{ok:true, narratives:{news,report}|null}`；
+          · 失败（网关/超时/模型回垃圾）原样放进每个 kind 的 `ok:false`，
+            不编造、不影响结算。
+        """
+        session = self.registry.get(_need(params, "game"))
+        player_id = params.get("player", "p1")
+        return {"ok": True, "narratives": session.narratives_for(player_id)}
 
     def map(self, params: dict) -> dict:
         session = self.registry.get(_need(params, "game"))
@@ -293,7 +324,20 @@ class App:
         if issues:
             from engine.validate import PlanRejected
             raise PlanRejected(issues)
-        rep = session.simulate(plan)
+        try:
+            rep = session.simulate(plan)
+        except SettlementError as e:
+            # ★ 2026-10-18：资金不足等**业务结果**不是 500。
+            #   `/api/simulate` 的职责是“试算这版会怎样”；算出来“钱不够”
+            #   本身就是试算结果的一部分。返回 200 + report=null + blocker，
+            #   前端据此显示“预览不可用：资金不足（需 X / 有 Y）”，
+            #   而不是把它当成“服务端崩了 / 预览暂不可用”。
+            return {
+                "ok": True,
+                "report": None,
+                "blocker": str(e),
+                "kind": "settlement_failed",
+            }
         return {"ok": True, "report": rep.to_dict()}
 
     def validate(self, body: dict) -> dict:
@@ -427,6 +471,7 @@ class App:
 _ERROR_MAP: list[tuple[type, int, str]] = [
     (BadRequest, 400, "bad_request"),
     (PlanRejected, 400, "plan_rejected"),
+    (SettlementError, 400, "settlement_failed"),
     (Conflict, 409, "conflict"),
     (GameNotFound, 404, "not_found"),
     (KeyError, 404, "not_found"),
@@ -466,6 +511,7 @@ ROUTES: dict[str, tuple[str, bool, str]] = {
     "/api/games":         ("GET",  False, "games"),
     "/api/new_game":      ("POST", True,  "new_game"),
     "/api/state":         ("GET",  False, "state"),
+    "/api/narratives":    ("GET",  False, "narratives"),
     "/api/map":           ("GET",  False, "map"),
     "/api/report":        ("GET",  False, "report"),
     "/api/build_options": ("GET",  False, "build_options"),

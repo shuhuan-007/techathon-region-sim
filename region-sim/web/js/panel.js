@@ -45,10 +45,12 @@ async function refreshGames(){
    ══════════════════════════════════════════════════════════ */
 async function refresh(){
   if (!GAME) return;
-  showStateLoadingDelayed();          // /api/state 首读会生成两路叙事（1–3 分钟）
+  showStateLoadingDelayed();          // 只等数字；叙事已拆到 /api/narratives
   try{
     const [st, mp] = await Promise.all([
-      api("GET", "/api/state",  null, {game:GAME, player:PLAYER}),
+      /* ★ narratives:"0"：/api/state 不再同步生成新闻/财报（那要 1–3 分钟）。
+         数字先回来；叙事由 loadNarratives() 在后台单独打 /api/narratives。 */
+      api("GET", "/api/state",  null, {game:GAME, player:PLAYER, narratives:"0"}),
       api("GET", "/api/map",    null, {game:GAME, player:PLAYER}),
     ]);
     STATE = st.state; MAP = mp.map;
@@ -57,12 +59,13 @@ async function refresh(){
       WORKS = w.works;
     }
     renderAll();
+    loadNarratives();                 // 不 await：数字先显示，叙事慢慢来
   }catch(e){
     fail(e);
     /* 加载失败：人话已 toast；如果加载态曾显形又被撤下，
        玩家看到的不是死转圈而是"重试"按钮（下方补一次提示）。 */
     if (_slDepth <= 1 && _slTick){
-      toast("状态拉取失败：如果是首次触发新闻/财报生成，可能是模型暂未就绪；再点一次「读档」或刷新页面让它重试。", "warn");
+      toast("状态拉取失败：再点一次「读档」或刷新页面让它重试。", "warn");
     }
   }finally{
     hideStateLoading();
@@ -297,6 +300,42 @@ function renderReport(){
 }
 
 /* ── 新闻 + 财报渲染(esc/mdInline/miniMD/factsTable 在 api.js)── */
+let NARR_INFLIGHT = false;
+
+/* ★ 2026-10-18：叙事生成从 /api/state 拆出来，单独在后台跑。
+   · 前端**不 await** 它来渲染数字：结算/刷新先出数字；
+   · 同一时刻只打一发（NARR_INFLIGHT），避免多入口重复烧模型；
+   · 失败只影响新闻/财报两个面板，不影响任何数字。 */
+async function loadNarratives(){
+  if (NARR_INFLIGHT) return;
+  const news = STATE && STATE.news;
+  if (!news || news.facts == null) return;          // 还没结算过 → 不生成
+  if (news.narrative && news.report_narrative) return; // 已有缓存
+  NARR_INFLIGHT = true;
+  news.generating = true;
+  renderNarr();
+  try{
+    const r = await api("GET", "/api/narratives", null,
+                        {game:GAME, player:PLAYER});
+    if (r && r.narratives){
+      news.narrative = r.narratives.news || null;
+      news.report_narrative = r.narratives.report || null;
+    }
+  }catch(e){
+    const fail = {
+      ok: false,
+      error: "narratives_failed",
+      detail: (e && e.message) || "新闻/财报生成失败（不影响本季数字）。",
+    };
+    if (!news.narrative) news.narrative = fail;
+    if (!news.report_narrative) news.report_narrative = fail;
+  }finally{
+    NARR_INFLIGHT = false;
+    news.generating = false;
+    renderNarr();
+  }
+}
+
 function renderNarr(){
   const news = (STATE && STATE.news) || null;
 
@@ -308,8 +347,14 @@ function renderNarr(){
   }
 
   const factsNull = news.facts == null;    // 诚实空态的第二层（一般同上到不了这）
-  oneNarr("news-body", news.narrative, "本季新闻（headline＋正文）还没生成。", factsNull);
-  oneNarr("report-narr-body", news.report_narrative, "本季财报解读还没生成。", factsNull);
+  const pendingNews = news.generating
+    ? "正在生成本季新闻…（约 1–2 分钟；不影响结算，数字已经出来了）"
+    : "本季新闻（headline＋正文）还没生成。";
+  const pendingReport = news.generating
+    ? "正在生成本季财报解读…（约 1–2 分钟；不影响结算，数字已经出来了）"
+    : "本季财报解读还没生成。";
+  oneNarr("news-body", news.narrative, pendingNews, factsNull);
+  oneNarr("report-narr-body", news.report_narrative, pendingReport, factsNull);
 }
 
 /* 单个面板： narr 是 dict 或 null/undefined。 factsNull → "第 1 季"口径。 */
@@ -486,7 +531,8 @@ const SIM = {
   pending: false,       // 飞行期间又收到了变更 → 落地后补一发
   seq: 0,               // 请求序号（陈旧结果丢弃）
   last: null,           // 最近一次试算成功拿到的 report（显示用缓存）
-  fail: false,          // 上一次是否失败（顶栏标"预览暂不可用"）
+  fail: false,          // 上一次是否失败（顶栏标"预览不可用"）
+  reason: "",           // ★ 失败原因（资金不足等业务结果，不再只显示一句“暂不可用”）
 };
 const SIM_DEBOUNCE_MS = 250;
 
@@ -509,6 +555,7 @@ function schedulePreview(){
     SIM.seq++;                     // 让在飞的旧请求结果作废
     SIM.last = null;
     SIM.fail = false;
+    SIM.reason = "";
     renderPreviewLine();
     return;
   }
@@ -528,10 +575,15 @@ async function runPreview(){
     if (mySeq !== SIM.seq) return;                   // 期间又有新变更 → 丢弃
     SIM.last = (r && r.report) ? r.report : null;
     SIM.fail = !SIM.last;
-  }catch(_e){
+    /* ★ 2026-10-18：资金不足等业务结果由服务端 200 回在 blocker 里，
+       不是“服务端崩了”。把原因留下来给顶栏显示。 */
+    SIM.reason = SIM.fail ? ((r && r.blocker) || "试算没跑通") : "";
+  }catch(e){
     if (mySeq !== SIM.seq) return;
     SIM.last = null;
     SIM.fail = true;                                 // 静默失败，只改标识
+    SIM.reason = (e && e.payload && (e.payload.detail || e.payload.error))
+              || (e && e.message) || "试算没跑通";
   }finally{
     SIM.inflight = false;
   }
@@ -550,7 +602,11 @@ function renderPreviewLine(){
   if (!el) return;
   if (planEmpty()){ el.textContent = ""; el.style.color = ""; return; }
   if (SIM.fail){
-    el.textContent = "｜预览暂不可用";
+    /* ★ 2026-10-18：不再只显示“预览暂不可用”。资金不足是业务结果，
+       第一行就写清“需扣多少 / 手上多少”，完整原因放 title。 */
+    const first = String(SIM.reason || "试算没跑通").split("\n")[0].trim();
+    el.textContent = "｜预览：" + (first || "暂不可用");
+    el.title = SIM.reason || "";
     el.style.color = "var(--warn)";
     return;
   }
@@ -560,6 +616,7 @@ function renderPreviewLine(){
     return;
   }
   el.style.color = "";
+  el.title = "";
   el.textContent =
     `｜本季计划扣 ${fmt(SIM.last.total_deduction)}｜结算后约 ${fmt(SIM.last.cash_after)}`;
 }
@@ -599,17 +656,25 @@ $("btn-settle").onclick = async () => {
     /* 头一行已 push 过（上面那行），这里跳过 lines[0]（它就是"结算第 N 季…"）。 */
     await streamSettlementLines(lines.slice(1), 320);
 
-    /* 流完 → 标题切回"撰写新闻/财报"，进入 /api/state 的**首读**等待（模型生成）。 */
-    setStateLoadingNarrative();
-    let st;
+    /* 流完 → **立刻刷新数字**（/api/state 默认不再生成叙事），
+       新闻/财报交给 loadNarratives() 在后台单独打 /api/narratives。
+       ⚠️ 这里绝不能再等叙事：两路模型 1–3 分钟，会把“结算”拖成两分钟。 */
+    setStateLoadingNow("正在刷新界面…", "结算已完成；新闻/财报在后台生成，不会拖住数字。");
+    let st, mp;
     try{
-      st = await api("GET", "/api/state", null, {game:GAME, player:PLAYER});
+      [st, mp] = await Promise.all([
+        api("GET", "/api/state", null,
+            {game:GAME, player:PLAYER, narratives:"0"}),
+        api("GET", "/api/map", null, {game:GAME, player:PLAYER}),
+      ]);
     }finally{
       hideStateLoading();
     }
-    STATE = st.state;
+    STATE = st.state; MAP = mp.map;
     resetPlan();
-    await refresh(); await refreshGames();
+    renderAll();
+    loadNarratives();                 // 不 await：数字已显示，叙事后台来
+    await refreshGames();
     toast(`第 ${STATE.quarter - 1} 季已结算。` +
           `期末现金 ${fmt(STATE.cash)}　幸福度 ${fmt(STATE.happiness)}` +
           (STATE.report ? `　增加值 ${fmt(STATE.report.value_added)}` : ""), "ok");
@@ -683,6 +748,27 @@ function draftSummaryLines(sp){
   return bits.length ? bits.join("、") : "一份空计划";
 }
 
+/* plan_notes（引擎对模型草案的校正说明）→ 最多 5 行、每行前缀「· 」的文本；
+   多于 5 条时收一句「…另有 N 条」。不是数组 / 全空时返回 ""（调用处据此决定加不加这一段）。 */
+function planNoteLines(notes){
+  if (!Array.isArray(notes)) return "";
+  const items = [];
+  notes.forEach(n => {
+    let s;
+    if (typeof n === "string") s = n;
+    else if (typeof n === "number" || typeof n === "boolean") s = String(n);
+    else if (n == null) s = "";
+    else { try{ s = JSON.stringify(n); }catch(_e){ s = ""; } }   // 意外对象也不吐 [object Object]
+    s = String(s || "").trim();
+    if (s) items.push(s);
+  });
+  if (!items.length) return "";
+  const MAX = 5;
+  const out = items.slice(0, MAX).map(s => "· " + s);
+  if (items.length > MAX) out.push(`…另有 ${items.length - MAX} 条`);
+  return out.join("\n");
+}
+
 /* 发送按钮 —— 统一带 draft:true。 */
 $("btn-ai-send").onclick = async () => {
   if (!GAME) return toast("先开局 / 读档，AI 要有局面才能出主意。", "warn");
@@ -732,15 +818,25 @@ $("btn-ai-send").onclick = async () => {
         const msg  = (i && i.message) || String(i);
         return `· ${code ? "[" + code + "] " : ""}${msg}`;
       }).join("\n");
-      aiBubble("ai",
-        `${summary}\n\n${lines}\n\n可以换一句话再让我起草一次。`,
-        "bad",
+      /* summary 可能与 issues 之间已有空行 —— 先去尾再统一补一个空行，避免忽多忽少。 */
+      let text = summary.replace(/\s+$/, "") + "\n\n" + lines;
+      /* 若引擎尝试校正过（plan_notes），说明「救过但仍没过」——只显示，**绝不落进表单**。 */
+      const tried = planNoteLines(adv.plan_notes);
+      if (tried) text += "\n\n引擎尝试校正过，但这份草案仍未通过：\n" + tried;
+      text += "\n\n可以换一句话再让我起草一次。";
+      aiBubble("ai", text, "bad",
         model ? `模型：${model}${ruleKey ? " · " + ruleKey : ""}` : "");
       return;
     }
 
     /* ②b：拿到一份能用的草案 → **直接落到界面**，不显示 JSON。 */
     if (sp){
+      /* 引擎侧的两块补充（新契约，可能缺省）：校正说明条数 / 试算摘要。 */
+      const nNotes = Array.isArray(adv.plan_notes) ? adv.plan_notes.length : 0;
+      const noteLines = planNoteLines(adv.plan_notes);
+      const pv = (adv.plan_preview && typeof adv.plan_preview === "object")
+        ? adv.plan_preview : null;
+
       /* 落进去之前先看玩家本地**已有**的草稿子：如果玩家自己已经在攒计划，
          AI 这份会把他的草稿**整个替换**。给一句提醒，免得玩家以为计划凭空变了。 */
       const hadLocal = !planEmpty();
@@ -752,10 +848,18 @@ $("btn-ai-send").onclick = async () => {
       schedulePreview();
 
       status.textContent = `已拿到草案（${draftSummaryLines(sp)}）` +
-        (model ? ` · 模型：${model}` : "");
+        (model ? ` · 模型：${model}` : "") +
+        (nNotes > 0 ? ` · 引擎校正 ${nNotes} 处` : "");
+
+      /* 气泡正文：summary → 引擎校正逐条 → 试算；哪块没有就整段不出现（不写 undefined）。 */
+      let text = summary;
+      if (noteLines) text += "\n\n引擎校正：\n" + noteLines;
+      if (pv && pv.total_deduction != null && pv.cash_after != null){
+        text += `\n\n试算：本季扣款 ${fmt(pv.total_deduction)}，结算后约 ${fmt(pv.cash_after)}`;
+      }
 
       aiBubble("ai",
-        summary,
+        text,
         "",
         (model ? `模型：${model}${ruleKey ? " · " + ruleKey : ""}` : "") +
         `\n——这是 AI 起草的，你可以改；提交仍由你点「▶ 推进本季度」。` +
