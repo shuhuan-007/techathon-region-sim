@@ -143,7 +143,10 @@
 
   <header>
     <div class="stat"><span class="k">季度</span><span class="v" id="s-quarter">—</span></div>
-    <div class="stat"><span class="k">现金</span><span class="v" id="s-cash">—</span></div>
+    <div class="stat"><span class="k">现金</span>
+      <span class="v" id="s-cash">—</span>
+      <span class="k" id="s-cash-plan" title="数字来自 /api/simulate（只读试算，不会提交计划）"></span>
+    </div>
     <div class="stat"><span class="k">幸福度</span><span class="v" id="s-happy">—</span></div>
     <div class="stat"><span class="k">岗位 / 人口</span><span class="v" id="s-pop">—</span></div>
     <div class="stat"><span class="k">平均效率</span><span class="v" id="s-eff">—</span></div>
@@ -183,6 +186,35 @@
           <p class="muted" style="margin:8px 0 0">
             八邻格影响效率；关联表见《规则基线》§3.2。服务对<b>任意</b>邻居加成（按自身等级）。
           </p>
+        </div>
+
+        <!-- ★ AI 建议 —— 只起草；确认后由玩家走 /api/submit（§11.4，AI 无 commit）。
+             位置：地图正下方。默认收起成一行标题，点标题展开（见 JS toggleAiPanel）。 -->
+        <div class="panel" id="ai-panel" style="border-style:dashed;">
+          <button id="ai-toggle" type="button"
+                  style="width:100%;text-align:left;font-weight:600;border:none;background:transparent;padding:0">
+            🤖 AI 建议 <span class="muted" id="ai-toggle-hint">（点击展开）</span>
+            <span style="float:right" id="ai-toggle-arrow">▾</span>
+          </button>
+          <div id="ai-body" class="hidden">
+          <div class="row" style="margin:8px 0">
+            <input id="ai-question"
+                   placeholder="（可空）例：这季先建什么？口粮要不要多买？"
+                   style="flex:1">
+            <button id="btn-ai-ask">问 AI</button>
+            <button id="btn-ai-draft" class="primary"
+                    title="让 AI 自己起草一份计划，填入左侧「本季安排 / 建造 / 口粮」表单，你可以再改">
+              ✍️ 让 AI 起草一份
+            </button>
+          </div>
+          <div id="ai-status" class="muted" style="margin:0 0 8px"></div>
+          <div id="ai-result"></div>
+          <p class="muted" style="margin:8px 0 0">
+            「问 AI」＝只给建议，不动表单。<br>
+            「✍️ 让 AI 起草一份」＝AI 写一份计划<b>填入左边表单</b>，<b>绝不自动提交</b>——
+            你改完再自己点「下达建设指令 / ▶ 推进本季度」（§11.4，AI 无 commit）。
+          </p>
+          </div>
         </div>
 
         <div class="panel" id="build-panel">
@@ -259,28 +291,6 @@
         <div class="panel" id="report-narr-panel">
           <h2>📊 财报解读</h2>
           <div id="report-narr-body" class="muted">本季财报解读还没生成。</div>
-        </div>
-
-        <!-- ★ AI 建议 —— 只起草；确认后由玩家走 /api/submit（§11.4，AI 无 commit）。 -->
-        <div class="panel" id="ai-panel" style="border-style:dashed;">
-          <h2>🤖 AI 建议</h2>
-          <div class="row" style="margin-bottom:8px">
-            <input id="ai-question"
-                   placeholder="（可空）例：这季先建什么？口粮要不要多买？"
-                   style="flex:1">
-            <button id="btn-ai-ask">问 AI</button>
-            <button id="btn-ai-draft" class="primary"
-                    title="让 AI 自己起草一份计划，填入左侧「本季安排 / 建造 / 口粮」表单，你可以再改">
-              ✍️ 让 AI 起草一份
-            </button>
-          </div>
-          <div id="ai-status" class="muted" style="margin:0 0 8px"></div>
-          <div id="ai-result"></div>
-          <p class="muted" style="margin:8px 0 0">
-            「问 AI」＝只给建议，不动表单。<br>
-            「✍️ 让 AI 起草一份」＝AI 写一份计划<b>填入左边表单</b>，<b>绝不自动提交</b>——
-            你改完再自己点「下达建设指令 / ▶ 推进本季度」（§11.4，AI 无 commit）。
-          </p>
         </div>
 
         <div class="panel">
@@ -518,6 +528,9 @@ function renderTop(){
   $("btn-settle").classList.toggle("hidden", report);
   $("btn-next").classList.toggle("hidden", !report);
   $("btn-settle").title = (s.settle_blockers || []).join("\n");
+
+  /* 现金行的"本季计划扣"那一句由 renderPreviewLine 专管（不在这里动）。 */
+  renderPreviewLine();
 }
 
 /* ── 地图 ─────────────────────────────────────────────── */
@@ -620,8 +633,13 @@ $("btn-runall").onclick = () => {
   (STATE.plots || []).filter(p => p.status === "running")
     .forEach(p => plan.plot_plans[p.plot_id] = {plot_id:p.plot_id, active:true, u:1});
   renderPlots();
+  schedulePreview();
 };
-$("btn-stopall").onclick = () => { plan.plot_plans = {}; renderPlots(); };
+$("btn-stopall").onclick = () => {
+  plan.plot_plans = {};
+  renderPlots();
+  schedulePreview();
+};
 
 /* ── 市场 ─────────────────────────────────────────────── */
 function renderMarket(){
@@ -1006,38 +1024,121 @@ $("btn-build").onclick = async () => {
     target_level: w.to_level,
     product,
   });
-  /* ★ 点完即提交（试算走真引擎）：让 /state 立刻带上
-     opening_quota（能用名额减少）与 build_quote（这条是不是打折）。
-     不报"提交失败"——试算里允许资金不够，折后现金仍会显示；
-     真正要拦是「推进本季度」那一刻的结算。 */
-  try{
-    await api("POST", "/api/submit", {game:GAME, player:PLAYER, plan: publicPlan()});
-    await refresh();
-    toast(`已加入建设指令：${selected} ${w.label}${product ? "（" + product + "）" : ""}\n` +
-          `（报价与名额已刷新，点「▶ 推进本季度」生效。）`, "ok");
-  }catch(e){
-    toast(`建设指令已记下，但预览失败：${e.message}`, "warn");
-  }
+  /* ★ 只改本地草稿，不提交 —— 「plans 只增不改」的提交动作只在
+     「▶ 推进本季度」发生一次。连续点第二块、第三块不会再被
+     「本季已提交，不能修改」挡住。
+     扣款数走 /api/simulate（只读试算）实时上顶栏。 */
+  toast(`已加入建设指令：${selected} ${w.label}${product ? "（" + product + "）" : ""}\n` +
+        `（本地草稿，点「▶ 推进本季度」才提交。可继续点其它格子。）`, "ok");
   $("btn-build").disabled = true;
   selected = null;
   renderMap(); renderBuildPanel();
+  schedulePreview();
 };
 $("btn-cancel").onclick = () => { selected = null; renderMap(); renderBuildPanel(); };
 
 /* ══════════════════════════════════════════════════════════
    四、提交 / 结算 / 下一季
    ══════════════════════════════════════════════════════════ */
-async function refreshPreview(){
-  // 把当前草稿计划提交给引擎试算 —— **预览也走真引擎**，前端不自己算
-  try{
-    await api("POST", "/api/submit", {game:GAME, player:PLAYER, plan: publicPlan()});
-    await refresh();
-  }catch(e){
-    // 计划还不合法（如没选产出）很正常，这里不弹大错，只更新按钮提示
-    $("btn-settle").disabled = true;
-    $("btn-settle").title = e.message;
-  }
+
+/* ── ★ 实时预览（只读）：/api/simulate 防抖 + 串行化 ─────────
+   原则（任务红线）：
+     · 前端**零计算**：total_deduction / cash_after 全部来自 /api/simulate，
+       这里**只显示**；不许在前端加减。
+     · 计划只要变了就试算一次；连续变化时**防抖 ~250ms**，只保留**最后一次**。
+     · 不并发轰炸：同一时间最多一个 simulate 在飞；飞行期间的变更排队，
+       落地后只补一发最新的（陈旧结果直接丢弃）。
+     · 失败（草稿不合法、网关抖动）**不弹窗**：顶栏改标"预览暂不可用"，
+       玩家继续攒计划不受影响。
+     · /api/simulate 是**只读**：深拷贝试算，不落存档、不改状态、不提交计划。
+       「本季已提交，不能修改」只会由 /api/submit 触发，本路径与它无关。 */
+const SIM = {
+  timer: null,          // 防设定时器
+  inflight: false,      // 当前是否有请求在飞
+  pending: false,       // 飞行期间又收到了变更 → 落地后补一发
+  seq: 0,               // 请求序号（陈旧结果丢弃）
+  last: null,           // 最近一次试算成功拿到的 report（显示用缓存）
+  fail: false,          // 上一次是否失败（顶栏标"预览暂不可用"）
+};
+const SIM_DEBOUNCE_MS = 250;
+
+function planEmpty(){
+  return !Object.keys(plan.plot_plans).length
+      && !Object.keys(plan.purchases).length
+      && !Object.keys(plan.food).length
+      && !plan.builds.length
+      && !plan.contracts.length;
 }
+
+/* 计划变更的**唯一入口**：所有改造计划的代码（建造/口粮/开工/AI 填入/全部满开工…）
+   都调它。它只管安排试算，不重画页面（重画由调用方自己做）。 */
+function schedulePreview(){
+  if (!GAME || !STATE) return;
+  /* 空格计划 → 销毁待试算任务 + 清预览（顶栏回到只显示现金） */
+  if (planEmpty()){
+    if (SIM.timer){ clearTimeout(SIM.timer); SIM.timer = null; }
+    SIM.pending = false;
+    SIM.seq++;                     // 让在飞的旧请求结果作废
+    SIM.last = null;
+    SIM.fail = false;
+    renderPreviewLine();
+    return;
+  }
+  if (SIM.inflight){ SIM.pending = true; return; }   // 在飞 → 排队即可
+  if (SIM.timer) clearTimeout(SIM.timer);
+  SIM.timer = setTimeout(() => { SIM.timer = null; runPreview(); }, SIM_DEBOUNCE_MS);
+}
+
+async function runPreview(){
+  if (!GAME || !STATE) return;
+  if (SIM.inflight){ SIM.pending = true; return; }
+  const mySeq = ++SIM.seq;
+  SIM.inflight = true;
+  try{
+    const r = await api("POST", "/api/simulate",
+                        {game:GAME, player:PLAYER, plan: publicPlan()});
+    if (mySeq !== SIM.seq) return;                   // 期间又有新变更 → 丢弃
+    SIM.last = (r && r.report) ? r.report : null;
+    SIM.fail = !SIM.last;
+  }catch(_e){
+    if (mySeq !== SIM.seq) return;
+    SIM.last = null;
+    SIM.fail = true;                                 // 静默失败，只改标识
+  }finally{
+    SIM.inflight = false;
+  }
+  renderPreviewLine();
+  /* 飞行期间排队过一次 → 只补一发最新（不发两轮） */
+  if (SIM.pending){ SIM.pending = false; schedulePreview(); }
+}
+
+/* 顶栏现金行的"本季计划扣"那么一句。三种状态：
+     ① 无草稿 → 空（只显示现金）；
+     ② 试算中 / 排队中 → "试算中…"；
+     ③ 有结果 → "｜本季计划扣 X｜结算后约 Y"（X/Y 全来自 /api/simulate，原样显示）；
+     ④ 失败 → "｜预览暂不可用"。 */
+function renderPreviewLine(){
+  const el = $("s-cash-plan");
+  if (!el) return;
+  if (planEmpty()){ el.textContent = ""; el.style.color = ""; return; }
+  if (SIM.fail){
+    el.textContent = "｜预览暂不可用";
+    el.style.color = "var(--warn)";
+    return;
+  }
+  if (!SIM.last){
+    el.textContent = "｜试算中…";
+    el.style.color = "";
+    return;
+  }
+  el.style.color = "";
+  el.textContent =
+    `｜本季计划扣 ${fmt(SIM.last.total_deduction)}｜结算后约 ${fmt(SIM.last.cash_after)}`;
+}
+
+/* 旧的"点建造即提交试算"接口保留这个名字，让所有改计划的调用点不动。
+   行为已换：只排期试算，绝不走 /api/submit。 */
+function refreshPreview(){ schedulePreview(); }
 
 function publicPlan(){
   return {
@@ -1237,17 +1338,11 @@ async function askAI(draft){
         applySuggestedPlan(AI_LAST_PLAN);
         selected = null;
         renderAll();
-        /* 跟手一发试算（沿用现有"点建造即试算"的习惯）：折后现金 / 名额立刻刷新。
-           失败只 warn —— 草案可能本来就过不了（比如现金不够），玩家可以在表单里修。 */
-        try{
-          await api("POST", "/api/submit", {game:GAME, player:PLAYER, plan: publicPlan()});
-          await refresh();
-          toast("AI 草案已填入左边表单（试算已刷新）。\n" +
-                "⚠️ 还没提交 —— 你可以继续改，改完自己点「▶ 推进本季度」。", "ok");
-        }catch(e2){
-          toast("AI 草案已填入左边表单，但试算未过：" + (e2.message || e2) + "\n" +
-                "⚠️ 还没提交。先在表单里修，再点「▶ 推进本季度」。", "warn");
-        }
+        /* ★ 只触发只读试算（/api/simulate），不再走 /api/submit。
+           填入后也**没提交** —— 由玩家自己点「▶ 推进本季度」。 */
+        schedulePreview();
+        toast("AI 草案已填入左边表单（试算中）。\n" +
+              "⚠️ 还没提交 —— 你可以继续改，改完自己点「▶ 推进本季度」。", "ok");
       }finally{
         apply.disabled = false;
       }
@@ -1272,6 +1367,22 @@ async function askAI(draft){
 
 $("btn-ai-ask").onclick = () => askAI(false);
 $("btn-ai-draft").onclick = () => askAI(true);
+
+/* ★ AI 面板折叠（地图正下方，默认收起成一行标题）。状态只存内存。 */
+function toggleAiPanel(open){
+  const body = $("ai-body");
+  const hint = $("ai-toggle-hint");
+  const arrow = $("ai-toggle-arrow");
+  if (!body || !hint || !arrow) return;
+  const willOpen = (open != null) ? open : body.classList.contains("hidden");
+  body.classList.toggle("hidden", !willOpen);
+  hint.textContent = willOpen ? "（点击收起）" : "（点击展开）";
+  arrow.textContent = willOpen ? "▾" : "▸";   // ▾ 展开 / ▸ 收起（第一格就是收起）
+}
+$("ai-toggle").onclick = () => toggleAiPanel();
+/* 玩家点到两个 AI 按钮时确保面板处于展开（看不见结果就没法用）。 */
+$("btn-ai-ask").addEventListener("click", () => toggleAiPanel(true), true);
+$("btn-ai-draft").addEventListener("click", () => toggleAiPanel(true), true);
 
 /* 启动 */
 refreshGames();
