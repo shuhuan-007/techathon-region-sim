@@ -201,6 +201,22 @@ def tool_draft_plan(state, pid, intent: str) -> Plan  # 起草
 # ★ 没有 tool_commit —— AI 无权提交
 ```
 
+> ✅ **2026-10-17 对齐现状（已落地，不改上图结构）**：
+> - `ai/tools.py` 三工具已实装（`tool_preview`/`tool_validate`/`tool_draft_plan`），
+>   与上图一致；外加了**调用时自检** `assert_import_boundary()`（查 `sys.modules`
+>   实际加载，黑名单＝`server.session`/`server.registry`/`storage`/`advance`），
+>   把「AI 无 commit」从注释变成了代码。
+> - **叙事这一路与上图不同**：不是 LLM 心算新闻，而是 `ai/narrate.py`
+>   （`narrate_news`/`narrate_report`，提示词在 `ai/prompts/news.md` 与 `report.md`）
+>   把 `engine/news.py` 的事实包递给模型、校验返回。**默认离线闸**：
+>   不设环境变量 `NARRATE_OFFLINE=0` 就**不真调模型**（防离线测试误连网关）。
+> - **生成时机**：结算后、下季行动前、**按季缓存**（同季一次）；
+>   `end_quarter`/`next_quarter` 响应**不生成**（`with_narratives=False`），
+>   由 `GET /api/state`（`session.state_for`）触发。
+> - HTTP 侧：`server/llm_client.py`（网关薄客户端，任何失败回 `ok=False` 不抛）
+>   ＋ `server/ai_host.py::advise` ＋路由 `POST /api/ai/advise`
+>   （请求体 `{game, player, question?}`，可带 `preview_plan` 先试算）。
+
 **服务层接口命名（✅ 2026-10-16 采纳队友建议）**：
 
 ```

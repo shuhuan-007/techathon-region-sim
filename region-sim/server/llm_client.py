@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -42,10 +43,12 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8787/v1/chat/completions"
 #: 默认模型名。**环境变量可覆盖**（AI_MODEL）。
 DEFAULT_MODEL = "kimi-k3"
 
-#: 默认超时（秒）。学校网关单次思考常要几十秒，给足一点。
-#: ⚠️ 宁可超时久一点，也别 30 秒就掐死一个其实快想完的回答。
+#: 默认超时（秒）。
+#: ⚠️ 2026-10-17 实测：report 那一路单次要 100+ 秒，120 被掐掉过一次（news 路
+#:    实测掐过一次 timeout）；学校网关单次思考常常几十秒到两分钟。
+#    调到 300：宁可等久一点，也别在「它正在算」时把任务砍了。
 #:    环境变量 AI_TIMEOUT 可覆盖。
-DEFAULT_TIMEOUT = 120.0
+DEFAULT_TIMEOUT = 300.0
 
 
 def _env(name: str, default: str) -> str:
@@ -85,15 +88,29 @@ class LLMResult:
     ok: bool
     content: str = ""
     model: str = ""
-    error: str = ""          # 机器可读分类：proxy_down / timeout / http_error / bad_response
+    error: str = ""          # 机器可读分类：proxy_down / timeout / http_error / bad_response / empty_content
     detail: str = ""         # 给人看的原因
     raw: dict = field(default_factory=dict)   # 成功时的原始 JSON（调试用）
+
+    # ── 2026-10-17 追加的诊断字段（只加，不改既有含义）──────────────────
+    #   起因：report 路真跑两次，第二次 200 ok 但 content 是空串。没有
+    #   finish_reason / usage / 耗时，根本分不出是「网关超时截断」还是
+    #   「模型把答案放进了 reasoning」。
+    finish_reason: str = ""     # choices[0].finish_reason（stop / length / ...）
+    usage: dict = field(default_factory=dict)   # usage 原样（prompt/completion/total tokens）
+    elapsed_ms: int = 0         # 从 urlopen 发起到读完 body 的壁钟毫秒
+    raw_text_len: int = 0       # HTTP body 字节数（判断"根本没回 vs 回了但解析丢"）
+    retried: bool = False       # 本结果是否经历过一次「空正文重试」（防递归轰炸）
 
 
 # ══════════════════════════════════════════════════════════════════
 # 客户端本体
 # ══════════════════════════════════════════════════════════════════
 
+#: 2026-10-17 实测：kimi-k3 是推理模型，`max_tokens=2000` 会被它**全部**
+#: 烧在内部 reasoning（实测 usage.completion_tokens_details.reasoning_tokens=2000、
+#: text_tokens=0、finish_reason="length"），content 一个字都吐不出来。
+#: 默认给 6000：让推理完后还有余量真正写正文。
 #: 本地代理默认不校验 key ——
 
 #: 但 OpenAI 兼容端点一般要一个**非空** Authorization 头，给个占位即可。
@@ -107,12 +124,17 @@ def chat_completions(
     url: str | None = None,
     timeout: float | None = None,
     temperature: float = 0.3,
-    max_tokens: int = 2000,
+    max_tokens: int = 6000,
+    _retried: bool = False,
 ) -> LLMResult:
     """调一次 /v1/chat/completions。**任何失败都返回 `ok=False`，不抛。**
 
     `messages` 是 OpenAI 形状：`[{"role": "system"/"user", "content": str}, ...]`。
     返回 `LLMResult` —— 调用方**只查 `.ok`**，别想当然去取 `.content`。
+
+    ⚠️ 2026-10-17 新增：拿到 200 但 content 是**空串**时，发起**至多一次**
+    同参数重试（`_retried` 递归闸，绝不无限）。`LLMResult.retried` 如实上报
+    「这次结果是重试后才拿到的」——上层不必关心，但日志看得出来。
     """
     used_model = model or model_name()
     used_url = url or base_url()
@@ -136,6 +158,7 @@ def chat_completions(
         },
     )
 
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=used_timeout) as resp:
             status = resp.status
@@ -145,9 +168,11 @@ def chat_completions(
         return LLMResult(
             ok=False, model=used_model, error="http_error",
             detail=f"网关回了 HTTP {e.code}（{e.reason}）。路径是不是写错了？",
+            elapsed_ms=int((time.monotonic() - started) * 1000),
         )
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as e:
         # ── 连接层失败。分两类，给玩家不同的提示 ─────────────
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         reason = getattr(e, "reason", e)
         # 超时（read/connect 都归这里）
         if isinstance(e, (socket.timeout, TimeoutError)) or "timed out" in str(reason):
@@ -155,23 +180,29 @@ def chat_completions(
                 ok=False, model=used_model, error="timeout",
                 detail=f"超过 {used_timeout:.0f} 秒没等到回答（学校网关思考常要几十秒）。"
                        f"可以稍后再试，或把超时调大（AI_TIMEOUT）。",
+                elapsed_ms=elapsed_ms,
             )
         # 其余（连接被拒 / 主机不可达 / DNS …）→ "代理没起"
         return LLMResult(
             ok=False, model=used_model, error="proxy_down",
             detail=f"连不上本地网关（{used_url}）：{reason}。"
                    f"是不是代理没起？先把它拉起来再让 AI 出主意。",
+            elapsed_ms=elapsed_ms,
         )
     except OSError as e:  # 兜底：任何残余的底层错误，别让它穿出去
         return LLMResult(
             ok=False, model=used_model, error="proxy_down",
             detail=f"网络层错误：{e}",
+            elapsed_ms=int((time.monotonic() - started) * 1000),
         )
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
 
     if status != 200:
         return LLMResult(
             ok=False, model=used_model, error="http_error",
             detail=f"网关回了 HTTP {status}。",
+            elapsed_ms=elapsed_ms, raw_text_len=len(raw_bytes),
         )
 
     # ── 解析：网关可能回一个字都看不懂的东西 ─────────────────────
@@ -181,9 +212,25 @@ def chat_completions(
         return LLMResult(
             ok=False, model=used_model, error="bad_response",
             detail=f"网关回的不是合法 JSON（{e}）。这是网关的锅，不是模型的锅。",
+            elapsed_ms=elapsed_ms, raw_text_len=len(raw_bytes),
         )
 
     # OpenAI 兼容形状：choices[0].message.content
+    # ── 2026-10-17：顺带采集 finish_reason / usage / 响应体字节数（诊断用）─
+    finish_reason = ""
+    usage: dict = {}
+    if isinstance(data, dict):
+        u = data.get("usage")
+        if isinstance(u, dict):
+            usage = u
+        ch = data.get("choices")
+        if isinstance(ch, list) and ch:
+            c0 = ch[0]
+            if isinstance(c0, dict):
+                fr = c0.get("finish_reason")
+                if isinstance(fr, str):
+                    finish_reason = fr
+
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
@@ -191,8 +238,31 @@ def chat_completions(
             ok=False, model=used_model, error="bad_response",
             detail=f"网关回的 JSON 没有 choices[0].message.content（{e}）。"
                    f"形状：{list(data)[:5] if isinstance(data, dict) else type(data)}",
+            elapsed_ms=elapsed_ms, raw_text_len=len(raw_bytes),
+            finish_reason=finish_reason, usage=usage,
         )
+
+    # ── ★ 空正文（200 ok 但 content 是空/纯空白）──────────────────────
+    #   2026-10-17 实测：report 路第二次真跑就栽在这里（HTTP 200、JSON 完整、
+    #   就是 message.content=""。可能是网关把 thinking 截掉了，也可能是模型
+    #   回了空）。这一情形下**允许且最多重试一次**——重试结果里 retried=True
+    #   如实上报。其它错误一律不重试（网关对其它错有自己的语义，乱重试是轰炸）。
+    if isinstance(content, str) and not content.strip() and not _retried:
+        retry = chat_completions(
+            messages,
+            model=used_model, url=used_url, timeout=used_timeout,
+            temperature=temperature, max_tokens=max_tokens,
+            _retried=True,
+        )
+        retry.retried = True
+        # 把第一次的诊断字段也透出来（调用方看得到「第一次也是空的」）
+        if retry.ok and not retry.finish_reason:
+            retry.finish_reason = finish_reason
+        return retry
 
     return LLMResult(
         ok=True, model=data.get("model", used_model), content=str(content), raw=data,
+        elapsed_ms=elapsed_ms, raw_text_len=len(raw_bytes),
+        finish_reason=finish_reason, usage=usage,
+        retried=_retried,
     )

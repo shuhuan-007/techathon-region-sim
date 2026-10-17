@@ -176,9 +176,14 @@ def _default_client() -> Any:
 
 
 def _failure(kind: str, quarter: Any, error: str, detail: str,
-             model: str = "") -> dict:
-    """统一失败形状。**不含任何编造文本**。"""
-    return {
+             model: str = "", diag: Optional[dict] = None) -> dict:
+    """统一失败形状。**不含任何编造文本**。
+
+    `diag`（可选，2026-10-17 加）：llm_client 透上来的诊断字段
+    （finish_reason / usage / elapsed_ms / raw_text_len / retried）。
+    失败原因本来就难定位，把它们一并写进返回里，方便事后追。
+    """
+    out = {
         "kind": kind,
         "quarter": quarter,
         "ok": False,
@@ -186,6 +191,22 @@ def _failure(kind: str, quarter: Any, error: str, detail: str,
         "detail": detail,
         "model": model,
     }
+    if diag:
+        out.update(diag)
+    return out
+
+
+def _diag_of(result: Any) -> dict:
+    """从 llm_client.LLMResult（或同款 dict）里抽诊断字段。**只加不改。**"""
+    keys = ("finish_reason", "usage", "elapsed_ms", "raw_text_len", "retried")
+    out: dict = {}
+    for k in keys:
+        v = (result.get(k) if isinstance(result, dict)
+             else getattr(result, k, None))
+        # 只写有内容的；不覆盖既有语义（retried=False 就不写）
+        if v not in (None, "", False, {}, 0):
+            out[k] = v
+    return out
 
 
 def _generate(
@@ -232,12 +253,13 @@ def _generate(
     ok = result.get("ok") if isinstance(result, dict) else getattr(result, "ok", False)
     model = (result.get("model") if isinstance(result, dict)
              else getattr(result, "model", "")) or ""
+    diag = _diag_of(result)      # 2026-10-17：诊断字段透传（只加不改）
     if not ok:
         err = (result.get("error") if isinstance(result, dict)
                else getattr(result, "error", "")) or "model_unavailable"
         detail = (result.get("detail") if isinstance(result, dict)
                   else getattr(result, "detail", "")) or "模型没给出可用回答。"
-        return _failure(kind, quarter, str(err), str(detail), model=model)
+        return _failure(kind, quarter, str(err), str(detail), model=model, diag=diag)
 
     content = (result.get("content") if isinstance(result, dict)
                else getattr(result, "content", "")) or ""
@@ -253,7 +275,7 @@ def _generate(
         #        把好东西扔了 —— 那是**我们的对接错误**，不是模型不听话。
         #      所以 report 这一路：拿不到 JSON 就**把 Markdown 原文当正文收下**。
         if kind == "report" and str(content).strip():
-            return {
+            out = {
                 "kind": "report",
                 "quarter": quarter,
                 "ok": True,
@@ -263,9 +285,11 @@ def _generate(
                 "warning": "模型按提示词返回了 Markdown（非 JSON），已按正文接收；"
                            "本份没有 facts_used 溯源。",
             }
+            out.update(diag)
+            return out
         return _failure(kind, quarter, "bad_response",
                         f"{problem}。原文前 200 字：{str(content).strip()[:200]}",
-                        model=model)
+                        model=model, diag=diag)
 
     facts_used = obj.get("facts_used")
     if not isinstance(facts_used, dict):
@@ -280,6 +304,7 @@ def _generate(
         "model": model,
         "facts_used": facts_used,
     }
+    base.update(diag)     # 2026-10-17：诊断字段（重试标记、finish_reason…）
     if problem:
         base["warning"] = problem
 

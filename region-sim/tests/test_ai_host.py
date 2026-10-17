@@ -306,6 +306,59 @@ def test_route_advise_dispatch_shape():
     assert "代理没起" in body["advice"]["detail"]
 
 
+def test_route_passes_preview_plan_through():
+    """★ 路由必须把 `preview_plan` **原样透传**给 ai_host（2026-10-17 修的缺口）。
+
+    ⚠️ 这个缺口曾经的后果：秘书拿到的是「没有试算数字」的局面，于是它只能空口
+       回答。真跑实录里 AI 自己说「本次没有跑任何试算，所以我手里没有任何成本、
+       价格、配方、收益数字」—— 玩家问「我这样安排会怎样」，它答不了。
+
+    这里只钉「透传」这一件事（离线、假 ai_host）：
+      · 传了 → ai_host 收到的 preview_plan 与路由收到的**同一个对象内容**；
+      · 没传 → ai_host 收到的仍是 None（向后兼容）。
+    """
+    app = _fresh_app()
+    app.registry.create("g1", "p1")
+
+    import server.app as app_mod
+    orig = app_mod.ai_host.advise
+    captured: dict = {}
+
+    def spy(session, player_id="p1", question=None, **kw):
+        captured.clear()
+        captured.update({"player_id": player_id, "question": question, **kw})
+        return {"ok": True, "summary": "假建议", "suggested_plan": None,
+                "evidence": [], "model": "fake", "error": ""}
+
+    plan = {"player_id": "p1", "builds": [
+        {"plot_id": "0,0", "plot_type": "agriculture",
+         "target_level": 1, "product": "A"}]}
+
+    app_mod.ai_host.advise = spy
+    try:
+        # ① 带 preview_plan
+        code, body = dispatch(app, "POST", "/api/ai/advise", {},
+                              {"game": "g1", "player": "p1",
+                               "question": "这样安排行吗？",
+                               "preview_plan": plan})
+        assert code == 200 and body["ok"] is True, f"路由应成功：{code} {body}"
+        assert captured.get("preview_plan") == plan, (
+            f"preview_plan 没透传到位：收到 {captured.get('preview_plan')!r}"
+        )
+        assert captured.get("question") == "这样安排行吗？"
+
+        # ② 不带 preview_plan → None（旧行为不变）
+        captured.clear()
+        dispatch(app, "POST", "/api/ai/advise", {},
+                 {"game": "g1", "player": "p1"})
+        assert captured.get("preview_plan") is None, (
+            "不传 preview_plan 时 ai_host 应收到 None，"
+            f"实得 {captured.get('preview_plan')!r}"
+        )
+    finally:
+        app_mod.ai_host.advise = orig
+
+
 def test_route_advise_accepts_missing_question():
     """`question` 可省（让模型直给一版建议）—— 不应 400。"""
     app = _fresh_app()

@@ -1,6 +1,7 @@
 """ai/narrate.py 的测试：解析皮实性、绝不编造、形状正确。**全程离线**（假客户端）。"""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -222,6 +223,198 @@ def test_prompt_is_sent_as_system_message():
     assert "你不是结算引擎" in msgs[0]["content"], "系统消息应为提示词全文"
     assert msgs[1]["role"] == "user"
     assert '"quarter": 3' in msgs[1]["content"], "用户消息应为输入的 JSON"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 六、2026-10-17 加固回归：空正文策略 / 超时默认 300 / 诊断字段 / 重试闸
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_default_timeout_is_300():
+    """★ 默认超时必须是 300 秒（实测：report 单次 100+ 秒，news 曾被 120 掐掉）。"""
+    assert llm_client.DEFAULT_TIMEOUT == 300.0, (
+        f"默认超时应为 300（实测 report 单次 54~69 秒，news 曾被 120 掐掉），"
+        f"现在是 {llm_client.DEFAULT_TIMEOUT}"
+    )
+
+
+def test_default_max_tokens_is_at_least_6000():
+    """★ 默认 max_tokens 必须 ≥6000（kimi-k3 推理要 ~2000+，得留出正文余量）。"""
+    import inspect
+    sig = inspect.signature(llm_client.chat_completions)
+    default_max_tokens = sig.parameters["max_tokens"].default
+    assert default_max_tokens >= 6000, (
+        f"max_tokens 默认应 ≥6000（实测 completion_tokens=2544、其中推理 2325 + "
+        f"正文 219；2000 会被推理烧光让 content 为空），现在是 {default_max_tokens}"
+    )
+
+
+def test_llm_result_has_diagnostic_fields():
+    """LLMResult 必须带 2026-10-17 新加的诊断字段（只加不改）。"""
+    r = llm_client.LLMResult(ok=True, content="x")
+    assert hasattr(r, "finish_reason") and r.finish_reason == ""
+    assert hasattr(r, "usage") and r.usage == {}
+    assert hasattr(r, "elapsed_ms") and r.elapsed_ms == 0
+    assert hasattr(r, "raw_text_len") and r.raw_text_len == 0
+    assert hasattr(r, "retried") and r.retried is False
+
+
+def test_empty_content_is_failure_with_diag():
+    """★ 空正文（200 ok 但 content 空）→ 上层看到的应是 bad_response + 诊断字段。"""
+    class EmptyContentClient:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_completions(self, messages, **_kw):
+            self.calls += 1
+            # 模拟 llm_client 已经做过一次重试（retried=True）还是空的情形
+            return llm_client.LLMResult(
+                ok=True, content="", model="fake",
+                finish_reason="length",
+                usage={"completion_tokens": 2000,
+                       "completion_tokens_details": {"reasoning_tokens": 2000,
+                                                     "text_tokens": 0}},
+                elapsed_ms=54000, raw_text_len=8442, retried=True,
+            )
+
+    out = N.narrate_report({"quarter": 3}, client=EmptyContentClient())
+    assert out["ok"] is False, "空正文必须报失败"
+    assert out["error"] == "bad_response"
+    assert "空正文" in out["detail"]
+    # 诊断字段必须透传上来（演示/排查时第一眼就能看到）
+    assert out.get("finish_reason") == "length"
+    assert out.get("retried") is True
+    assert out.get("elapsed_ms", 0) > 0
+
+
+def test_empty_content_client_retry_mechanism():
+    """★ llm_client 自己：拿到 200 ok 但 content 空 → 会**至多一次**重试，
+    结果带 retried=True。**绝不无限重试**。"""
+    # 不真发网，构造假的 urlopen 来模拟两次调用
+    import io as _io
+    import urllib.request as _ureq
+
+    payload_empty = json.dumps({
+        "model": "fake", "choices": [{"message": {"content": ""},
+                                       "finish_reason": "length"}],
+        "usage": {"completion_tokens": 2000},
+    }).encode("utf-8")
+    payload_good = json.dumps({
+        "model": "fake", "choices": [{"message": {"content": "正文"},
+                                       "finish_reason": "stop"}],
+        "usage": {"completion_tokens": 10},
+    }).encode("utf-8")
+
+    class FakeResp:
+        def __init__(self, status, body):
+            self.status = status
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    orig_urlopen = _ureq.urlopen
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        # 第一次返回空，第二次返回有正文
+        body = payload_empty if calls["n"] == 1 else payload_good
+        return FakeResp(200, body)
+
+    _ureq.urlopen = fake_urlopen
+    try:
+        out = llm_client.chat_completions(
+            [{"role": "user", "content": "hello"}],
+            url="http://127.0.0.1:1/x",  # URL 无所谓，urlopen 已被替换
+        )
+        assert out.ok is True
+        assert out.content == "正文"
+        assert out.retried is True, "重试过一次必须如实上报"
+        assert calls["n"] == 2, f"应恰好调用 2 次（1 原始 + 1 重试），实际 {calls['n']}"
+    finally:
+        _ureq.urlopen = orig_urlopen
+
+
+def test_empty_content_retry_eventually_fails_cleanly():
+    """★ 两次都拿到空正文 → 失败，但**只重试一次**（不无限重试）。"""
+    import urllib.request as _ureq
+    payload_empty = json.dumps({
+        "model": "fake", "choices": [{"message": {"content": ""},
+                                       "finish_reason": "length"}],
+        "usage": {},
+    }).encode("utf-8")
+
+    class FakeResp:
+        status = 200
+
+        def read(self):
+            return payload_empty
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    orig_urlopen = _ureq.urlopen
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        return FakeResp()
+
+    _ureq.urlopen = fake_urlopen
+    try:
+        out = llm_client.chat_completions(
+            [{"role": "user", "content": "hello"}],
+            url="http://127.0.0.1:1/x",
+        )
+        # 第二次（重试那次）拿到的仍是空 → 返回 ok=True、content=""、retried=True
+        # （content 为空的判失败发生在 narrate 层，llm_client 如实把它传上去）
+        assert out.ok is True
+        assert out.content == ""
+        assert out.retried is True
+        assert calls["n"] == 2, f"★ 必须只重试一次（总调用 2），实际 {calls['n']}"
+    finally:
+        _ureq.urlopen = orig_urlopen
+
+
+def test_news_strictness_unchanged_by_hardening():
+    """★★ news 那一路的严格性**绝不能**因加固而松动：
+    拿不到 JSON 仍然报 bad_response，**绝不**退化成收 Markdown。"""
+    md = "# 一个看起很像正文的 Markdown\n\n本季价格触底。"
+    out = N.narrate_news({"quarter": 3}, client=FakeClient(md))
+    assert out["ok"] is False, "news 路拿到非 JSON 必须仍然失败"
+    assert out["error"] == "bad_response"
+    assert "headline" not in out and "body" not in out, (
+        "★★ news 路**绝不许**把 Markdown 当正文收"
+    )
+
+
+def test_diag_fields_propagate_on_failure():
+    """★ 失败路径也要带诊断字段（排查空正文、超时、超 max_tokens 时能一眼看出）。"""
+    class TimeoutishClient:
+        def __init__(self):
+            pass
+
+        def chat_completions(self, messages, **_kw):
+            return llm_client.LLMResult(
+                ok=False, error="timeout",
+                detail="超过 300 秒没等到回答",
+                model="fake",
+                elapsed_ms=300000, raw_text_len=0, retried=False,
+            )
+
+    out = N.narrate_news({"quarter": 3}, client=TimeoutishClient())
+    assert out["ok"] is False and out["error"] == "timeout"
+    assert out.get("elapsed_ms", 0) > 0, "耗时应透传到失败结果"
 
 
 # ══════════════════════════════════════════════════════════════════

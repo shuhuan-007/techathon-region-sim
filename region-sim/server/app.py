@@ -356,7 +356,15 @@ class App:
         """
         session = self.registry.get(_need(body, "game"))
         player_id = _need(body, "player")
-        advice = ai_host.advise(session, player_id, body.get("question") or None)
+        advice = ai_host.advise(
+            session,
+            player_id,
+            body.get("question") or None,
+            # 可选「想先试算的方案」——形状与 /api/submit 的 plan 同形，
+            # **原样透传**给 ai_host（它内部会做形状转换 + 校验 + 只读试算）；
+            # 不传时 ai_host 用它自己的默认 None，行为与旧版完全一致。
+            preview_plan=body.get("preview_plan"),
+        )
         return {"ok": bool(advice.get("ok")), "advice": advice}
 
     def end_quarter(self, body: dict) -> dict:

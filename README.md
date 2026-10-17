@@ -186,6 +186,7 @@ M1 最小账本 → **M1.5 粮食/幸福度链** → M2 效率/全配方 → M3 
 > - **三个只读接口已落地**：`POST /api/simulate` / `POST /api/validate` / `GET /api/rules`（前两个要带 `{game, player, plan}`；见 `tests/test_ai_endpoints.py`）。
 > - **`ai/` 层已建**：`region-sim/ai/tools.py`（preview / validate / draft_plan）＋ `rules_digest.py`，**import 边界自检**（`assert_import_boundary()`）钉住「AI 无 commit」，测试见 `tests/test_ai_layer.py`。
 > - glB 地块资产接口已定（`docs/03-架构/glB地块资产接口.md`），目录统一为 `web/assets/plots/`（模型未到位，前端回退 2D 格子）。
+> - **2026-10-17 补**：**新闻叙事链已通**（`ai/narrate.py` 真跑成功两次，数字全对、守规则）；**财报解读在加固**（第一次真跑已修成接受模型按提示词返回的 Markdown，第二次撞上网关返回空正文——按失败如实报，不编造）；**AI 建议面板已接** `POST /api/ai/advise`。叙事生成时机＝结算后、下季行动前、按季缓存，`/api/state` 触发；真跑需设 `NARRATE_OFFLINE=0`。
 
 ---
 
