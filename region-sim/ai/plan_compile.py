@@ -31,7 +31,8 @@
 ═══════════════════════════════════════════════════════════════════
 
     1. 规整字段（类型/产物/坐标/数字）
-    2. 语义归位：已有地块的 builds → 本季开工；在建 → 丢弃；空地 → 保留
+    2. 语义归位：已有地块的 builds → 本季开工；在建 → 丢弃；
+       空地 → 保留，并把**零邻接加成**的新建搬到推荐邻格（`auto_place`）
     3. 补默认：所有 RUNNING 地块默认 u=1；没给口粮 → 按基准档补
     4. validate；不过 → 丢掉「能定位的坏项」再验（最多 3 轮）
     5. preview；资金不足 → 先降 u（100→75→50→25→0），
@@ -47,6 +48,11 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
+from ai.plan_context import (
+    adjacency_bonus_for_new_plot,
+    format_neighbors,
+    recommend_build_cells,
+)
 from engine import construction as C
 from engine import pipeline, validate
 from engine.loader import Config
@@ -348,6 +354,8 @@ def _normalize_builds(
     player_id: str,
     cfg: Config,
     notes: list[str],
+    *,
+    auto_place: bool = True,
 ) -> tuple[list[BuildOrder], dict[str, float]]:
     """把模型给的 `builds` 规整成 `BuildOrder` 列表 + “应改为开工”的地块。
 
@@ -357,6 +365,11 @@ def _normalize_builds(
       · `run_u`  —— 模型写在 builds 里、但其实指向“自己已建成同级地块”的，
                    语义改成“本季开工”，这里给出 `{plot_id: 1.0}`。
 
+    `auto_place=True`（默认）时，**空地上的新建**若落在零邻接加成的格子上，
+    会按 `recommend_build_cells()`（引擎真实规则）换到推荐格，并留下 note。
+    已有加成的不动；升级不搬；推荐格与同计划其它 build 冲突时取下一个，
+    都冲突就保持原格。
+
     ⚠️ 这是本模块最重要的一段：真实模型 100% 会把已有地块写进 builds。
     """
     player = state.player(player_id)
@@ -365,6 +378,18 @@ def _normalize_builds(
     seen: set[str] = set()
     converted: list[str] = []
     dropped: list[str] = []
+
+    # 同计划里**别的**新建原格：自动选址时不去抢，免得两份 build 撞在一起
+    # （只收「当前不是自己的地块」的坐标 = 空地新建的意图；升级不会进这里）。
+    reserved_new: set[str] = set()
+    for item in _iter_builds(raw_builds):
+        if not isinstance(item, dict):
+            continue
+        raw_pid = item.get("plot_id", item.get("id", item.get("plot")))
+        if isinstance(raw_pid, str) and raw_pid.strip():
+            candidate = raw_pid.strip()
+            if candidate not in player.plots:
+                reserved_new.add(candidate)
 
     for idx, item in enumerate(_iter_builds(raw_builds)):
         if not isinstance(item, dict):
@@ -489,6 +514,14 @@ def _normalize_builds(
         else:
             product = None
 
+        # ★ 自动选址（2026-10-18）：零邻接加成的空地新建 → 换到推荐格。
+        #   已有加成的不动；升级走上面的分支，永远不会搬。
+        if auto_place:
+            pid = _relocate_for_adjacency(
+                state, player_id, cfg, pid, ptype,
+                blocked=seen, reserved=reserved_new, notes=notes,
+            )
+
         if pid in seen:
             dropped.append(f"{pid}(重复)")
             continue
@@ -507,6 +540,53 @@ def _normalize_builds(
     if dropped:
         _append_note(notes, f"丢弃 {len(dropped)} 条无效建造：{_join_ids(dropped)}。")
     return orders, run_u
+
+
+def _relocate_for_adjacency(
+    state: GameState,
+    player_id: str,
+    cfg: Config,
+    plot_id: str,
+    plot_type: PlotType,
+    *,
+    blocked: set[str],
+    reserved: set[str],
+    notes: list[str],
+) -> str:
+    """空地新建若**零邻接加成**，按引擎规则换到推荐格；不划算就原样返回。
+
+    规则（2026-10-18，用户反馈 B）：
+
+      · 模型已经选了**有加成**的格子 → 不动（它的判断可能比排序更细）；
+      · 零加成 → 从 `recommend_build_cells(plot_type=...)` 里取第一个
+        **对该类型真有加成**、且不与同计划其它 build 冲突的格子；
+      · 推荐格都冲突 / 没有推荐 → 保持原格（不硬搬）；
+      · 只对「空地新建」调用 —— 升级不搬，已有地块的 `plot_plans` 不碰。
+
+    ⚠️ 加成与邻居明细都来自 `ai/plan_context`（其上游是引擎的
+       `compute_adjacency`），本函数不自己算公式。
+    """
+    bonus, _neighbors = adjacency_bonus_for_new_plot(
+        state, player_id, cfg, plot_id, plot_type,
+    )
+    if bonus > 1e-12:
+        return plot_id               # 模型已经选了有加成的格子 —— 不动
+
+    # 同计划里已排上的、以及别的 build 自己看中的原格，都不要抢
+    avoid = set(blocked) | (set(reserved) - {plot_id})
+    for cell in recommend_build_cells(
+        state, player_id, cfg, limit=5, plot_type=plot_type,
+    ):
+        target = cell["plot_id"]
+        if target == plot_id or target in avoid:
+            continue
+        _append_note(
+            notes,
+            f"为吃邻接加成，把 {plot_id} 的建造改到 {target}"
+            f"（邻 {format_neighbors(cell.get('neighbors') or [])}）。",
+        )
+        return target
+    return plot_id
 
 
 def _announce_level_clamp(notes: list[str], pid: str, target_level: int) -> None:
@@ -826,6 +906,26 @@ def _shrink_until_ok(
             pp.active = pp.u > 0.0
         candidate.food = _food_at(food_factor)
 
+    # ── 零档：已有生产 + 新建，现金不足时**先撤建造、保生产** ──
+    #   真跑实测：save 1 现金 416，模型在已有 5 块运行地块上又建 1 块农业；
+    #   旧顺序把 u 降到 0 才跑通 —— 计划合法，但“5 块地全停、只留一个工地”，
+    #   等于为了新投资把现有产出全牺牲掉。用户要的是经营，不是停工。
+    #   所以：只要计划里还有 u>0 的已建成地块，就先逐条撤新建造（口粮保持
+    #   原申报量），能不降 u 跑通就立刻返回。
+    if plan.builds and any(pp.u > 0.0 for pp in plan.plot_plans.values()):
+        candidate = copy.deepcopy(plan)
+        removed: list[str] = []
+        while candidate.builds:
+            removed.append(candidate.builds.pop().plot_id)
+            got, preview, _err = _try(candidate)
+            if got is not None:
+                _append_note(
+                    notes,
+                    f"现金不足：为保住现有生产（开工率不降），移除了 "
+                    f"{len(removed)} 条建造（{_join_ids(removed)}）后，试算才跑得通。",
+                )
+                return got, preview, ""
+
     # ── 一、二档：u × 口粮 的确定性网格 ──
     # u 从 1 往下、口粮从 1 往下；第一个跑通的组合 = 保留最多生产/口粮的方案。
     # (1.0, 1.0) 是原计划，已经在调用方试过，跳过。
@@ -900,6 +1000,7 @@ def compile_draft(
     default_run_all: bool = True,
     default_baseline_food: bool = True,
     max_validate_rounds: int = 3,
+    auto_place: bool = True,
 ) -> DraftCompileResult:
     """把模型回的 Plan 形状 JSON 编译成一份**真能跑**的 Plan。
 
@@ -912,6 +1013,8 @@ def compile_draft(
     default_run_all        : 模型没提的 RUNNING 地块，是否默认 u=1
     default_baseline_food  : 模型没给口粮时，是否按基准档补一份
     max_validate_rounds    : validate 不过时，按 issue target 丢坏项的最多轮数
+    auto_place             : 空地新建若零邻接加成，是否自动换到推荐格
+                             （默认开；关掉 = 完全照模型给的坐标）
 
     返回 `DraftCompileResult`；`ok=True` 时保证：
 
@@ -946,9 +1049,10 @@ def compile_draft(
             notes=notes,
         )
 
-    # ── 1. 建造（含“已有地块当建造”的语义归位）──
+    # ── 1. 建造（含“已有地块当建造”的语义归位 / 空地自动选址）──
     orders, converted_run = _normalize_builds(
-        raw.get("builds"), state, player_id, cfg, notes
+        raw.get("builds"), state, player_id, cfg, notes,
+        auto_place=auto_place,
     )
 
     # ── 2. 开工安排 ──

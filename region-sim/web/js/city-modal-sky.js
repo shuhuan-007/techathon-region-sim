@@ -28,22 +28,48 @@
    数据源(沿用 v4)
      fetch('/api/report?game=<game>&player=p1') → report;
      失败/4xx → _report=null,绘制走 STATE fallback。
-     _fetchPromise 去重,反复 open 不重复 fetch。refresh() 只重画纹理。 */
+     _fetchPromise 去重,反复 open 不重复 fetch。refresh() 只重画纹理。
+   ─────────────────────────────────────────────────────────────
+   v9（2026-10-18 用户拍板,第二轮）
+     用户原话:
+       1.「现在的唯一问题就是出现在了地块中间。他应该出现在**地块远处**」
+       2.「以及你应该保证任何情况下上面都有字。可以是一些公文什么的。
+          参考**新闻的提示词**」
+     落点 A · 屏往「地块远处」推:
+       open() 与 refresh() 的 mesh.position.set(cx, SKY_Y, cz - 3)
+       → cz - _skyDistance()。
+       _skyDistance() = max(6, side + 3)，其中 side 是 STATE.plots
+       占用的 bbox 的 max(行跨度, 列跨度)。相机在 +z 侧 (10.5,7.5,10.5)
+       看向 -z,cz 减小 = 屏往「场景后面 / 远处」退,退出 bbox 之外。
+       同时屏本身加大:SKY_W 8→10, SKY_H 4.5→5.5,
+       SKY_Y = SKY_H/2 = 2.75 (下边缘仍贴地)。
+     落点 B · 任何情况都有字（公文风）:
+       canvas 底部 200 px 加一块"经营新闻与财报解读"公文区,
+       数据源 fetch /api/narratives?game=<game>&player=p1。
+       三档稳定显示:
+         · ok      → 用 narratives.news.headline + .body 渲染正文
+         · pending → "— 本季经营新闻与财报解读正在生成… —"
+         · fail/未起 → "— 结算后此处将显示经营新闻与财报解读 —"
+       fetch 由 open() 同时起;收到结果或失败都会触发 _repaint(),
+       公文区立即被覆盖,不会出现"上空屏"。 */
 window.APP = window.APP || {};
 (function (APP) {
 
-  /* v8（2026-10-18 用户拍板）：下边缘贴地、远一点、大一点。
-     几何推理：
-       - 下边缘贴地 → SKY_Y ≈ SKY_H/2
-       - 大一点     → SKY_W 5→8，SKY_H 2.8→4.5，中心 y=2.25
-       - 远一点     → open()/refresh() 里把 cz 往 bbox 中心 -z 方向推 6
-                     （这是「在场景里挪远一点」，不是 y 抬升）
-       - 相机 pos y=7.5 俯视 y=0/向 cz+ 方向 → 屏正面向相机 →
-         rotation.x 也改为 -π/9（≈ -20°，屏面向上微仰接相机俯角，
-         不再是 v7 的 +30° "看扁条" 也不是"水平"）。 */
+  /* ── v8 几何拍板（v9 微调记在下面）────────────────────────
+     v8：下边缘贴地、远一点、大一点。
+       下边缘贴地 → SKY_Y ≈ SKY_H/2
+       大一点     → SKY_W 5→8, SKY_H 2.8→4.5, 中心 y=2.25
+       远一点     → open()/refresh() 里把 cz 往 bbox 中心 -z 方向推
+       相机 pos y=7.5 俯视 y=0/向 cz+ 方向 → 屏正面向相机 →
+       rotation.x = -π/9（≈ -20°，屏面向上微仰接相机俯角）
+
+     v9：「地块远处」。
+       屏宽 SKY_W 8→10，屏高 SKY_H 4.5→5.5，SKY_Y 随动 2.75。
+       位置不再用常数 -3，而是 cz - _skyDistance()
+       = cz - max(6, bbox_side + 3)。 */
   /* 屏幕物理尺寸(场景单位,1 = 1 cell) */
-  const SKY_W = 8.0;
-  const SKY_H = 4.5;
+  const SKY_W = 10.0;
+  const SKY_H = 5.5;
   /* 屏幕中心高度：下边缘贴地 */
   const SKY_Y = SKY_H / 2;
   /* canvas 像素尺寸(固定;微糊效果是有意的,呼应"掛在天上"的氛围) */
@@ -60,6 +86,11 @@ window.APP = window.APP || {};
   let _canvas = null;         // offscreen canvas
   let _ctx = null;
 
+  /* v9 落点 B · 公文区数据源 */
+  let _narratives = null;     /* null = 未 fetch 或 fetch 失败 */
+  let _narrState = 'idle';    /* idle / pending / ok / fail */
+  let _narrPromise = null;    /* fetch 去重 */
+
   function _findGame(){
     try {
       return new URLSearchParams(location.search).get('game') || 'default';
@@ -74,6 +105,38 @@ window.APP = window.APP || {};
       .then(j => (j && j.ok && j.report) ? j.report : null)
       .catch(() => null);
     return _fetchPromise;
+  }
+
+  /* v9 拍板：fetch /api/narratives。与 _fetchReport 同样的去重思路。
+     返回形状:{ok:true, narratives:{news:{...}|null, report:{...}|null}|null}
+     ok 且 narratives 非空 → _narrState='ok';
+     其它（null / 缺键 / 4xx5xx / 异常）→ _narrState='fail'，_narratives=null。
+     每次终态都会 _repaint() —— 公文区的字立刻被覆盖。 */
+  async function _fetchNarratives(){
+    if (_narrPromise) return _narrPromise;
+    _narrState = 'pending';
+    const game = encodeURIComponent(_findGame());
+    _narrPromise = fetch('/api/narratives?game=' + game + '&player=p1')
+      .then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(j => {
+        if (j && j.narratives){
+          _narratives = j.narratives;
+          _narrState = 'ok';
+        } else {
+          _narratives = null;
+          _narrState = 'fail';
+        }
+        if (_opened) _repaint();
+      })
+      .catch(() => {
+        _narratives = null;
+        _narrState = 'fail';
+        if (_opened) _repaint();
+      });
+    return _narrPromise;
   }
 
   /* ── bbox 中心(与 city-modal._cityViewBBox 相同算法)── */
@@ -101,6 +164,33 @@ window.APP = window.APP || {};
     const cx = (minC + maxC + 1) / 2;
     const cz = (minR + maxR + 1) / 2;
     return { cx, cz };
+  }
+
+  /* v9 拍板 · 屏往「地块远处」推多远。
+     数据:STATE.plots 的行/列占用 → side = max(行跨度, 列跨度);
+     屏距 = max(6, side + 3)。
+     · side + 3 保证屏退出视野 bbox 之外还留一点余量（不是贴着 bbox 边沿擦过去）;
+     · 至少 6，保证哪怕只有 1 块地也不会还在「地块中间」。
+     STATE 未就绪 / 解析失败 → 兜底 9（不挡视角，又远离 (5,5) 中心）。 */
+  function _skyDistance(){
+    if (typeof STATE === 'undefined' || !STATE) return 9;
+    const plots = (STATE.plots || []);
+    if (!plots.length) return 9;
+    const rows = [];
+    const cols = [];
+    plots.forEach(p => {
+      if (!p || !p.plot_id) return;
+      const parts = String(p.plot_id).split(',');
+      const r = parseInt(parts[0], 10);
+      const c = parseInt(parts[1], 10);
+      if (isNaN(r) || isNaN(c)) return;
+      rows.push(r); cols.push(c);
+    });
+    if (!rows.length) return 9;
+    const h = Math.max(...rows) - Math.min(...rows) + 1;
+    const w = Math.max(...cols) - Math.min(...cols) + 1;
+    const side = Math.max(h, w);
+    return Math.max(6, side + 3);
   }
 
   /* ── 数字格式化(沿用 v4)── */
@@ -137,6 +227,89 @@ window.APP = window.APP || {};
       y += 18;
     });
     return y + 8;
+  }
+
+  /* v9 落点 B · 公文风换行（按字符、按可见宽度 wrap;中文无空格也能切）*/
+  function _wrapText(ctx, text, maxWidth){
+    const paragraphs = String(text == null ? '' : text).split('\n');
+    const out = [];
+    paragraphs.forEach(p => {
+      if (!p){ out.push(''); return; }
+      let line = '';
+      for (const ch of p){
+        const trial = line + ch;
+        if (ctx.measureText(trial).width > maxWidth && line){
+          out.push(line);
+          line = ch;
+        } else {
+          line = trial;
+        }
+      }
+      if (line) out.push(line);
+    });
+    return out;
+  }
+
+  /* v9 拍板 · 公文区（任何情况都有内容）。
+     位置:canvas 底部 180 px(顶 = H - 200,底 = H - 20);
+     三档显示:
+       ok      → 用 narratives.news.headline + 正文 wrap 逐行画
+       pending → "— 本季经营新闻与财报解读正在生成… —"
+       fail/未起 → "— 结算后此处将显示经营新闻与财报解读 —" */
+  function _drawNewsRegion(ctx, W, H){
+    const XR = 30;
+    const XR2 = W - 30;
+    const YT = H - 200;                 /* 区顶 */
+    const YB = H - 20;                  /* 区底（canvas 底再留 20 px）*/
+
+    /* 底框（比主面板略亮一点点）+ 更微的描边 */
+    ctx.fillStyle = 'rgba(14, 20, 32, 0.6)';
+    _roundRect(ctx, XR, YT, XR2 - XR, YB - YT, 8);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 1;
+    _roundRect(ctx, XR, YT, XR2 - XR, YB - YT, 8);
+    ctx.stroke();
+
+    /* 公文标题 */
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.font = '600 15px system-ui, sans-serif';
+    ctx.fillText('本季经营新闻与财报解读', XR + 14, YT + 22);
+
+    /* 数据源三档 */
+    let body;
+    const n = _narratives;
+    if (n && n.news && n.news.headline){
+      const head = String(n.news.headline);
+      const text = (n.news.body != null) ? String(n.news.body) : '';
+      body = head + '\n\n' + text;
+    } else if (n && n.news && typeof n.news === 'object' && n.news.headline == null && n.news.text){
+      /* 防守：narratives.news 形状可能是 {text:...}（如 report 那一路）。
+         新闻按理永远有 headline，但这里对"怪形状"也兜住。 */
+      body = String(n.news.text);
+    } else if (n && n.news && n.news.error){
+      /* AI 生成器返回的 error 包装（§11.4 诚实未生成）→ 显示 error detail */
+      body = '— ' + (n.news.detail || n.news.error || '生成失败') + ' —';
+    } else if (_narrState === 'pending'){
+      body = '— 本季经营新闻与财报解读正在生成… —';
+    } else {
+      body = '— 结算后此处将显示经营新闻与财报解读 —';
+    }
+
+    /* 多行 wrap on the fly；最多 8 行 */
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.font = '13px ui-monospace, monospace';
+    const lines = _wrapText(ctx, body, XR2 - XR - 28);
+    const maxLines = 8;
+    let y = YT + 42;
+    lines.slice(0, maxLines).forEach(ln => {
+      ctx.fillText(ln, XR + 14, y);
+      y += 18;
+    });
+    if (lines.length > maxLines){
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.fillText('…（' + (lines.length - maxLines) + ' 行省略）', XR + 14, y);
+    }
   }
 
   /* ── 主绘制:把当前 _report(或 STATE fallback)画到 canvas 上 ── */
@@ -259,6 +432,10 @@ window.APP = window.APP || {};
         ctx.fillText('STATE 未就绪。', 30, 100);
       }
     }
+
+    /* v9 拍板 · 公文区：无论上面走到哪个分支都执行，
+       因此"任何情况屏上都有字"。 */
+    _drawNewsRegion(ctx, W, H);
   }
 
   /* 画 → 贴到 texture */
@@ -273,7 +450,7 @@ window.APP = window.APP || {};
     _canvas = document.createElement('canvas');
     _canvas.width = CVS_W; _canvas.height = CVS_H;
     _ctx = _canvas.getContext('2d');
-    _paint();   /* 先画一版 STATE fallback / 占位 */
+    _paint();   /* 先画一版 STATE fallback / 占位（含公文区 pending/缺档）*/
 
     _tex = new THREE.CanvasTexture(_canvas);
     if ('colorSpace' in _tex && THREE.SRGBColorSpace){
@@ -291,14 +468,12 @@ window.APP = window.APP || {};
     });
     const mesh = new THREE.Mesh(_geo, _mat);
     const { cx, cz } = _viewCenter();
-    /* v8 拍板：远一点、大一点、下边缘贴地。
-       把屏往 -z 方向推 3（玩家看 bbox 中心的话，屏在"场景后面"，
-       不是从头顶压下来）。y 由 SKY_Y = SKY_H/2 = 2.25 决定（贴地）。 */
-    mesh.position.set(cx, SKY_Y, cz - 3);
-    /* rotation.x -π/9 ≈ -20°：屏面向上微仰迎向相机俯角（相机位置
-       (10.5, 7.5, 10.5) 看向 y=0/向+z 方向 → 视线俯角 ≈35°；
-       屏面与 y 轴正交 70°（20° + 90°垂）后两边咬合 ≈ 55°，
-       屏幕上能看到屏的主体而非"边"也不是"躺倒"。 */
+    /* v9 拍板：屏往「地块远处」推。
+       相机在 +z 侧 (10.5,7.5,10.5) 看向 -z → cz 减小 = 屏退到场景后面。
+       _skyDistance() = max(6, side + 3)，退出 bbox 之外。
+       y 由 SKY_Y = SKY_H/2 = 2.75 决定（下边缘贴地）。 */
+    mesh.position.set(cx, SKY_Y, cz - _skyDistance());
+    /* rotation.x -π/9 ≈ -20°：屏面向上微仰迎向相机俯角（v8 拍板）。 */
     mesh.rotation.x = -Math.PI / 9;  /* = -π/9 ≈ -20° */
     mesh.renderOrder = 1000;    /* depthTest=false 时压底渲染,确保最后画 */
     /* 不调 lookAt —— 静止的天上屏 */
@@ -320,7 +495,7 @@ window.APP = window.APP || {};
     } else {
       /* 旧的还存在(理论上不应发生) → 复用,重定位 + 重画 */
       const { cx, cz } = _viewCenter();
-      _mesh.position.set(cx, SKY_Y, cz - 3);  /* v8 同步 -z 偏移 */
+      _mesh.position.set(cx, SKY_Y, cz - _skyDistance());  /* v9：远处同步 */
       if (!_mesh.parent) scene.add(_mesh);
       _repaint();
     }
@@ -331,6 +506,13 @@ window.APP = window.APP || {};
         _report = r;
         if (_opened) _repaint();
       });
+    }
+    /* v9 拍板：同时起一发 fetch narratives。收到 ok/fail 都会 _repaint，
+       公文区立刻被覆盖成对应档位（生成中/失败兜底文）。 */
+    if (_narrPromise == null){
+      _fetchNarratives();
+    } else if (_narrState === 'pending' && _opened){
+      /* 已在途 —— 当前 paint 里的 pending 兜底文案已经能显示，不重发 */
     }
   }
 
@@ -347,7 +529,7 @@ window.APP = window.APP || {};
     }
     if (APP.citySky) APP.citySky._mesh = null;
     _canvas = null; _ctx = null;
-    /* 不重置 _report / _fetchPromise —— 下次打开直接复用缓存 */
+    /* 不重置 _report / _fetchPromise / _narratives / _narrPromise —— 下次打开直接复用缓存 */
   }
 
   function _refresh(){

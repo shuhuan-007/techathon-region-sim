@@ -4,14 +4,34 @@
 玩家**自己的**地块，于是把已有的 `4,5` 等写成 `builds`（校验报
 `build_not_an_upgrade`）；也看不到建造成本 / 工程物资 / 人口口粮需求。
 
-对外只有两个函数：
+对外接口：
 
     describe_capabilities(state, player_id, cfg, *, max_empty=10) -> dict
         结构化快照。数字全部来自 engine / config，**不改任何状态**。
 
     format_capabilities(cap) -> str
-        紧凑中文文本，块名固定（`[现金/预算]` `[空地]` `[可建]` `[可开工]`
-        `[在建]` `[人口/口粮]`），供提示词直接拼接。
+        紧凑中文文本，块名固定（`[现金/预算]` `[空地]` `[推荐空地]` `[可建]`
+        `[可开工]` `[在建]` `[人口/口粮]` `[口粮规则]`），供提示词直接拼接。
+
+    recommend_build_cells(state, player_id, cfg, *, limit=5, plot_type=None) -> list
+        空地按**引擎真实邻接加成**排序（2026-10-18 新增）。
+
+    adjacency_bonus_for_new_plot(state, player_id, cfg, plot_id, plot_type)
+        「在这块空地新建一个 X 能吃到多少加成」——编译器自动选址用。
+
+═══════════════════════════════════════════════════════════════════
+2026-10-18 新增的两块事实（用户反馈：AI 会填，但完全不理解机制）
+═══════════════════════════════════════════════════════════════════
+
+    A. 口粮怎么算 —— 真跑里模型把「22 人」写成 `food={"A": 22}`。
+       现在快照直接给 `food_rule`：F_基准 / F_优秀 与两档逐商品需求量，
+       并附一句人话（F 是等效篮位数；A/B 基准，C/D 只优秀档；多买无仓库
+       会丢弃）。文本块 `[口粮规则]` 把当前数字与公式一起写出来。
+
+    B. 建在哪 —— AI 总选左上角 `0,0`，不会贴着已有地块吃邻接加成。
+       现在快照给 `recommended_build_cells`：按**引擎的 compute_adjacency**
+       （八邻格 / 关联表 / 服务按等级取率 / 封顶）对每块空地算「新建后能
+       吃到多少加成」，取前 5 个。数字全部来自引擎，不在这里重写公式。
 
 ⚠️ 本模块不做的事（边界）：
 
@@ -42,12 +62,13 @@ dict 里的数字一律是引擎原值（不四舍五入）。但浮点会带尾
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from engine import construction as C
+from engine import efficiency as E
 from engine import population as P
 from engine.loader import Config
-from engine.models import GameState, PlotStatus, PlotType, parse_plot_id
+from engine.models import GameState, Plot, PlotStatus, PlotType, parse_plot_id
 from engine.validate import buildable_products
 
 
@@ -93,6 +114,38 @@ def _material_text(materials: dict[str, float]) -> str:
     if not materials:
         return "—"
     return ",".join(f"{goods}×{_display_num(qty)}" for goods, qty in sorted(materials.items()))
+
+
+#: 地块类型的中文名（**只用于提示词**；`PlotType.value` 仍是机读键）
+PLOT_TYPE_NAMES: dict[PlotType, str] = {
+    PlotType.AGRICULTURE: "农业",
+    PlotType.RESOURCE: "资源",
+    PlotType.INDUSTRY: "工业",
+    PlotType.SERVICE: "服务",
+    PlotType.RESEARCH: "研究",
+}
+
+
+def plot_type_name(value: Any) -> str:
+    """`PlotType` / 字符串 → 中文名；认不出就原样转字符串（不炸快照）。"""
+    try:
+        return PLOT_TYPE_NAMES[PlotType(value)]
+    except (ValueError, KeyError):
+        return str(value)
+
+
+def format_neighbors(neighbors: list[dict], limit: int = 3) -> str:
+    """邻接贡献 → `5,6 农业+5% / 5,5 工业+5%`（最多 limit 个，余下写 …）。"""
+    neighbors = list(neighbors)
+    shown = neighbors[: max(0, int(limit))]
+    text = " / ".join(
+        f"{n.get('plot_id')} {plot_type_name(n.get('plot_type'))}"
+        f"+{_display_num(n.get('bonus_pct', 0))}%"
+        for n in shown
+    )
+    if len(neighbors) > len(shown):
+        text += " …"
+    return text or "—"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -237,6 +290,171 @@ def _population_rows(state: GameState, player_id: str, cfg: Config) -> tuple[dic
     return population, food_need
 
 
+def _food_rule(population: dict, food_need: dict, cfg: Config) -> dict:
+    """口粮规则（结构化）—— 让模型看得懂「怎么算」，而不是把人数当口粮数。
+
+    用户反馈：真跑里模型把「22 人」写成 `food={"A": 22}`。
+    这里把**当前数字**（F_基准 / F_优秀）与**两档逐商品需求量**一起给出，
+    再附一句人话说明：F 是等效篮位数、A/B 是基准档、C/D 只在优秀档、
+    多买没有仓库会被丢弃。
+
+    ⚠️ 数字全部来自 `_population_rows()`（其上游是 `compute_population`），
+       本函数只做「按 config 配比乘 F」，不另算一套。
+    """
+    baseline_food = float(population.get("baseline_food", 0.0))
+    good_food = float(population.get("good_food", 0.0))
+    baseline_need = {
+        goods: float(qty) for goods, qty in (food_need.get("baseline") or {}).items()
+    }
+    good_need = {
+        goods: float(qty) for goods, qty in (food_need.get("good") or {}).items()
+    }
+
+    def quota_text(quota: dict) -> str:
+        return "、".join(
+            f"{goods}×{_display_num(qty)}" for goods, qty in sorted(quota.items())
+        ) or "—"
+
+    base_goods = set(cfg.food.baseline_quota or {})
+    extra_goods = [g for g in sorted(cfg.food.good_quota or {}) if g not in base_goods]
+    tiers = f"{'/'.join(sorted(base_goods)) or '—'} 基准"
+    if extra_goods:
+        tiers += f"，{'/'.join(extra_goods)} 只优秀档"
+    note = (
+        "F 是等效篮位数；每档按配额乘 F："
+        f"基准档（{quota_text(cfg.food.baseline_quota or {})}）× F_基准，"
+        f"优秀档（{quota_text(cfg.food.good_quota or {})}）× F_优秀"
+        f"（{tiers}）；多买没有仓库、结算会丢弃。"
+    )
+
+    return {
+        "baseline_food": baseline_food,
+        "good_food": good_food,
+        "baseline_need": baseline_need,
+        "good_need": good_need,
+        "note": note,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# 二-b、推荐空地（邻接）—— 引擎怎么算，就怎么用
+# ══════════════════════════════════════════════════════════════════
+#
+# 用户反馈（B）：AI 建场地总选左上角第一格，不会贴着已有地块吃邻接加成。
+#
+# 本模块**不自己发明邻接规则**，只把引擎的 `compute_adjacency()` 拿来问
+# 「如果在这块空地上新建一个 X，能吃到多少加成」——探测用的 `Plot` 是
+# 临时对象，不写回 `state`。于是八邻格、关联表、服务按自身等级取率、
+# 封顶这些细节全部与结算时一致。
+
+
+def _new_build_types(cfg: Config) -> list[PlotType]:
+    """能从空地**新建**（0→1）的地块类型 —— 从工程表推，不写死。"""
+    works = C.load_works(cfg)
+    return sorted(
+        {w.plot_type for w in works.values() if w.is_new},
+        key=lambda t: t.value,
+    )
+
+
+def adjacency_bonus_for_new_plot(
+    state: GameState,
+    player_id: str,
+    cfg: Config,
+    plot_id: str,
+    plot_type: PlotType,
+) -> tuple[float, list[dict]]:
+    """「在这块空地上新建一个 `plot_type` 一级地块」能吃到的邻接加成。
+
+    直接调 `engine.efficiency.compute_adjacency()`（引擎真实规则），
+    **不在这里重写公式**。返回 `(加成, 邻居明细)`：
+    加成是**封顶后**的原始比例（0.05 = +5%），明细为
+    `[{plot_id, plot_type, level, bonus_pct}]`，只含真正计入的邻居。
+
+    ⚠️ 探测用的 `Plot` 是临时对象：不进 `state.players[...].plots`、
+       不改任何状态。邻接只认**自己的**运行中地块（与引擎同口径）。
+    """
+    probe = Plot(
+        plot_id=plot_id,
+        plot_type=plot_type,
+        level=1,
+        status=PlotStatus.RUNNING,
+    )
+    _adjacency, contribs, _counted, bonus, _capped, rate = E.compute_adjacency(
+        state, player_id, probe, cfg,
+    )
+    per_pct = (
+        rate if plot_type is PlotType.SERVICE
+        else cfg.efficiency.adjacency_per_neighbor
+    ) * 100.0
+    neighbors = [
+        {
+            "plot_id": c.plot_id,
+            "plot_type": c.plot_type.value,
+            "level": c.level,
+            "bonus_pct": per_pct,
+        }
+        for c in contribs
+        if c.counts and c.plot_type is not None
+    ]
+    return float(bonus), neighbors
+
+
+def recommend_build_cells(
+    state: GameState,
+    player_id: str,
+    cfg: Config,
+    *,
+    limit: int = 5,
+    plot_type: Optional[PlotType] = None,
+) -> list[dict]:
+    """把「当前空地」按**引擎真实邻接加成**排序，返回前 `limit` 个可建格。
+
+    元素形状：`{plot_id, score, bonus_pct, neighbors:[{...}]}`
+    （`score` / `bonus_pct` 都是**加成**：0.05 = 5%）。
+
+    · 只考虑**当前空地**（任何人未占的格子）；已有地块不出现；
+    · `plot_type=None` → 对每种**可新建**类型各算一遍、取最好的一档
+      （提示词只需要知道「这块地值得建」，具体类型由模型选）；
+    · `plot_type=X` → 只算 X（编译器自动选址用：必须真搬得划算）；
+    · 加成为 0 的格子不进推荐（开局没有邻居 → 空列表 → 文本写「暂无」）；
+    · 排序：加成降序，同分按 (行,列) 升序 —— 稳定、可复现。
+    """
+    occupied = {
+        plot_id
+        for other in state.players.values()
+        for plot_id in other.plots
+    }
+    types = [plot_type] if plot_type is not None else _new_build_types(cfg)
+    if not types:
+        return []
+
+    rows: list[dict] = []
+    for pid in _sorted_plot_ids(state.world.all_plot_ids()):
+        if pid in occupied:
+            continue
+        best_bonus = 0.0
+        best_neighbors: list[dict] = []
+        for ptype in types:
+            bonus, neighbors = adjacency_bonus_for_new_plot(
+                state, player_id, cfg, pid, ptype,
+            )
+            if bonus > best_bonus + 1e-12:
+                best_bonus = bonus
+                best_neighbors = neighbors
+        if best_bonus <= 1e-12:
+            continue
+        rows.append({
+            "plot_id": pid,
+            "score": best_bonus,
+            "bonus_pct": best_bonus * 100.0,
+            "neighbors": best_neighbors,
+        })
+
+    rows.sort(key=lambda row: (-row["score"], _sort_key(row["plot_id"])))
+    return rows[: max(0, int(limit))]
+
+
 # ══════════════════════════════════════════════════════════════════
 # 三、公开接口 1：结构化快照
 # ══════════════════════════════════════════════════════════════════
@@ -259,6 +477,8 @@ def describe_capabilities(
         build_options                  —— 新建工程（含材料价与折后现金）
         quota                          —— 开局减免名额
         population / food_need         —— 岗位、人口、两档口粮需求
+        food_rule                      —— 口粮规则（F 与两档逐商品需求量 + 人话）
+        recommended_build_cells        —— 按邻接加成排序的推荐空地（前 5）
 
     `max_empty` 只影响 `empty_cells` 的截断；`empty_total` 永远是全量。
     """
@@ -291,6 +511,8 @@ def describe_capabilities(
         "quota": quota,
         "population": population,
         "food_need": food_need,
+        "food_rule": _food_rule(population, food_need, cfg),
+        "recommended_build_cells": recommend_build_cells(state, player_id, cfg),
     }
 
 
@@ -298,8 +520,9 @@ def describe_capabilities(
 # 四、公开接口 2：紧凑中文文本（提示词直接拼）
 # ══════════════════════════════════════════════════════════════════
 #
-# ⚠️ 块名（[现金/预算] [空地] [可建] [可开工] [在建] [人口/口粮]）是**契约**：
-#    主实现（server/ai_host.py 的起草要求）会按这些名字指代，别改字。
+# ⚠️ 块名（[现金/预算] [空地] [推荐空地] [可建] [可开工] [在建] [人口/口粮]
+#    [口粮规则]）是**契约**：主实现（server/ai_host.py 的起草要求）会按这些
+#    名字指代，别改字；已有的 [人口/口粮] 块**不许删**（旧测试依赖）。
 # ⚠️ 文本里**不许**出现「起草」/「draft」：默认路径的回归测试要保证
 #    不传 draft 时 user message 里没有这两个词（本快照默认也会拼进去）。
 
@@ -397,19 +620,56 @@ def _population_line(cap: dict) -> str:
     )
 
 
+def _recommended_lines(cap: dict) -> list[str]:
+    """`[推荐空地]` 块 + 软提示（没有推荐就明说「先建第一块」）。"""
+    cells = cap.get("recommended_build_cells") or []
+    if not cells:
+        return ["[推荐空地] 暂无（先建第一块）"]
+    parts = [
+        f"{cell['plot_id']}（邻 {format_neighbors(cell.get('neighbors') or [])}）"
+        for cell in cells
+    ]
+    return [
+        "[推荐空地] " + " ".join(parts),
+        "优先从 [推荐空地] 里选 build 的格子（贴着已有地块才有 E_邻接 加成）。",
+    ]
+
+
+def _food_rule_line(cap: dict) -> str:
+    """`[口粮规则]` —— 当前数字 + 公式，专治「把 22 人写成 food={"A":22}」。"""
+    rule = cap.get("food_rule") or {}
+    population = cap.get("population") or {}
+    baseline = rule.get("baseline_need") or {}
+    good = rule.get("good_need") or {}
+
+    def pairs(items: dict) -> str:
+        return " ".join(
+            f"{goods}×{_display_num(qty)}" for goods, qty in sorted(items.items())
+        ) or "—"
+
+    return (
+        f"[口粮规则] 人口={_display_num(population.get('population', 0))} "
+        f"F_基准={_display_num(rule.get('baseline_food', 0))} → 基准档 {pairs(baseline)}；"
+        f"F_优秀={_display_num(rule.get('good_food', 0))} → 优秀档 {pairs(good)}；"
+        f"多买会被丢弃（没有仓库）。"
+    )
+
+
 def format_capabilities(cap: dict) -> str:
     """把 `describe_capabilities()` 的 dict 压成**紧凑中文文本**（给提示词）。
 
-    固定块序（主实现按块名引用）：[现金/预算] → [空地] → [可建] →
-    [可开工] → [在建] → [人口/口粮] → 最后一句硬提示。
+    固定块序（主实现按块名引用）：[现金/预算] → [空地] → [推荐空地] →
+    [可建] → [可开工] → [在建] → [人口/口粮] → [口粮规则] → 最后一句硬提示。
     """
     lines = [
         _budget_line(cap),
         _empty_line(cap),
+        *_recommended_lines(cap),
         *_build_lines(cap),
         _running_line(cap),
         _constructing_line(cap),
         _population_line(cap),
+        _food_rule_line(cap),
         "要开工必须写进 plot_plans，漏写=不开工；builds 只能用于 [空地] 里的格子。",
     ]
     return "\n".join(lines)

@@ -856,6 +856,255 @@ def test_route_advise_passes_draft_through():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 八、★ current_plan 编辑 + 机制问答查规则（2026-10-18）
+# ══════════════════════════════════════════════════════════════════
+#
+# 依据 `docs/03-架构/AI交互与建设撤销.md`：
+#   · 玩家说「取消 0,0 那条」→ 只删 0,0，**其它安排保留**（不许重填整份）；
+#   · 编辑模式**不许**默认全开工 / 补口粮（那是替玩家做经营决策）；
+#   · 问机制（`draft=False` / `mode=answer`）→ user message 带 `[规则摘录]`，
+#     问「粮食怎么算」时模型手里有 §3.3 原文；
+#   · `mode` 由服务层翻成 `draft`（answer→False、plan→True）。
+
+
+def _mid_session(cash: float = 3000.0):
+    """仿 `saves/1.json` 的第 4 季局面（5 块运行地块）—— 测编辑模式。
+
+    `advise` 只读 `session.state` / `session.cfg`，所以直接造 `GameSession`
+    就够（不必走 registry）。现金给足，免得编译器「缩量」把要断言的建造
+    自己删掉（那是另一个测试的事）。
+    """
+    from engine.models import GameState, PlotType, PlayerState
+    from server.session import GameSession
+    from tests.test_m1 import mature
+
+    cfg = load_config()
+    plots = {
+        "4,5": mature("4,5", PlotType.RESOURCE, 1),
+        "5,3": mature("5,3", PlotType.SERVICE, 1),
+        "5,4": mature("5,4", PlotType.AGRICULTURE, 1, product="A"),
+        "6,3": mature("6,3", PlotType.RESOURCE, 1),
+        "6,4": mature("6,4", PlotType.INDUSTRY, 1, product="G"),
+    }
+    player = PlayerState(
+        player_id="p1", cash=cash, plots=plots, last_happiness=0.8
+    )
+    state = GameState(world=cfg.new_world(), players={"p1": player})
+    return GameSession(state=state, cfg=cfg, player_ids=["p1"])
+
+
+def _build(plot_id: str, *, product="A") -> dict:
+    return {"plot_id": plot_id, "plot_type": "agriculture",
+            "target_level": 1, "product": product}
+
+
+def _plot_plan(plot_id: str, u: float = 1.0) -> dict:
+    return {"plot_id": plot_id, "active": True, "u": u}
+
+
+def _current_plan(builds=None, plot_plans=None) -> dict:
+    """前端 `publicPlan()` 同形的当前草稿。"""
+    return {
+        "player_id": "p1",
+        "plot_plans": dict(plot_plans or {}),
+        "purchases": {},
+        "food": {},
+        "builds": list(builds or []),
+        "contracts": [],
+    }
+
+
+def _mid_current_plan(builds=None, plot_plans=None) -> dict:
+    """mid 局的当前草稿：默认 5 块地全开工（玩家手填的样子）。"""
+    if plot_plans is None:
+        plot_plans = {
+            pid: _plot_plan(pid) for pid in ("4,5", "5,3", "5,4", "6,3", "6,4")
+        }
+    return _current_plan(builds=builds, plot_plans=plot_plans)
+
+
+def test_current_plan_remove_builds_keeps_other_build():
+    """模型回 `remove_builds: ["0,0"]` → 只删 0,0，另一条保留；
+    `plan_action == "removed"`、summary 用模型的 `why`、`why` 原样透出。"""
+    session = _mid_session()
+    current = _mid_current_plan(builds=[_build("0,0"), _build("0,1")])
+    why = "撤销 0,0 那条，其余安排不动。"
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps(
+            {"why": why, "remove_builds": ["0,0"]}, ensure_ascii=False
+        ),
+    ))
+    out = ai_host.advise(
+        session, "p1", "取消 0,0 那条建造", client=fake,
+        draft=True, current_plan=current,
+    )
+    assert out["ok"] is True, out
+    assert out["suggested_plan"] is not None, (
+        f"撤销后应还编译出一份能跑的计划：summary={out.get('summary')!r}、"
+        f"issues={out.get('plan_issues')}、notes={out.get('plan_notes')}"
+    )
+    build_ids = [b["plot_id"] for b in out["suggested_plan"]["builds"]]
+    assert len(build_ids) == 1, f"只剩 1 条，实得 {build_ids}"
+    assert "0,0" not in build_ids, "被撤销的那条不该回来"
+    # ★ 动作与摘要
+    assert out["plan_action"] == "removed", (
+        f"plan_action 应为 removed，实得 {out['plan_action']!r}"
+    )
+    assert "撤销" in out["summary"], f"summary 应优先用模型 why：{out['summary']!r}"
+    assert out["why"] == why, f"why 要原样透给前端：{out.get('why')!r}"
+    # ★ 只读：跑完仍是"什么都没发生"
+    assert session.plans == {}, "advise 不许提交（plans 必须还是空的）"
+
+
+def test_current_plan_edit_does_not_default_run_all():
+    """编辑模式下 `plot_plans` 未列出的地块**保持不开工**（不默认全开工）。
+
+    mid 局有 5 块运行地块；草稿里只写了 2 块 → 编译结果就该只有这 2 块，
+    绝不许因为"模型没提"把 4,5 / 5,4 / 6,3 也默认开工。
+    """
+    session = _mid_session()
+    current = _mid_current_plan(plot_plans={
+        "5,3": _plot_plan("5,3"),
+        "6,4": _plot_plan("6,4"),
+    })
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps(
+            {"why": "只开 5,3 和 6,4",
+             "plot_plans": {"5,3": _plot_plan("5,3")}},
+            ensure_ascii=False,
+        ),
+    ))
+    out = ai_host.advise(
+        session, "p1", "只开这两块", client=fake,
+        draft=True, current_plan=current,
+    )
+    assert out["suggested_plan"] is not None, (
+        f"应编译成功：summary={out.get('summary')!r}、"
+        f"issues={out.get('plan_issues')}"
+    )
+    plan = out["suggested_plan"]
+    assert set(plan["plot_plans"]) == {"5,3", "6,4"}, (
+        f"未列出的地块必须保持「不开工」，实得 {sorted(plan['plot_plans'])}"
+    )
+    for pid in ("4,5", "5,4", "6,3"):
+        assert pid not in plan["plot_plans"], (
+            f"★ {pid} 没被任何一方提到，不许默认全开工"
+        )
+    # 编辑模式不补基准口粮（草稿里 food 是空的）
+    assert plan["food"] == {}, f"编辑模式不许替玩家补口粮：{plan['food']}"
+
+
+def test_current_plan_is_shown_to_model_in_edit_mode():
+    """`current_plan` 必须进 user message（否则模型无法"只删 0,0、保留其余"）。"""
+    session = _mid_session()
+    current = _mid_current_plan(builds=[_build("0,0")])
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps({"why": "保持不动"}, ensure_ascii=False),
+    ))
+    ai_host.advise(session, "p1", "先别动", client=fake,
+                   draft=True, current_plan=current)
+    assert fake.calls, "假客户端应被调过一次"
+    user = fake.calls[0][1]["content"]
+    assert "[当前草稿" in user, f"draft 指令要求看草稿，但 messages 里没有：{user}"
+    assert "0,0" in user, "草稿里的建造必须给模型看到"
+    assert "没提到" in user or "只输出改动" in user, (
+        f"要给「只输出改动」的硬要求：{user}"
+    )
+
+
+def test_draft_instruction_mentions_why_and_remove_builds():
+    """起草指令必须告诉模型两个可选字段 —— 否则它永远不会用（2026-10-18）。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps(_valid_draft_json(), ensure_ascii=False),
+    ))
+    ai_host.advise(session, "p1", "帮我起草", client=fake, draft=True)
+    user = fake.calls[0][1]["content"]
+    assert "remove_builds" in user, f"起草指令缺 remove_builds：{user[-600:]}"
+    assert "why" in user, f"起草指令缺 why：{user[-600:]}"
+    assert "只输出一个 JSON" in user or "只输出**一个" in user, (
+        "仍须要求只输出 JSON"
+    )
+
+
+def test_answer_mode_sends_rule_excerpts_for_mechanism_questions():
+    """问「粮食怎么算」（draft=False）→ user message 带 `[规则摘录]` 与 §3.3 原文。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()
+    out = ai_host.advise(session, "p1", "粮食怎么算", client=fake, draft=False)
+    assert out["ok"] is True
+    user = fake.calls[0][1]["content"]
+    assert "[规则摘录]" in user, f"机制问答缺规则摘录块：{user}"
+    assert "§3.3" in user, f"「粮食」应命中 §3.3：{user}"
+    # 只要 1–3 节，不要整本基线
+    assert user.count("[规则摘录 · §") <= 3, "规则摘录最多 3 节"
+    assert "人口" in user or "粮食" in user, "摘录应是 §3.3 的原文（不是空壳）"
+
+
+def test_draft_mode_does_not_send_rule_excerpts():
+    """起草（draft=True）**不**附规则摘录 —— 保持旧行为（局面＋规则摘要就够）。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps(_valid_draft_json(), ensure_ascii=False),
+    ))
+    ai_host.advise(session, "p1", "粮食怎么算", client=fake, draft=True)
+    user = fake.calls[0][1]["content"]
+    assert "[规则摘录]" not in user, f"draft 模式不该带规则摘录：{user}"
+
+
+def test_route_mode_forces_draft_and_passes_current_plan():
+    """路由：`mode=answer`→draft=False、`mode=plan`→draft=True、
+    省略 mode→沿用 body.draft；`current_plan` 原样透传。"""
+    app = _fresh_app()
+    app.registry.create("g1", "p1")
+
+    import server.app as app_mod
+    orig = app_mod.ai_host.advise
+    captured: dict = {}
+
+    def spy(session, player_id="p1", question=None, **kw):
+        captured.clear()
+        captured.update({"question": question, **kw})
+        return {"ok": True, "summary": "假建议", "suggested_plan": None,
+                "plan_source": None, "plan_issues": None, "evidence": [],
+                "model": "fake", "error": ""}
+
+    plan = {"player_id": "p1", "builds": [_build("0,0")]}
+    app_mod.ai_host.advise = spy
+    try:
+        dispatch(app, "POST", "/api/ai/advise", {},
+                 {"game": "g1", "player": "p1", "question": "粮食怎么算",
+                  "mode": "answer", "draft": True})
+        assert captured["draft"] is False, "mode=answer 必须压成 draft=False"
+        assert captured["mode"] == "answer"
+
+        dispatch(app, "POST", "/api/ai/advise", {},
+                 {"game": "g1", "player": "p1", "question": "帮我建一块",
+                  "mode": "plan", "draft": False})
+        assert captured["draft"] is True, "mode=plan 必须抬成 draft=True"
+
+        dispatch(app, "POST", "/api/ai/advise", {},
+                 {"game": "g1", "player": "p1", "draft": True})
+        assert captured["draft"] is True, "省略 mode 时沿用 body.draft"
+        assert captured["mode"] == "auto"
+
+        dispatch(app, "POST", "/api/ai/advise", {},
+                 {"game": "g1", "player": "p1", "mode": "plan",
+                  "current_plan": plan})
+        assert captured["current_plan"] == plan, "current_plan 必须原样透传"
+    finally:
+        app_mod.ai_host.advise = orig
+
+
+# ══════════════════════════════════════════════════════════════════
 # runner（与 tests/test_ai_layer.py 同写法）
 # ══════════════════════════════════════════════════════════════════
 

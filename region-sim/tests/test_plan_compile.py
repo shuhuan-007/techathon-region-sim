@@ -10,6 +10,7 @@
   · 模型建 10 条工业（超预算）→ 应缩量到试算跑得通；
   · 产物写错 / 坐标越界 / 未知地块 → 应规整或丢弃，并留下 notes；
   · 模型没给口粮 → 应补基准档；
+  · 空地新建零邻接加成 → 应搬到推荐邻格并写 note（已有加成/升级不搬）；
   · 编译器返回的 plan **必须同时过 validate 与 preview**。
 """
 
@@ -26,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ai.plan_compile import compile_draft
 from engine import pipeline, validate
 from engine.loader import load_config
-from engine.models import GameState, PlayerState
+from engine.models import GameState, PlotType, PlayerState
 from tests.test_m1 import mature, make_state
 
 TOL = 1e-6
@@ -57,6 +58,18 @@ def _mid_state(cfg):
         player_id="p1", cash=416.0, plots=plots, last_happiness=0.0
     )
     return GameState(world=cfg.new_world(), players={"p1": player})
+
+
+def _farm_state(cfg):
+    """开局 + **一块已有农地** `5,5` —— 测「空地新建该贴哪」（用户反馈 B）。
+
+    只放一块地，推荐空地就能逐格断言：5,5 的八邻格全部 +5%，
+    同分按 (行,列) 排 → 4,4 → 4,5 → 4,6 → 5,4 → 5,6 …
+    """
+    return make_state(
+        cfg, "p1", mature("5,5", PlotType.AGRICULTURE, 1, product="A"),
+        cash=1200.0,
+    )
 
 
 def _raw(**kw):
@@ -192,6 +205,33 @@ def test_over_budget_builds_are_shrunk_until_preview_passes():
     assert any("现金不足" in n or "移除" in n for n in result.notes), (
         f"缩量必须留下说明：{result.notes}"
     )
+
+
+def test_tight_cash_prefers_production_over_new_build():
+    """已有生产 + 新建超预算：**先撤建造，不要把现有地块全停掉**。
+
+    真跑复现：save 1 现金 416，5 块运行地块 + 模型新建 1 块农业；
+    旧缩量顺序先降 u，最后 u=0 才跑通 —— 计划合法但 5 块地全停。
+    现在应先移除新建造，保留 5 块地原开工率。
+    """
+    cfg = load_config()
+    state = _mid_state(cfg)
+    raw = _raw(builds=[{
+        "plot_id": "0,0", "plot_type": "agriculture",
+        "target_level": 1, "product": "A",
+    }])
+    result = compile_draft(raw, state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+
+    assert result.plan.builds == [], (
+        f"现金不够时应先撤新建造，实得 {result.plan.builds}"
+    )
+    running = {pid for pid, p in state.player("p1").plots.items() if p.is_running}
+    assert set(result.plan.plot_plans) == running
+    assert all(pp.u > 0 for pp in result.plan.plot_plans.values()), (
+        "现有地块不该被降到 0 来给新建造让路"
+    )
+    assert any("保住现有生产" in n for n in result.notes), result.notes
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -340,6 +380,100 @@ def test_industry_upgrade_keeps_current_route():
     )
     assert any("不可更换" in n or "只能继续" in n for n in result.notes), result.notes
 
+
+
+# ══════════════════════════════════════════════════════════════════
+# 五-c、空地自动选址：零加成 → 搬到推荐邻格（用户反馈 B，2026-10-18）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_zero_bonus_build_is_moved_next_to_existing_plot():
+    """模型把农地建在 `0,0`（零加成）→ 编译器搬到推荐邻格 `4,4` 并写 note。"""
+    cfg = load_config()
+    state = _farm_state(cfg)
+    raw = _raw(builds=[{
+        "plot_id": "0,0", "plot_type": "agriculture",
+        "target_level": 1, "product": "A",
+    }])
+    result = compile_draft(raw, state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+
+    assert len(result.plan.builds) == 1
+    assert result.plan.builds[0].plot_id == "4,4", (
+        f"零加成的新建应搬到推荐邻格 4,4，实得 {result.plan.builds[0].plot_id}"
+    )
+    assert any(
+        "为吃邻接加成" in n and "0,0" in n and "4,4" in n and "5,5" in n
+        for n in result.notes
+    ), f"搬迁必须说明原因与邻格：{result.notes}"
+    # 只读：原局面没有被改
+    assert set(state.player("p1").plots) == {"5,5"}
+
+
+def test_build_already_on_bonus_cell_is_not_moved():
+    """模型已经选了有加成的格子 → 不搬（不覆盖模型的判断）。"""
+    cfg = load_config()
+    state = _farm_state(cfg)
+    raw = _raw(builds=[{
+        "plot_id": "4,4", "plot_type": "agriculture",
+        "target_level": 1, "product": "A",
+    }])
+    result = compile_draft(raw, state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+
+    assert result.plan.builds[0].plot_id == "4,4"
+    assert not any("为吃邻接加成" in n for n in result.notes), result.notes
+
+
+def test_second_build_takes_next_recommended_cell():
+    """同计划两条 build 都零加成 → 第一条占 4,4，第二条顺位拿 4,5（不撞车）。"""
+    cfg = load_config()
+    state = _farm_state(cfg)
+    raw = _raw(builds=[
+        {"plot_id": "0,0", "plot_type": "agriculture",
+         "target_level": 1, "product": "A"},
+        {"plot_id": "0,1", "plot_type": "agriculture",
+         "target_level": 1, "product": "A"},
+    ])
+    result = compile_draft(raw, state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+
+    ids = [b.plot_id for b in result.plan.builds]
+    assert ids == ["4,4", "4,5"], f"两条建造必须落在不同推荐格，实得 {ids}"
+    assert sum("为吃邻接加成" in n for n in result.notes) == 2, result.notes
+
+
+def test_upgrade_is_never_relocated():
+    """升级不搬：即使原格零加成，也只升它自己（`plot_plans` 不碰）。"""
+    cfg = load_config()
+    state = make_state(
+        cfg, "p1", mature("0,0", PlotType.AGRICULTURE, 1, product="A"),
+        cash=2000.0,
+    )
+    raw = _raw(builds=[{
+        "plot_id": "0,0", "plot_type": "agriculture",
+        "target_level": 2, "product": "A",
+    }])
+    result = compile_draft(raw, state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+
+    assert result.plan.builds[0].plot_id == "0,0", "升级指令不许被搬走"
+    assert not any("为吃邻接加成" in n for n in result.notes), result.notes
+
+
+def test_auto_place_can_be_disabled():
+    """`auto_place=False` → 完全照模型给的坐标（零加成也认）。"""
+    cfg = load_config()
+    state = _farm_state(cfg)
+    raw = _raw(builds=[{
+        "plot_id": "0,0", "plot_type": "agriculture",
+        "target_level": 1, "product": "A",
+    }])
+    result = compile_draft(raw, state, "p1", cfg, auto_place=False)
+    _assert_compiled_ok(result, state, cfg)
+
+    assert result.plan.builds[0].plot_id == "0,0"
+    assert not any("为吃邻接加成" in n for n in result.notes), result.notes
 
 
 # ══════════════════════════════════════════════════════════════════

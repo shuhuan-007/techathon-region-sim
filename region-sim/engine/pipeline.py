@@ -258,6 +258,21 @@ def _run_body(
     ⚠️ 就地修改 `state`；`reports` 是调用方给的**同一个** dict（被填满后
        `_run` 之外的调用方也能看到）。
     """
+    # ★ 2026-10-18 修复（磨合计时）：季初已 RUNNING 的地块 = 本季有生产机会。
+    #   ⚠️ 必须在第 1 步**之前**抓快照：第 1 步会把「上季完工、本季到期」的
+    #      CONSTRUCTING 地块翻成 RUNNING，它们同样有本季生产机会（另由
+    #      `completed_events` 补进来）。
+    #   ⚠️ 第 6 步本季新建/刚完工的地块**不在**这个集合里 —— 它们本季
+    #      生产窗口已过，下季首次生产时 `running_quarters` 才该是 0。
+    running_at_quarter_start: dict[str, set[str]] = {
+        player_id: {
+            pid
+            for pid, plot in state.players[player_id].plots.items()
+            if plot.status is PlotStatus.RUNNING
+        }
+        for player_id in plans
+    }
+
     # ══ 第 1 步：期初更新与公告 ═════════════════════════════
     # ★ 2026-10-18：收集“本季完工”事件，进报告给结算流水（工程情况）。
     completed_events: dict[str, list[dict]] = {}
@@ -540,6 +555,40 @@ def _run_body(
     for player_id, events in completed_events.items():
         if events:
             reports[player_id].construction_events.extend(events)
+
+    # ══ 第 5.9 步：★ 磨合推进（2026-10-18 修复）════════════
+    #
+    # 依据 §3.1 / `loader.EfficiencyConfig.ramp_factor`：
+    #   第 1 季 0.5、第 2 季 0.75、第 3 季起 1.0。
+    # 所以「本季按 0.5 生产过的这块地」到本季末应记 1 个已运行季度，
+    # 下季生产时才会读到 0.75；再下季 1.0。
+    #
+    # ⚠️ 原先 `_advance_construction()` 的 else 分支写的是
+    #    `plot.running_quarters += 0`，于是所有地块永远停在 0 → E_磨合
+    #    永久 0.5，产量腰斩。M1 用 `running_quarters=99` 的成熟夹具，
+    #    所以锚点测试一直没暴露它。
+    #
+    # ⚠️ 为什么落点在**第 5 步扣款成功之后、第 6 步工程之前**：
+    #    · 生产已经在第 4 步用**本季的** E 算完，此时 +1 不会反过来改本季产量；
+    #    · 第 5 步是资金不足的失败点（§11.3「失败即无痕」）——
+    #      放在它之前会让"扣款失败"留下 rq+1 的脏状态（实测会挂
+    #      `test_pipeline.test_insufficient_cash_raises`）；
+    #    · 第 6 步才新建/完工的地块要**保持 0**，下季首次生产才是 0.5。
+    #
+    # ⚠️ 只给「本季有生产机会」的地块 +1：
+    #    · 季初已 RUNNING 的（含 u=0 —— 地在、人就在，磨合按日历推进）；
+    #    · 第 1 步刚完工转 RUNNING 的。
+    for player_id in plans:
+        had_production_window = set(running_at_quarter_start[player_id])
+        had_production_window |= {
+            e["plot_id"]
+            for e in completed_events[player_id]
+            if e.get("event") == "completed"
+        }
+        for pid in sorted(had_production_window):
+            plot = state.players[player_id].plots.get(pid)
+            if plot is not None and plot.status is PlotStatus.RUNNING:
+                plot.running_quarters += 1
 
     # ══ 第 6 步：产品分配与工程投入 ════════════════════════
     for player_id, plan in plans.items():

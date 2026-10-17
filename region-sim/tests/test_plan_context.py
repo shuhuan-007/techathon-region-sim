@@ -10,7 +10,11 @@
     · 中局：空地少 1 格、running 地块可开工可升级、岗位 = 配方 d；
     · 在建：不能开工也不能升级，但 `[在建]` 必须列出它；
     · 文本：不含「起草」/「draft」（默认路径回归），长度不失控；
-    · 没有可开工地块时，`[可开工]` 必须**明说**，整块不能缺席。
+    · 没有可开工地块时，`[可开工]` 必须**明说**，整块不能缺席；
+    · 口粮规则（2026-10-18）：`food_rule` 两档数字必须与 `compute_population`
+      一致（22 人 → A×1.76 / B×0.88；优秀档 A×2.64 … D×0.132）；
+    · 推荐空地（2026-10-18）：分数 = 引擎 `compute_adjacency` 的封顶加成，
+      只推空地、同分按行列稳定排序。
 
 ⚠️ 这里用的是 `tests/test_m1.py` 的 `make_state / mature` 夹具（同一套口径），
    不重新造一套地图/地块，避免两份夹具漂移。
@@ -24,8 +28,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from engine.efficiency import compute_adjacency
 from engine.loader import load_config
 from engine.models import GameState, Plot, PlotStatus, PlotType
+from engine.population import compute_population
 
 from ai.plan_context import describe_capabilities, format_capabilities
 from tests.test_m1 import make_state, mature
@@ -280,7 +286,157 @@ def test_describe_capabilities_is_readonly():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 七、命令行 runner（不用 pytest）
+# 七、口粮规则（A）：两档需求数字必须与 compute_population 一致
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_food_rule_matches_compute_population_22_people():
+    """按用户真跑的例子造 22 人：3 资源(d=3) + 1 农业(d=2) → L=11、N=22。
+
+    期望（与用户举例一致）：
+        F_基准 = 22/5 = 4.4 → A×1.76 B×0.88
+        F_优秀 = 6.6        → A×2.64 B×1.32 C×0.66 D×0.132
+    """
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    plots = st.player("p1").plots
+    plots["0,1"] = mature("0,1", PlotType.RESOURCE, 1)
+    plots["0,2"] = mature("0,2", PlotType.RESOURCE, 1)
+    plots["0,3"] = mature("0,3", PlotType.AGRICULTURE, 1, product="A")
+
+    pop = compute_population(st, "p1", {}, cfg)
+    _close(pop.labor_food, 11)          # 3+3+3+2
+    _close(pop.population, 22)
+    _close(pop.baseline_food, 4.4)
+    _close(pop.good_food, 6.6)
+
+    cap = describe_capabilities(st, "p1", cfg)
+    rule = cap["food_rule"]
+    _close(rule["baseline_food"], pop.baseline_food)
+    _close(rule["good_food"], pop.good_food)
+
+    # 两档商品集合：基准只有 A/B，优秀才有 C/D
+    assert set(rule["baseline_need"]) == {"A", "B"}, rule["baseline_need"]
+    assert set(rule["good_need"]) == {"A", "B", "C", "D"}, rule["good_need"]
+    for goods, ratio in cfg.food.baseline_quota.items():
+        _close(rule["baseline_need"][goods], ratio * pop.baseline_food)
+    for goods, ratio in cfg.food.good_quota.items():
+        _close(rule["good_need"][goods], ratio * pop.good_food)
+    # 与用户举例的精确数对照（同时说明「22」不可能是一档口粮量）
+    _close(rule["baseline_need"]["A"], 1.76)
+    _close(rule["baseline_need"]["B"], 0.88)
+    _close(rule["good_need"]["A"], 2.64)
+    _close(rule["good_need"]["B"], 1.32)
+    _close(rule["good_need"]["C"], 0.66)
+    _close(rule["good_need"]["D"], 0.132)
+    assert rule["good_need"]["A"] < 3, "优秀档 A 只有 2.64，不是 22"
+
+    # note 是一句人话：提到 F、A/B、C/D、丢弃
+    note = rule["note"]
+    assert isinstance(note, str) and note, rule
+    for piece in ("F", "A", "B", "C", "D", "丢弃"):
+        assert piece in note, f"口粮规则 note 缺 {piece}：{note}"
+
+    # 文本块：直接写当前数字 + 公式
+    text = format_capabilities(cap)
+    assert "[口粮规则]" in text, text
+    for piece in (
+        "人口=22", "F_基准=4.4", "A×1.76", "B×0.88",
+        "F_优秀=6.6", "A×2.64", "B×1.32", "C×0.66", "D×0.132",
+        "多买会被丢弃",
+    ):
+        assert piece in text, f"口粮规则文本缺 {piece}：\n{text}"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 八、推荐空地（B）：真加成、只推空地、排序稳定
+# ══════════════════════════════════════════════════════════════════
+
+
+def _probe(plot_id: str, ptype: PlotType) -> Plot:
+    """探测用临时地块（模拟「在这块空地上新建一个 X」）。"""
+    return Plot(plot_id=plot_id, plot_type=ptype, level=1, status=PlotStatus.RUNNING)
+
+
+def test_recommended_build_cells_use_engine_adjacency_and_stable_order():
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("5,5", PlotType.AGRICULTURE, 1, product="A"))
+    cap = describe_capabilities(st, "p1", cfg)
+    cells = cap["recommended_build_cells"]
+
+    assert cells, "有一块农地时，周边空地必须被推荐"
+    assert len(cells) == 5, f"默认给前 5 个，实得 {len(cells)}"
+    # 5,5 的八邻格全部只挨着这一块农地 → 同分，按 (行,列) 升序取前 5
+    assert [c["plot_id"] for c in cells] == ["4,4", "4,5", "4,6", "5,4", "5,6"], [
+        c["plot_id"] for c in cells
+    ]
+
+    own_plots = set(st.player("p1").plots)
+    for cell in cells:
+        assert cell["plot_id"] not in own_plots, "推荐里不能出现已有地块"
+        assert cell["score"] > 0, "零加成的格子不该进推荐"
+        assert cell["neighbors"], "有加成就必须能说出是哪个邻居给的"
+
+        # ★ 分数 = 引擎 compute_adjacency 的封顶加成（四种可新建类型取最高）
+        best = max(
+            compute_adjacency(st, "p1", _probe(cell["plot_id"], t), cfg)[3]
+            for t in (
+                PlotType.AGRICULTURE, PlotType.RESOURCE,
+                PlotType.INDUSTRY, PlotType.SERVICE,
+            )
+        )
+        _close(cell["score"], best)
+        _close(cell["bonus_pct"], best * 100)
+
+        for n in cell["neighbors"]:
+            assert n["plot_id"] in st.world.neighbor_ids(cell["plot_id"])
+            assert n["plot_type"] == PlotType.AGRICULTURE.value, n
+            assert n["level"] == 1, n
+            _close(n["bonus_pct"], 5.0)   # 当前配置：每个关联邻居 +5%
+
+    # 第一个推荐格的邻居明细必须能对上（邻 5,5 农业 +5%）
+    assert [n["plot_id"] for n in cells[0]["neighbors"]] == ["5,5"], cells[0]
+    assert cells[0]["neighbors"][0]["plot_type"] == "agriculture"
+
+    # 稳定：同一局面重复调用，顺序逐字相同
+    again = describe_capabilities(st, "p1", cfg)["recommended_build_cells"]
+    assert [c["plot_id"] for c in again] == [c["plot_id"] for c in cells]
+    assert [c["score"] for c in again] == [c["score"] for c in cells]
+
+    # 开局没有邻居 → 空列表（而不是硬推 0,0）
+    opening = describe_capabilities(_opening_state(cfg), "p1", cfg)
+    assert opening["recommended_build_cells"] == [], opening["recommended_build_cells"]
+
+
+# ══════════════════════════════════════════════════════════════════
+# 九、文本：新增 [口粮规则] / [推荐空地]，旧 [人口/口粮] 不许删
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_formatter_has_food_rule_and_recommended_blocks():
+    cfg = load_config()
+    cap = describe_capabilities(
+        make_state(cfg, "p1", mature("5,5", PlotType.AGRICULTURE, 1, product="A")),
+        "p1", cfg,
+    )
+    text = format_capabilities(cap)
+
+    assert "[口粮规则]" in text, text
+    assert "[推荐空地]" in text, text
+    assert "[人口/口粮]" in text, "旧块不许删（主实现与旧测试依赖）"
+    assert "[推荐空地] 暂无" not in text, "有邻居时不该说暂无"
+    assert "5,5 农业+5%" in text, text
+    assert "优先从 [推荐空地] 里选 build 的格子" in text, text
+
+    # 开局没有邻居 → [推荐空地] 明说「先建第一块」，且不给软提示
+    text0 = format_capabilities(describe_capabilities(_opening_state(cfg), "p1", cfg))
+    assert "[推荐空地] 暂无（先建第一块）" in text0, text0
+    assert "优先从 [推荐空地]" not in text0, text0
+    assert "[口粮规则]" in text0, text0
+
+
+# ══════════════════════════════════════════════════════════════════
+# 十、命令行 runner（不用 pytest）
 # ══════════════════════════════════════════════════════════════════
 
 

@@ -86,6 +86,20 @@ function hideStateLoading(){
   setActionButtonsDisabled(false);
 }
 
+/* ★ 2026-10-18：**强制**撤遮罩 —— 不信任 `_slDepth` 计数。
+   背景：`showStateLoadingNow` 并**不**增加 `_slDepth`，而异常/超时路径可能让
+   计数残留（比如某次 showStateLoadingDelayed 的 finally 没跑到），于是
+   `hideStateLoading()` 会因 `_slDepth > 0` 提前 return —— 遮罩永远不收。
+   「推进本季度」这种**必须收回遮罩**的出口直接调这个：计数归零 + 停表 + 收 DOM。 */
+function forceHideStateLoading(){
+  _slDepth = 0;
+  if (_slTimer){ clearTimeout(_slTimer); _slTimer = null; }
+  if (_slTick){ clearInterval(_slTick); _slTick = null; }
+  const el = $("state-loading");
+  if (el && !el.classList.contains("hidden")) el.classList.add("hidden");
+  try{ setActionButtonsDisabled(false); }catch(_e){ /* 解锁失败不能连累撤遮罩 */ }
+}
+
 /* ══════════════════════════════════════════════════════════
    ★ ⑥ 等待时把结算细节**逐条涌现**（替代干等）
    ══════════════════════════════════════════════════════════
@@ -259,18 +273,34 @@ function settlementLinesFromReport(r){
 
 /* 让 lines 每 ~320ms 上一条（"流水"感）。返回一个 Promise：推完才 resolve。
    若玩家根本就没展开加载框（report 极快返回），也会把行推完——没问题，
-   下一次 hideStateLoading 时整张框被撤掉，玩家看不到"曾经滚过一堆"。 */
+   下一次 hideStateLoading 时整张框被撤掉，玩家看不到"曾经滚过一堆"。
+
+   ★ 2026-10-18 修「流水 Promise 永挂」：
+     ① 推完**最后一行**就 resolve（原来要多等一个 interval 才进 `i>=length` 分支）；
+     ② `pushSettlementLine` 单行抛错只跳过该行，**不让整条流水断掉**；
+     ③ setTimeout 回调里的异常原本会被浏览器吞掉、Promise 永不 resolve
+        （结算按钮会一直等）—— 现在统一 `finish()` 兜底 resolve。
+   调用方仍建议加时间闸（见 panel.js 的 8s watchdog）。 */
 function streamSettlementLines(lines, intervalMs){
   return new Promise(resolve => {
-    if (!lines || !lines.length){ resolve(); return; }
-    let i = 0;
-    const step = () => {
-      if (i >= lines.length){ resolve(); return; }
-      const l = lines[i++];
-      pushSettlementLine(l.text, l.kind);
-      setTimeout(step, intervalMs == null ? 320 : intervalMs);
-    };
-    step();
+    let done = false;
+    const finish = () => { if (done) return; done = true; resolve(); };
+    try{
+      if (!lines || !lines.length){ finish(); return; }
+      const gap = (intervalMs == null) ? 320 : intervalMs;
+      let i = 0;
+      const step = () => {
+        try{
+          if (i >= lines.length){ finish(); return; }      // ① 推完 → 一定 resolve
+          const l = lines[i++];
+          try{ pushSettlementLine(l.text, l.kind); }        // ② 单行失败不影响流水
+          catch(_e){ /* 忽略这一行 */ }
+          if (i >= lines.length){ setTimeout(finish, gap); return; }  // 最后一行留一拍
+          setTimeout(step, gap);
+        }catch(_e){ finish(); }                             // ③ 永不悬挂
+      };
+      step();
+    }catch(_e){ finish(); }
   });
 }
 
@@ -301,7 +331,11 @@ function setActionButtonsDisabled(off){
     const b = $(id);
     if (!b) return;
     if (off){
-      b.dataset.slWasDisabled = b.disabled ? "1" : "0";
+      /* ★ 2026-10-18：**只在第一次上锁时记录原态**。
+         原来每次上锁都覆写 `slWasDisabled`，而「推进本季度」会连着上锁两次
+         （结算中 → 正在刷新界面），第二次就把"原本可点"记成了"原本禁用"
+         → 解锁时「下一季 ▶」永久禁用，玩家进不了下一季。 */
+      if (b.dataset.slWasDisabled === undefined) b.dataset.slWasDisabled = b.disabled ? "1" : "0";
       b.disabled = true;
     } else if (b.dataset.slWasDisabled === "0"){
       b.disabled = false;

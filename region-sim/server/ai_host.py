@@ -50,6 +50,12 @@ from typing import TYPE_CHECKING, Any, Optional
 from ai import assert_import_boundary, tool_preview, tool_validate
 from ai import rules_digest
 from ai.plan_compile import compile_draft
+from ai.plan_edit import (
+    extract_why,
+    merge_edits,
+    plan_action_of,
+    plan_has_content,
+)
 from server import llm_client
 
 if TYPE_CHECKING:  # 仅供类型标注；运行时不 import（不起 server.session）
@@ -87,6 +93,8 @@ def advise(
     rule_key: str = DEFAULT_RULE_KEY,
     preview_plan: Optional[dict] = None,
     draft: bool = False,
+    current_plan: Optional[dict] = None,
+    mode: str = "auto",
     client=llm_client,
 ) -> dict:
     """组装输入 → 调模型 → 返回**建议**（结构化 dict）。
@@ -101,6 +109,12 @@ def advise(
       · `draft`         — `True` 时请模型**自己起草一份 Plan 形状**
                           （与 `/api/submit` 的 plan 同形）；
                           `False`（默认）＝行为与旧版完全一致；
+      · `current_plan`  — 前端表单里的**当前草稿**（未提交也算）。非空时走
+                          **编辑模式**（`AI交互与建设撤销.md` §三）：以它为 base
+                          合并模型的 `remove_builds` / `builds` / `plot_plans`，
+                          并且**不默认全开工、不补基准口粮**；
+      · `mode`          — `"auto" | "answer" | "plan"`，由服务层翻成 `draft`
+                          （本层只收，不重复判关键词）；
       · `client`        — LLM 客户端（**可注入假客户端做测试**，默认真网关）。
 
     返回 dict（形状见文件底部 `_ok_advice` / `_failure`）：
@@ -200,6 +214,32 @@ def advise(
             f"不要臆造空地/成本，按上面已有的局面回答。"
         )
 
+    # 机制问答的规则摘录：**先算好**（后面还要用它兜底校验模型有没有答到公式）
+    rule_excerpts = [] if draft else _rule_excerpts(question)
+
+    # ★ 纯机制题（“粮食怎么算/公式是什么”）**直接回规则原文**，不调模型。
+    #   2026-10-18 真跑：即使把 §3.3.3 原文塞进 user message，qwen-flash 仍答成
+    #   “当前人口=0 ⇒ 口粮=0”，完全不给 F_基准/0.4 配额。机制题要的是准确，
+    #   不是文采；直接给基线原文最稳（也最快，0 模型调用）。
+    #   ⚠️ 只在默认真客户端上走这条；测试注入 FakeClient 时仍走原链路。
+    if (
+        not draft
+        and rule_excerpts
+        and _is_pure_rule_question(question)
+        and client is llm_client
+    ):
+        return _ok_advice(
+            summary=_rule_answer_text(rule_excerpts),
+            suggested_plan=None,
+            plan_source=None,
+            plan_issues=None,
+            plan_action=None,
+            evidence=evidence,
+            model="规则原文",
+            rule_key=rule_excerpts[0].get("key") or rule.get("key"),
+            question=question,
+        )
+
     messages = _build_messages(
         player_id=player_id,
         state=state,
@@ -209,6 +249,13 @@ def advise(
         cfg=getattr(session, "cfg", None),
         draft=draft,
         cap_text=cap_text,
+        # ★ 机制问答查规则（2026-10-18）：draft=False 时按问题关键词附 1–3 节
+        #   基线**原文**摘录（问"粮食怎么算"就有 §3.3.3 的原文在手）；
+        #   draft=True 不传 —— 起草只要局面 + 规则摘要，保持旧行为。
+        rule_excerpts=rule_excerpts,
+        # ★ 编辑模式（2026-10-18）：把玩家**表单里的草稿**给模型看，
+        #   否则它无法"只删 0,0、保留其余"（只能重填整份 = 覆盖玩家手填）。
+        current_plan=current_plan,
     )
 
     result = client.chat_completions(messages)
@@ -247,6 +294,14 @@ def advise(
             rule=rule,
         )
 
+    # ★ 机制问答的**确定性兜底**（2026-10-18 真跑抓到）：
+    #   即使把 §3.3.3 原文塞进 user message，qwen-flash 仍会答成
+    #   “当前人口=0 ⇒ 口粮=0”，完全不提 F_基准 / 0.4 配额。
+    #   对“怎么算/公式/规则”这类**纯机制题**，如果模型回答没覆盖摘录里的
+    #   关键公式，就直接用基线原文替换答案 —— 宁可不“会说话”，也不能答错规则。
+    if rule_excerpts and not draft:
+        content = _ensure_rule_answer(content, question, rule_excerpts)
+
     # ── 4. draft 开路：把回答当 **Plan 候选** 解析 → 校验 → 收建议 ──
     #    ⚠️ AI 只起草数据，**绝不提交**（§11.4）：
     #       · 校验过 → suggested_plan=该对象、plan_source='model'；
@@ -278,9 +333,27 @@ def advise(
         #     等模型常见错误规整掉，并且**只有 validate + preview 都过**才返回 plan。
         #     —— 这一步取代了旧的 `plan_from_dict → tool_validate` 裸转换：
         #        旧路径只要模型写错一个字，整份草案就作废（真跑实测的故障）。
+        # ★ 编辑模式（2026-10-18，《AI交互与建设撤销.md》§三）：
+        #    `current_plan` 非空 → 先把模型的轻量编辑合并到玩家草稿上，
+        #    再编译。两个默认值必须关掉：
+        #      · default_run_all=False        —— 玩家没写开工的地块保持不开，
+        #        不许因为"模型漏提"就把整张表全开工（那是替玩家做经营决策）；
+        #      · default_baseline_food=False  —— 不替玩家补口粮；
+        #    `current_plan` 为空 → 旧路径，一个参数都不加（默认 True）。
+        editing = plan_has_content(current_plan)
         if obj is not None:
             try:
-                compiled = compile_draft(obj, session.state, player_id, session.cfg)
+                if editing:
+                    request = merge_edits(obj, current_plan)
+                    compiled = compile_draft(
+                        request, session.state, player_id, session.cfg,
+                        default_run_all=False,
+                        default_baseline_food=False,
+                    )
+                else:
+                    compiled = compile_draft(
+                        obj, session.state, player_id, session.cfg
+                    )
             except Exception as e:  # noqa: BLE001 —— 编译器自己都不能崩
                 compiled = None
                 plan_candidate_error = f"{type(e).__name__}: {e}"
@@ -294,6 +367,8 @@ def advise(
             model=mdl or llm_client.model_name(),
             rule_key=rule.get("key"),
             question=question,
+            why=extract_why(obj),
+            plan_action=plan_action_of(obj, current_plan),
         )
 
     # ── 5. 默认路径（**行为与旧版完全一致**）：把模型回的自由文本**收进
@@ -307,6 +382,7 @@ def advise(
         model=mdl or llm_client.model_name(),
         rule_key=rule.get("key"),
         question=question,
+        plan_action=None,   # 问答分支没有"对草稿做了什么"
     )
 
 
@@ -366,7 +442,15 @@ _DRAFT_JSON_INSTRUCTION = (
     "引擎会试算，超预算会自动缩量（但不会替你选路线）；\n"
     "· 口粮可省略（引擎按 [人口/口粮] 的基准档补）；想冲优秀档就按优秀档填 "
     "A/B/C/D；\n"
-    "· 用不到的字段可以省略或留空，但 **player_id 必须写「{player_id}」**。"
+    "· 用不到的字段可以省略或留空，但 **player_id 必须写「{player_id}」**。\n"
+    "★ 两个**可选**字段（玩家要撤销 / 要一句解释时很有用）：\n"
+    '· "why": "一句话：做了什么 + 为什么"（**只进聊天摘要，不参与规则**）；\n'
+    '· "remove_builds": ["0,0"] —— 玩家要求**撤销**某些建造时，只列这些格子，'
+    "**不要重填整份计划**。\n"
+    "⚠️ 如果上面给了 **[当前草稿]**：那是玩家**已有的草稿**（未提交）。"
+    "只输出**改动**——要撤销的格子 / 要追加或替换的 builds / 要改的 "
+    "plot_plans·purchases·food；**没提到的东西一律保持原样，不要重填整份**。\n"
+    "⚠️ 仍然只输出一个 JSON 对象：不要解释、不要代码围栏。"
 )
 
 
@@ -380,8 +464,11 @@ def _build_messages(
     cfg=None,
     draft: bool = False,
     cap_text: str = "",
+    rule_excerpts: Optional[list[dict]] = None,
+    current_plan: Optional[dict] = None,
 ) -> list[dict]:
-    """把局面 / 可行动作 / 规则摘要 / 试算数字 / 玩家问题拼成 OpenAI messages。"""
+    """把局面 / 可行动作 / 规则摘要 / 规则摘录 / 试算数字 / 当前草稿 / 问题
+    拼成 OpenAI messages。"""
     lines = [
         f"[当前局面 · 玩家 {player_id}]",
         _compact_state(player_id, state, cfg),
@@ -393,6 +480,29 @@ def _build_messages(
         f"[规则摘要 · 基线 §{rule.get('key')}]",
         rule.get("summary", ""),
     ]
+    # ★ 机制问答（draft=False）：按问题关键词附 1–3 节**基线原文**。
+    #   draft=True 时 advise 传空 —— 起草只要局面 + 规则摘要，保持旧行为。
+    excerpts = [e for e in (rule_excerpts or []) if isinstance(e, dict)][:3]
+    if excerpts:
+        lines += [
+            "",
+            "[规则摘录] 下面是从《规则基线》按你的问题取的**原文**"
+            "（节号即出处；没取到的不编）。",
+        ]
+        for ex in excerpts:
+            headline = f"[规则摘录 · §{ex.get('key')}]"
+            title = str(ex.get("title") or "").strip()
+            if title:
+                headline += f" {title}"
+            lines += [headline, str(ex.get("summary") or "")]
+        # ⚠️ 真跑教训：只给原文，模型仍会答“当前人口=0 ⇒ 口粮=0”。
+        #    机制题必须**先讲规则公式**，再用当前局面举例。
+        lines += [
+            "",
+            "[回答要求] 这是机制解释题：先引用 [规则摘录] 的节号与公式，"
+            "再用当前局面数字举例；不要把“当前人口=0/当前没有地块”"
+            "这类局面值当成规则本身。",
+        ]
     if preview_report is not None:
         lines += [
             "",
@@ -403,6 +513,16 @@ def _build_messages(
         lines += [
             "",
             "[试算结果] 本次没有先试算任何计划；要引用数字只能引用上面的局面。",
+        ]
+
+    # ★ 当前草稿（2026-10-18，编辑模式）：把玩家表单里**已有的安排**给模型看。
+    #   不给这块，模型只能重填整份 —— 那就一定会覆盖玩家手填的东西
+    #   （用户明确要求："自己填不要改动玩家已经手动填的"）。
+    if draft and plan_has_content(current_plan):
+        lines += [
+            "",
+            "[当前草稿 · 玩家表单里的安排（未提交；请在此基础上**只输出改动**）]",
+            _compact_current_plan(current_plan),
         ]
 
     user_body = "\n".join(lines)
@@ -423,6 +543,179 @@ def _build_messages(
         {"role": "system", "content": _SYSTEM_PREAMBLE},
         {"role": "user", "content": user_body},
     ]
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★ 机制问答：按问题关键词取基线原文（《AI交互与建设撤销.md》§四）
+# ══════════════════════════════════════════════════════════════════
+#
+# 口径：**只取原文，不编**。关键词命中哪几节就取哪几节，最多 3 节；
+# 一节都没命中就返回空列表（模型按旧行为自由回答，不许自己"补"规则）。
+# 顺序即优先级（排前面的先取）。
+_RULE_KEYWORD_SECTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    # ⚠️ 粮食/口粮必须取 **3.3.3 两档粮食需求**：公式与 A/B/C/D 配额都在
+    #    这一小节；取 3.3 只会拿到本节开头两句，“怎么算”答不出公式
+    #    —— 2026-10-18 真跑抓到（模型答成“当前人口=0，所以口粮=0”）。
+    (("粮食", "口粮"), "3.3.3"),
+    (("幸福",), "3.3.4"),
+    (("人口",), "3.3.1"),
+    (("邻接", "加成"), "3.2"),
+    (("价格", "市场"), "4.1"),
+    (("建造", "工程"), "5.1"),
+    (("效率", "磨合"), "3.1"),
+    (("税",), "7.1"),
+    (("合同",), "7.2"),
+    (("开局", "减免"), "5.3"),
+    (("AI 边界", "AI边界", "边界", "权限", "越权"), "11.4"),
+)
+
+#: 一次最多附几节原文（多了会淹掉问题本身）
+_RULE_EXCERPTS_MAX = 3
+
+
+def _rule_excerpts(question: Optional[str]) -> list[dict]:
+    """按问题关键词取 1–3 节基线**原文摘要**（`rules_digest.digest`）。
+
+    返回 `[{key, title, summary}, ...]`；关键词一个都没命中、或基线里取不到
+    → **空列表**（不编、不猜）。节号/正文全部来自基线文件本身。
+    """
+    if not question or not isinstance(question, str):
+        return []
+
+    keys: list[str] = []
+    for words, key in _RULE_KEYWORD_SECTIONS:
+        if len(keys) >= _RULE_EXCERPTS_MAX:
+            break
+        if key in keys:
+            continue
+        if any(word and word in question for word in words):
+            keys.append(key)
+
+    out: list[dict] = []
+    for key in keys:
+        try:
+            digest = rules_digest.digest(key)
+        except Exception:  # noqa: BLE001 —— 这一节拿不到就跳过，不编
+            continue
+        summary = str(digest.get("summary") or "").strip()
+        if not summary:
+            continue
+        out.append({
+            "key": digest.get("key") or key,
+            "title": str(digest.get("title") or ""),
+            "summary": summary,
+        })
+    return out[:_RULE_EXCERPTS_MAX]
+
+
+#: 纯机制题的识别词（只问规则本身，不像在问“我这局为什么”）。
+_PURE_RULE_WORDS: tuple[str, ...] = (
+    "怎么算", "怎么计算", "如何计算", "公式", "规则是什么", "机制是什么",
+)
+
+#: 一旦出现这些词，就是“结合我这局”的问题，不用规则原文硬替换模型的回答。
+_PERSONAL_WORDS: tuple[str, ...] = (
+    "我", "当前", "这局", "本局", "本季", "为什么",
+)
+
+
+def _is_pure_rule_question(question: Optional[str]) -> bool:
+    """是不是“纯问规则公式”的机制题（不是“我这局为什么…”）。"""
+    s = str(question or "")
+    if not any(w in s for w in _PURE_RULE_WORDS):
+        return False
+    return not any(w in s for w in _PERSONAL_WORDS)
+
+
+def _mentions_rule_terms(content: str, excerpts: list[dict]) -> bool:
+    """模型回答有没有覆盖摘录里的关键公式/节号。
+
+    · §3.3.3（粮食）要求出现 `F_基准`，且出现 `0.4`；
+    · 其它节：至少出现节号（`§3.2` / `3.2`）或标题里的关键词。
+    没覆盖 → 视为“答偏了”，用原文替换。
+    """
+    text = str(content or "")
+    for ex in excerpts:
+        key = str(ex.get("key") or "")
+        if key == "3.3.3":
+            if "F_基准" in text and ("0.4" in text or "0.40" in text):
+                return True
+        elif key:
+            title = str(ex.get("title") or "")
+            words = [w for w in title.replace("（", " ").replace("）", " ").split()
+                     if len(w) >= 2]
+            if key in text or (f"§{key}" in text):
+                return True
+            if words and any(w in text for w in words[:4]):
+                return True
+    return False
+
+
+def _rule_answer_text(excerpts: list[dict]) -> str:
+    """把规则摘录拼成一段可直接给玩家看的答案（原文，不改写）。"""
+    parts = ["按《规则基线》原文："]
+    for ex in excerpts:
+        key = str(ex.get("key") or "")
+        title = str(ex.get("title") or "").strip()
+        summary = str(ex.get("summary") or "").strip().replace("```", "")
+        head = f"§{key}" + (f" {title}" if title else "")
+        parts.append(head + "\n" + summary)
+    return "\n\n".join(parts)
+
+
+def _ensure_rule_answer(
+    content: str,
+    question: Optional[str],
+    excerpts: list[dict],
+) -> str:
+    """纯机制题：模型答偏时用基线原文替换；否则保留模型回答。"""
+    if not excerpts:
+        return content
+    if not _is_pure_rule_question(question):
+        return content
+    if _mentions_rule_terms(content, excerpts):
+        return content
+    return _rule_answer_text(excerpts)
+
+
+def _compact_current_plan(plan: Optional[dict]) -> str:
+    """玩家当前草稿 → 紧凑几行（**只列非空项**，给模型看，不参与规则）。"""
+    if not isinstance(plan, dict):
+        return "（空）"
+    lines: list[str] = []
+
+    builds = plan.get("builds")
+    builds = builds if isinstance(builds, list) else []
+    if builds:
+        lines.append(f"builds（{len(builds)} 条）:")
+        for b in builds:
+            if isinstance(b, dict):
+                lines.append(
+                    f"  {b.get('plot_id')}|{b.get('plot_type')}|"
+                    f"L{b.get('target_level', 1)}|{b.get('product')}"
+                )
+            else:
+                lines.append(f"  {b}")
+    else:
+        lines.append("builds:（无）")
+
+    plot_plans = plan.get("plot_plans")
+    if isinstance(plot_plans, dict) and plot_plans:
+        rows = []
+        for pid, item in plot_plans.items():
+            if isinstance(item, dict):
+                u = item.get("u", 1.0)
+                active = item.get("active", True)
+                rows.append(f"{pid}|u={u}|{'开工' if active else '停工'}")
+            else:
+                rows.append(f"{pid}|{item}")
+        lines.append("plot_plans：" + "、".join(rows))
+
+    for key in ("purchases", "food"):
+        value = plan.get(key)
+        if isinstance(value, dict) and value:
+            lines.append(key + "：" + "、".join(f"{g}×{q}" for g, q in value.items()))
+    return "\n".join(lines)
 
 
 def _fmt(v) -> str:
@@ -670,6 +963,8 @@ def _ok_advice(
     plan_issues: Optional[list[dict]] = None,
     plan_notes: Optional[list[str]] = None,
     plan_preview: Optional[dict] = None,
+    plan_action: Optional[str] = None,
+    why: str = "",
     evidence: list[dict],
     model: str,
     rule_key: Optional[str],
@@ -684,6 +979,10 @@ def _ok_advice(
 
         `plan_notes`   —— 编译器校正说明（字符串数组，可能为空）
         `plan_preview` —— 编译后真跑 `preview` 的摘要（dict 或 None）
+
+    ★ 同日新增 `plan_action`（`AI交互与建设撤销.md` §二）：
+      `"created"` / `"edited"` / `"removed"` / `"none"` / None —— 前端据此
+      提示「AI 新建 / 编辑 / 撤销了计划」；**不是**权限字段，AI 仍无 commit。
     """
     assert summary.strip(), "空 summary 不许走成功路径 —— 应报 empty_response"
     return {
@@ -694,6 +993,10 @@ def _ok_advice(
         "plan_issues": plan_issues,
         "plan_notes": list(plan_notes or []),
         "plan_preview": plan_preview,
+        "plan_action": plan_action,
+        # ★ 模型自己写的「做了什么 + 为什么」（原话，不进规则）。
+        #   前端把它单独显示成「为什么：」一行；没有就是空串（不是编的）。
+        "why": why,
         "evidence": evidence,
         "model": model,
         "rule_key": rule_key,
@@ -714,6 +1017,8 @@ def _draft_advice(
     model: str,
     rule_key: Optional[str],
     question: Optional[str],
+    why: str = "",
+    plan_action: Optional[str] = None,
 ) -> dict:
     """draft=True 的收尾：编译器结果 → 建议形状。
 
@@ -740,6 +1045,7 @@ def _draft_advice(
             model=model,
             rule_key=rule_key,
             question=question,
+            plan_action=plan_action,
         )
 
     # ── ② 编译器自己抛了异常（输入形状完全不对等）───
@@ -756,6 +1062,7 @@ def _draft_advice(
             model=model,
             rule_key=rule_key,
             question=question,
+            plan_action=plan_action,
         )
 
     notes = list(compiled.notes or [])
@@ -784,6 +1091,7 @@ def _draft_advice(
             model=model,
             rule_key=rule_key,
             question=question,
+            plan_action=plan_action,
         )
 
     # ── ④ 编译器说能跑：plan 已过 validate + preview ──
@@ -793,13 +1101,19 @@ def _draft_advice(
         1 for pp in (plan_dict.get("plot_plans") or {}).values()
         if pp.get("active", True) and float(pp.get("u", 0) or 0) > 0
     )
-    summary = (
-        "模型起草了一份计划" +
-        (f"（含 {n_builds} 条建造、{n_plots} 块地开工）" if (n_builds or n_plots) else "")
-    )
-    if notes:
-        summary += f"；引擎校正 {len(notes)} 处（见 plan_notes）"
-    summary += "。下方 `suggested_plan` 就是它，玩家确认后可一键复制走 /api/submit。"
+    if why:
+        # ★ 2026-10-18：模型给了 `why` 就**用它当摘要** —— 玩家只要一句
+        #   「做了什么 + 为什么」(AI交互与建设撤销.md §五.4)，不贴 JSON。
+        summary = why
+    else:
+        summary = (
+            "模型起草了一份计划" +
+            (f"（含 {n_builds} 条建造、{n_plots} 块地开工）"
+             if (n_builds or n_plots) else "")
+        )
+        if notes:
+            summary += f"；引擎校正 {len(notes)} 处（见 plan_notes）"
+        summary += "。下方 `suggested_plan` 就是它，玩家确认后可一键复制走 /api/submit。"
 
     preview = compiled.preview or None
     if isinstance(preview, dict):
@@ -821,6 +1135,8 @@ def _draft_advice(
         model=model,
         rule_key=rule_key,
         question=question,
+        plan_action=plan_action,
+        why=why,
     )
 
 

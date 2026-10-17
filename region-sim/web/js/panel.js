@@ -75,6 +75,7 @@ async function refresh(){
 function renderAll(){
   renderTop(); renderMap(); renderPlots(); renderMarket();
   renderFood(); renderProj(); renderReport(); renderBuildPanel();
+  renderBuilds();        // ★ 已排建设（本季草稿，逐条可撤销）
   renderQuota(); renderQuote();
   renderNarr();          // ★ 新闻 + 财报解读（引擎/服务层给什么就显示什么）
 }
@@ -151,6 +152,49 @@ $("btn-stopall").onclick = () => {
   renderPlots();
   schedulePreview();
 };
+
+/* ── 已排建设（本季草稿，逐条可撤销）─────────────────────
+   · 数据只读 `plan.builds`（本地草稿）；**不提交、不动 STATE.plots**；
+   · 类型只查 TYPE_CN 显示，产物/路线原样显示；价格/工期一律不在前端算
+     （那两项以 /api/simulate 与 build_quote 的回包为准）；
+   · 撤销 = splice 掉这一条 → 整页重画（地图影子/建造面板一起刷新）
+     → schedulePreview() 用缩小后的计划重新只读试算。 */
+function renderBuilds(){
+  const el = $("builds-body");
+  if (!el) return;
+  const builds = Array.isArray(plan.builds) ? plan.builds : [];
+  if (!builds.length){
+    el.innerHTML = `<p class="muted" style="margin:4px 0 0">本季还没有建造指令。</p>`;
+    return;
+  }
+  el.innerHTML = `<table><thead><tr>
+      <th>地块</th><th>类型</th><th class="num">目标等级</th>
+      <th>产物 / 路线</th><th></th>
+    </tr></thead><tbody>` +
+    builds.map((b, i) => {
+      const pid  = (b && b.plot_id != null) ? String(b.plot_id) : "—";
+      const type = (b && b.plot_type) ? (TYPE_CN[b.plot_type] || String(b.plot_type)) : "—";
+      const lvl  = (b && b.target_level != null) ? String(b.target_level) : "—";
+      const prod = (b && b.product) ? String(b.product) : "—";
+      return `<tr>
+        <td>${esc(pid)}</td>
+        <td>${esc(type)}</td>
+        <td class="num">${esc(lvl)}</td>
+        <td>${esc(prod)}</td>
+        <td class="num"><button data-idx="${i}">撤销</button></td>
+      </tr>`;
+    }).join("") + `</tbody></table>`;
+
+  el.querySelectorAll("button[data-idx]").forEach(btn => {
+    btn.onclick = () => {
+      const idx = Number(btn.dataset.idx);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= plan.builds.length) return;
+      plan.builds.splice(idx, 1);   // 只删本地草稿这一条（不提交、不动地块）
+      renderAll();                  // 地图影子 / 建造面板 / 列表自身一起刷新
+      schedulePreview();            // 缩水后的计划重新只读试算（不提交）
+    };
+  });
+}
 
 /* ── 市场 ─────────────────────────────────────────────── */
 function renderMarket(){
@@ -515,6 +559,7 @@ $("btn-build").onclick = async () => {
   $("btn-build").disabled = true;
   selected = null;
   renderMap(); renderBuildPanel();
+  renderBuilds();            // ★ 已排建设列表同步显示刚下的这一条
   schedulePreview();
 };
 $("btn-cancel").onclick = () => { selected = null; renderMap(); renderBuildPanel(); };
@@ -652,6 +697,17 @@ function publicPlan(){
 }
 
 $("btn-settle").onclick = async () => {
+  /* ★ 2026-10-18 修「点结算后遮罩永不消失、进不了下一季」（实测 107 秒仍卡）：
+     根因是下面那行把 `showStateLoadingNow` 写成了 `setStateLoadingNow`（不存在）
+     → 流水推完后抛 ReferenceError（在 await 之后、Promise.all 之前），
+       被外层 catch 吞成一条 toast，而当时**没有 finally** → hideStateLoading 永不执行。
+     现在四道保险：
+       ① 整段 try/catch/finally，finally 里 `forceHideStateLoading()`（不信任 _slDepth）；
+       ② 流水带 8s watchdog —— 它只是"看头"，绝不能挡住结算；
+       ③ `eq.state`（end_quarter 回包自带，phase=report）先兜底渲染 →
+          「下一季 ▶」立刻可点，不依赖任何后续请求；
+       ④ /api/state + /api/map 覆盖为最新，失败/12s 超时只提示、保留 eq.state。 */
+  let eq = null;
   try{
     const r = await api("POST", "/api/submit", {game:GAME, player:PLAYER, plan: publicPlan()});
     STATE = r.state; renderAll();
@@ -662,38 +718,77 @@ $("btn-settle").onclick = async () => {
     showStateLoadingNow(`结算第 ${STATE.quarter} 季…`, "正在推进工程 / 生产 / 求价 / 扣款——引擎在真算，请稍候。");
     pushSettlementLine(`结算第 ${STATE.quarter} 季…`, "dim");
 
-    const eq = await api("POST", "/api/end_quarter", {game:GAME, player:PLAYER});
+    eq = await api("POST", "/api/end_quarter", {game:GAME, player:PLAYER});
 
-    /* end_quarter 一回包，立刻把 report 里的关键项**每 ~320ms 一条**逐条涌上。
-       "**全部数字来自引擎**（`QuarterReport.to_dict`），前端只负责挑与摆"。 */
+    /* end_quarter 一回包，立刻把 report 里的关键项**每 ~140ms 一条**逐条涌上。
+       "**全部数字来自引擎**（`QuarterReport.to_dict`），前端只负责挑与摆"。
+       ② 流水最多等 8 秒：抽行/推行任何一环出问题都不许卡住结算。 */
     const reportForStream = (eq && eq.report) || null;
-    const lines = settlementLinesFromReport(reportForStream);
-    /* 头一行已 push 过（上面那行），这里跳过 lines[0]（它就是"结算第 N 季…"）。 */
-    await streamSettlementLines(lines.slice(1), 140);
-
-    /* 流完 → **立刻刷新数字**（/api/state 默认不再生成叙事），
-       新闻/财报交给 loadNarratives() 在后台单独打 /api/narratives。
-       ⚠️ 这里绝不能再等叙事：两路模型 1–3 分钟，会把“结算”拖成两分钟。 */
-    setStateLoadingNow("正在刷新界面…", "结算已完成；新闻/财报在后台生成，不会拖住数字。");
-    let st, mp;
+    let lines = [];
+    try{ lines = settlementLinesFromReport(reportForStream); }
+    catch(_e){ lines = []; }        // 展示辅助函数出错 → 当作"没有可推行"
     try{
-      [st, mp] = await Promise.all([
-        api("GET", "/api/state", null,
-            {game:GAME, player:PLAYER, narratives:"0"}),
-        api("GET", "/api/map", null, {game:GAME, player:PLAYER}),
+      await Promise.race([
+        streamSettlementLines(lines.slice(1), 140),   // lines[0] 上面已 push 过
+        new Promise(res => setTimeout(res, 8000)),
       ]);
-    }finally{
-      hideStateLoading();
+    }catch(_e){ /* 流水异常不影响结算 */ }
+
+    /* ③ 兜底渲染：`eq.state` 是 end_quarter **当场**给的（phase=report、含上季报告）。
+       先把它画出来 —— 就算后面所有请求都死掉，「下一季 ▶」也已经可点。 */
+    if (eq && eq.state) STATE = eq.state;
+    resetPlan();                    // 计划已随结算消耗掉
+    if (!WORKS.length){             // 极少数情况（没走过 refresh）补一次建造选项
+      try{ const w = await api("GET", "/api/build_options"); WORKS = w.works; }catch(_e){}
     }
-    STATE = st.state; MAP = mp.map;
-    resetPlan();
-    renderAll();
-    loadNarratives();                 // 不 await：数字已显示，叙事后台来
+    try{ renderAll(); }catch(_e){ /* 兜底渲染失败也不能挡住收尾 */ }
+
+    /* ④ 覆盖为最新数字（narratives:"0" → 不生成叙事；
+       新闻/财报交给 loadNarratives() 在后台单独打 /api/narratives）。
+       ⚠️ 这里绝不能再等叙事：两路模型 1–3 分钟，会把“结算”拖成两分钟。
+       刷新失败/超时 → 保留上面的 eq.state，只提示，绝不留在遮罩里。 */
+    showStateLoadingNow("正在刷新界面…", "结算已完成；新闻/财报在后台生成，不会拖住数字。");
+    let st = null, mp = null, refreshErr = null;
+    try{
+      [st, mp] = await Promise.race([
+        Promise.all([
+          api("GET", "/api/state", null,
+              {game:GAME, player:PLAYER, narratives:"0"}),
+          api("GET", "/api/map", null, {game:GAME, player:PLAYER}),
+        ]),
+        new Promise((_res, rej) =>
+          setTimeout(() => rej(new Error("界面刷新超时（12 秒没回来）")), 12000)),
+      ]);
+    }catch(e){ refreshErr = e; }
+
+    if (!refreshErr && st && st.state){
+      STATE = st.state;
+      if (mp && mp.map) MAP = mp.map;
+      try{ renderAll(); }catch(_e){ /* 渲染异常不阻塞收尾 */ }
+      loadNarratives();             // 不 await：数字已显示，叙事后台来
+    }else{
+      toast("已结算；界面刷新失败，可点下一季", "warn");
+    }
     await refreshGames();
-    toast(`第 ${STATE.quarter - 1} 季已结算。` +
-          `期末现金 ${fmt(STATE.cash)}　幸福度 ${fmt(STATE.happiness)}` +
-          (STATE.report ? `　增加值 ${fmt(STATE.report.value_added)}` : ""), "ok");
-  }catch(e){ fail(e); }
+
+    if (!refreshErr && STATE){
+      toast(`第 ${STATE.quarter - 1} 季已结算。` +
+            `期末现金 ${fmt(STATE.cash)}　幸福度 ${fmt(STATE.happiness)}` +
+            (STATE.report ? `　增加值 ${fmt(STATE.report.value_added)}` : ""), "ok");
+    }
+  }catch(e){
+    fail(e);
+    /* 万一异常发生在"已经结算成功"之后（未知渲染坑等），仍用回包把界面
+       切到 report 阶段 —— 宁可提示刷新失败，也不能让玩家停在旧季度。 */
+    if (eq && eq.state){
+      try{
+        STATE = eq.state; resetPlan(); renderAll();
+        toast("已结算；界面刷新失败，可点下一季", "warn");
+      }catch(_e2){ /* 兜底本身失败也不能连累 finally */ }
+    }
+  }finally{
+    forceHideStateLoading();       // ★ 所有出口（含异常/超时）都必须撤遮罩
+  }
 };
 
 $("btn-next").onclick = async () => {
@@ -725,6 +820,33 @@ function applySuggestedPlan(sp){
   plan.food       = (sp && typeof sp.food       === "object" && sp.food)       ? sp.food       : {};
   plan.builds     = Array.isArray(sp && sp.builds)    ? sp.builds    : [];
   plan.contracts  = Array.isArray(sp && sp.contracts) ? sp.contracts : [];
+}
+
+/* ── 机制题 / 规划题分流（与后端同一套关键词；前端先判一版，后端仍可改判）──
+   · 强动作词优先：只要出现「建/造/取消/撤销/删/安排/…/改」，就是让我动手 → plan；
+   · 否则出现机制词（怎么算/为什么/是什么/…）→ answer：只解释，不生成计划；
+   · 都不沾 → auto：交给后端判断（闲聊、模糊请求都走这条）。
+   返回 "answer" | "plan" | "auto"（原样塞进 /api/ai/advise 的 mode）。 */
+const AI_ACTION_WORDS = ["建","造","取消","撤销","删","安排","起草","填",
+                         "开工","停工","买","卖","改"];
+const AI_MECHANISM_WORDS = ["怎么算","为什么","是什么","机制","规则","解释",
+                            "原理","公式","多少","区别","能不能"];
+
+function detectAiMode(q){
+  const s = String(q == null ? "" : q);
+  if (AI_ACTION_WORDS.some(w => s.includes(w))) return "plan";
+  if (AI_MECHANISM_WORDS.some(w => s.includes(w))) return "answer";
+  return "auto";
+}
+
+/* AI 这次是不是「撤销建造」类动作：后端 plan_action="removed"，
+   或校正说明里点名撤销/移除建造。命中时确认措辞改成「撤销＋保留其余」。 */
+function planRemovesBuilds(adv){
+  if (!adv) return false;
+  if (adv.plan_action === "removed") return true;
+  const notes = Array.isArray(adv.plan_notes) ? adv.plan_notes : [];
+  return notes.some(n =>
+    typeof n === "string" && /撤销|移除建造/.test(n));
 }
 
 /* ── 对话气泡（历史只存内存；本页内保留）──────────────────── */
@@ -798,7 +920,15 @@ $("btn-ai-send").onclick = async () => {
   status.textContent = "秘书在想…（真调模型可能要几十秒，请稍候，页面没死）";
   status.style.color = "var(--warn)";
 
-  const body = { game: GAME, player: PLAYER, question: q, draft: true };
+  /* ★ 带上当前草稿与模式（新契约，后端可缺省忽略）：
+     · current_plan：让后端「续写/只撤这一条」，而不是每次从零起草；
+     · mode：前端按同一套关键词先判一版 —— answer = 机制题（只解释、不落表）、
+       plan = 有强动作词（要我动手）、auto = 其余交给后端判。 */
+  const body = {
+    game: GAME, player: PLAYER, question: q, draft: true,
+    current_plan: publicPlan(),
+    mode: detectAiMode(q),
+  };
   let resp;
   try{
     resp = await api("POST", "/api/ai/advise", body);
@@ -844,17 +974,36 @@ $("btn-ai-send").onclick = async () => {
       return;
     }
 
-    /* ②b：拿到一份能用的草案 → **直接落到界面**，不显示 JSON。 */
+    /* ②b：拿到一份能用的草案 → 落表前先过「不覆盖手填草稿」这道闸。 */
     if (sp){
-      /* 引擎侧的两块补充（新契约，可能缺省）：校正说明条数 / 试算摘要。 */
+      /* 引擎侧的三块补充（新契约，可能缺省）：校正说明条数 / 试算摘要 / 撤销标记。 */
       const nNotes = Array.isArray(adv.plan_notes) ? adv.plan_notes.length : 0;
       const noteLines = planNoteLines(adv.plan_notes);
       const pv = (adv.plan_preview && typeof adv.plan_preview === "object")
         ? adv.plan_preview : null;
+      const isRemove = planRemovesBuilds(adv);
+      const why = (typeof adv.why === "string" && adv.why.trim()) ? adv.why.trim() : "";
 
-      /* 落进去之前先看玩家本地**已有**的草稿子：如果玩家自己已经在攒计划，
-         AI 这份会把他的草稿**整个替换**。给一句提醒，免得玩家以为计划凭空变了。 */
+      /* ★ 不覆盖玩家手填的草稿：本地已有任何东西 → 先问；不答应就**一个字都不落表**，
+         只把 AI 的 summary / 校正说明留在气泡里给她参考。 */
       const hadLocal = !planEmpty();
+      if (hadLocal){
+        const ok = window.confirm(isRemove
+          ? "AI 要撤销部分建造并保留其余安排，应用吗？"
+          : "你已经有本地草稿。应用 AI 的计划会替换/编辑它，继续吗？");
+        if (!ok){
+          status.textContent = "已保留你的草稿（AI 计划未落表）";
+          let kept = "已保留你的草稿；这次没有落表。\n\n" + summary;
+          if (why) kept += "\n\n为什么：" + why;
+          if (noteLines) kept += "\n\n引擎校正：\n" + noteLines;
+          kept += "\n\n想让它生效：再发一次，在弹窗里点「确定」。";
+          aiBubble("ai", kept, "warn",
+            (model ? `模型：${model}${ruleKey ? " · " + ruleKey : ""}` : "") +
+            `\n——AI 只起草，提交仍由你点「▶ 推进本季度」。`);
+          return;
+        }
+      }
+
       applySuggestedPlan(sp);
       selected = null;
       renderAll();
@@ -862,12 +1011,15 @@ $("btn-ai-send").onclick = async () => {
          提交仍只有玩家手动点「▶ 推进本季度」一条路。 */
       schedulePreview();
 
-      status.textContent = `已拿到草案（${draftSummaryLines(sp)}）` +
+      status.textContent = `已拿到草案（${draftSummaryLines(sp)}${isRemove ? " · 含撤销" : ""}）` +
         (model ? ` · 模型：${model}` : "") +
         (nNotes > 0 ? ` · 引擎校正 ${nNotes} 处` : "");
 
-      /* 气泡正文：summary → 引擎校正逐条 → 试算；哪块没有就整段不出现（不写 undefined）。 */
+      /* 气泡正文：summary → 撤销确认 → 为什么 → 引擎校正逐条 → 试算；
+         哪块没有就整段不出现（不写 undefined、不贴 JSON）。 */
       let text = summary;
+      if (adv.plan_action === "removed") text += "\n\n已按你的要求撤销建造。";
+      if (why) text += "\n\n为什么：" + why;
       if (noteLines) text += "\n\n引擎校正：\n" + noteLines;
       if (pv && pv.total_deduction != null && pv.cash_after != null){
         text += `\n\n试算：本季扣款 ${fmt(pv.total_deduction)}，结算后约 ${fmt(pv.cash_after)}`;
@@ -878,7 +1030,7 @@ $("btn-ai-send").onclick = async () => {
         "",
         (model ? `模型：${model}${ruleKey ? " · " + ruleKey : ""}` : "") +
         `\n——这是 AI 起草的，你可以改；提交仍由你点「▶ 推进本季度」。` +
-        (hadLocal ? `\n（提醒：这次把你之前在攒的本地草稿**整个替换**了。）` : ""));
+        (hadLocal ? `\n（提醒：按你确认，之前攒的本地草稿已被这份计划替换。）` : ""));
       return;
     }
 

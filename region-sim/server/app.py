@@ -408,6 +408,22 @@ class App:
         """
         session = self.registry.get(_need(body, "game"))
         player_id = _need(body, "player")
+
+        # ★ 意图分流（`AI交互与建设撤销.md` §二/§四，2026-10-18）：
+        #   `mode` 由前端给（省略则 "auto"），**本层只做三条硬翻译**：
+        #     · "answer" → draft=False（只解释机制，不产出计划）；
+        #     · "plan"   → draft=True （按当前草稿起草/编辑）；
+        #     · 其它     → 沿用 body.draft（旧行为：默认为 False）。
+        #   ⚠️ 关键词判断不在这里做 —— 后端只认前端给的 mode（§四）。
+        mode = str(body.get("mode") or "auto").strip().lower()
+        if mode not in ("auto", "answer", "plan"):
+            mode = "auto"
+        draft = bool(body.get("draft", False))
+        if mode == "answer":
+            draft = False
+        elif mode == "plan":
+            draft = True
+
         advice = ai_host.advise(
             session,
             player_id,
@@ -417,7 +433,12 @@ class App:
             # 不传时 ai_host 用它自己的默认 None，行为与旧版完全一致。
             preview_plan=body.get("preview_plan"),
             # 可选「让模型自己起草一份 Plan」（默认 False，与旧行为一致）。
-            draft=bool(body.get("draft", False)),
+            draft=draft,
+            # ★ 前端表单里的**当前草稿**（未提交也算）——非空时 ai_host 走
+            #   「编辑模式」：只删/追加/改提到的项，不默认全开工、不补口粮。
+            current_plan=body.get("current_plan"),
+            # ★ 意图（auto/answer/plan）原样透传，给主机层留痕用。
+            mode=mode,
         )
         return {"ok": bool(advice.get("ok")), "advice": advice}
 
