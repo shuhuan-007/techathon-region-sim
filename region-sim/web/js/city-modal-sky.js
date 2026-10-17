@@ -61,15 +61,19 @@ window.APP = window.APP || {};
        大一点     → SKY_W 5→8, SKY_H 2.8→4.5, 中心 y=2.25
        远一点     → open()/refresh() 里把 cz 往 bbox 中心 -z 方向推
        相机 pos y=7.5 俯视 y=0/向 cz+ 方向 → 屏正面向相机 →
-       rotation.x = -π/9（≈ -20°，屏面向上微仰接相机俯角）
+       rotation.x = +π/9（≈ +20°，屏面向下倾朝地面，用户 v10 拍板「差了 20°」的方向校正）
 
      v9：「地块远处」。
        屏宽 SKY_W 8→10，屏高 SKY_H 4.5→5.5，SKY_Y 随动 2.75。
        位置不再用常数 -3，而是 cz - _skyDistance()
        = cz - max(6, bbox_side + 3)。 */
-  /* 屏幕物理尺寸(场景单位,1 = 1 cell) */
-  const SKY_W = 10.0;
-  const SKY_H = 5.5;
+  /* 屏幕物理尺寸(场景单位,1 = 1 cell)
+     v10 拍板（2026-10-18 用户）：继续放大 + 倾斜方向倒过来。
+     SKY_W 10→13、SKY_H 5.5→7。SKY_Y 自动 = 3.5（下边缘贴地规矩保持）。
+     rotation.x 从 -π/9 → +π/9：反向 20°（v9 是上缘向你倾朝天，
+     v10 是下缘向你倾朝地，"差了 20°" 的方向校正）。 */
+  const SKY_W = 13.0;
+  const SKY_H = 7.0;
   /* 屏幕中心高度：下边缘贴地 */
   const SKY_Y = SKY_H / 2;
   /* canvas 像素尺寸(固定;微糊效果是有意的,呼应"掛在天上"的氛围) */
@@ -473,8 +477,10 @@ window.APP = window.APP || {};
        _skyDistance() = max(6, side + 3)，退出 bbox 之外。
        y 由 SKY_Y = SKY_H/2 = 2.75 决定（下边缘贴地）。 */
     mesh.position.set(cx, SKY_Y, cz - _skyDistance());
-    /* rotation.x -π/9 ≈ -20°：屏面向上微仰迎向相机俯角（v8 拍板）。 */
-    mesh.rotation.x = -Math.PI / 9;  /* = -π/9 ≈ -20° */
+    /* rotation.x +π/9 ≈ +20°：屏面向下倾朝地面一侧（v10 拍板「差了 20°」方向校正）。
+       v9 的 -π/9（上缘向你倾朝天）用户看到 "倾向天上"。
+       +20° 反过来：下缘向你倾朝地 → 玩家看到的是"面向自己的招牌" 的场景感。 */
+    mesh.rotation.x = Math.PI / 9;  /* = +π/9 ≈ +20° */
     mesh.renderOrder = 1000;    /* depthTest=false 时压底渲染,确保最后画 */
     /* 不调 lookAt —— 静止的天上屏 */
     scene.add(mesh);
