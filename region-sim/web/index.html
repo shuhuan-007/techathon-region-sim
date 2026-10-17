@@ -396,6 +396,26 @@ function hideStateLoading(){
 }
 
 /* 会重复触发"拉状态"或"上交计划"的按钮（建造按钮走自身 disabled 流，单独管）。 */
+/* ★ 「推进本季度」什么时候可点（2026-10-17 修）：
+ *
+ *   ⚠️ 原来这里判的是 `STATE.can_settle`，而 `can_settle` 的语义是
+ *      「**计划已经提交** + 过校验 + 试算跑得通」。
+ *
+ *   但前端现在改成「建造只改本地计划，提交由这个按钮触发」之后，
+ *   `can_settle` 就永远是 false —— 于是按钮**永远禁用**，玩家根本无法进入下一季度。
+ *   这是个死锁（改 A 引入 B 失效）。
+ *
+ *   正确口径：**只要处在行动阶段（collecting）就可点**。
+ *   点了之后前端先 submit（不合法就报错、不结算），成功再 end_quarter；
+ *   一个"空计划"也是合法计划（不安排＝不开工，§11.3）。
+ */
+function settleEnabled(s){
+  if (!s) return false;
+  if (s.phase !== "collecting") return false;
+  /* 已经提交过（can_settle 为真）当然也能点 */
+  return true;
+}
+
 const _SL_BTNS = ["btn-settle","btn-next","btn-runall","btn-stopall","btn-load","btn-new","btn-ai-ask","btn-ai-draft"];
 function setActionButtonsDisabled(off){
   _SL_BTNS.forEach(id => {
@@ -415,7 +435,7 @@ function setActionButtonsDisabled(off){
   if (!off && STATE){
     const report = STATE.phase === "report";
     const bs = $("btn-settle");
-    if (bs && !report) bs.disabled = !STATE.can_settle;
+    if (bs) bs.disabled = report || !settleEnabled(STATE);
   }
 }
 
@@ -524,7 +544,7 @@ function renderTop(){
   $("s-phase").textContent = phaseName;
 
   const report = s.phase === "report";
-  $("btn-settle").disabled = !s.can_settle;
+  $("btn-settle").disabled = report || !settleEnabled(s);
   $("btn-settle").classList.toggle("hidden", report);
   $("btn-next").classList.toggle("hidden", !report);
   $("btn-settle").title = (s.settle_blockers || []).join("\n");
