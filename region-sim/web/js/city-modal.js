@@ -1,59 +1,94 @@
-/* APP.cityModal —— 全屏 3D 城市预览 modal（备用方案/死胡同退路）
+/* APP.cityModal —— 全屏 3D 城市预览 modal（多角度 + 阴影 + 蓝黑背景）
    ─────────────────────────────────────────────────────────────
    与 APP.map3d 完全独立的第二份 three.js 实例：自己的 canvas /
    scene / camera / renderer，互不共享,避免互相污染。
 
-   设计（2026-10-17，用户拍板的死胡同退路）
+   v2 改造（2026-10-17，用户原话）
    ─────────────────────────────────────────────────────────────
-   · 用户在地图 panel 点「🏙️ 3D 城市」按钮 → 全屏 modal 打开,
-     中间 900×600 canvas 显示 10×10 网格上的 glb 模型 + 一块深绿底盘。
-   · **只读**——没有 OrbitControls、没有点击/拖拽/滚轮事件,
-     相机位置一次性写死,就只渲染一帧静态图。
-   · 世界坐标系：
-       x 向右 = 地图 col 方向,
-       y 向上,
-       z 朝地图 row 方向（顶视时 row 向屏幕下 ≈ z 朝屏幕外下）。
-     cell (row,col) 中心放在 (col+0.5, 0, row+0.5) —— 与主线 map3d
-     的"先摆后绕 -π/2"约定不一致是有意的：这里我们直接把模型当
-     顶视放、相机斜俯拍,不需要把 glb 翻 90°。
-     ⚠️ 但 glb 作者建模时 +y 是"上",本 modal 相机在 (5,12,5)
-     斜向下看 (5,0,5),所以模型只要 y 朝上即可,**不需要**绕 x 转。
-   · scale：同主线——Box3 实测水平跨距,缩到 cell 尺寸 0.9。
-   · constructing 灰化:同主线 MeshBasicMaterial 0x888888。
-   · glb 加载：自己一份 _gltfCache（不共享主线）,加载逻辑复制
-     主线带 15s timeout 防悬挂,但 warn 前缀改成 [cityModal]。
+   用户：「预览一定要做出来，能从多角度预览，背景不能是墨绿色，
+   每一个地块应该有 3*3=9 个原本的建模……做鼠标旋转/缩放/平移。」
+   落点：
+   · OrbitControls（vendor 手工转 UMD，挂在 THREE.OrbitControls）
+     - enableDamping = true，dampingFactor = 0.06
+     - minDistance = 4，maxDistance = 40
+     - maxPolarAngle = π / 2.1（不让用户钻到地下）
+   · 相机：透视 FOV 45、near 0.1 far 200，position (10, 11, 10)、
+     lookAt (5, 0, 5)。
+   · cell_spacing = 1.0 → plot (col, row) 摆到 (col+0.5, 0, row+0.5)。
+     Box3 实测水平跨距后 scale 到 (0.95 * cell_spacing) / horizSpan，
+     让 glb 几乎贴满 1×1 网格。
+   · glb 本身已经是 3×3 烘焙阵（拍板 v7 §3），摆 1 次就是 9 个建模，
+     不在这里 clone 9 次。
+   · 背景 = var(--bg) ≈ #12161c → renderer.setClearColor(0x12161c)。
+   · 底盘 PlaneGeometry(20, 20) × MeshStandardMaterial(0x1a2130)，
+     中心 (5, -0.01, 5)，receiveShadow = true。**不是墨绿**。
+   · 灯光三件套：Ambient 0.55 + Directional 0.85 + castShadow （位置
+     (20, 30, 15), shadow.camera ±15, mapSize 2048²) + Hemisphere 0.3。
+   · 阴影：renderer.shadowMap.enabled = true, type PCFSoftShadowMap，
+     每个模型 traverse 上 cast/receiveShadow=true。
+   · Esc / ✕ / 点遮罩关闭：打开时启动 requestAnimationFrame 循环
+     （让 OrbitControls damping 生效、模型在动画中持续渲染），关闭时
+     停止循环（_rafId）。
+   · constructing 2026-10-18 拍板 v3：用专用 `在建` 模型（在建.glb），
+     不再用灰化 variant。running/constructing 都走彩色原色（pbr 资产真色）。
    ───────────────────────────────────────────────────────────── */
 window.APP = window.APP || {};
 (function (APP) {
   /* 内部状态 */
-  let _canvas = null;          // <canvas id="city-canvas">
-  let _renderer = null;        // THREE.WebGLRenderer
-  let _scene = null;           // THREE.Scene
-  let _camera = null;          // THREE.OrthographicCamera
-  let _plotGroup = null;       // 每次 _renderCity 清空重摆
-  let _ground = null;          // 底盘 mesh,一次建好常留
+  let _canvas = null;
+  let _renderer = null;
+  let _scene = null;
+  let _camera = null;          // THREE.PerspectiveCamera
+  let _controls = null;        // THREE.OrbitControls
+  let _plotGroup = null;
+  let _ground = null;
   let _enabled = true;
   let _failedUrls = {};
+  let _rafId = 0;              // animation frame id
+  let _isOpen = false;
 
   const _gltfCache = {};       // name → Promise<GLTF>（独立缓存）
   let _gltfLoader = null;
 
-  /* canvas 与相机的固定尺寸（900×600 / 父代拍板） */
-  const CANVAS_W = 900, CANVAS_H = 600;
+  /* canvas 固定尺寸（1200×750 / 本次约定） */
+  const CANVAS_W = 1200, CANVAS_H = 750;
+  const CELL_SPACING = 1.0;
+  const GRID_CENTER = 5.0;
 
   function _open(){
     const m = document.getElementById('city-modal');
     if (!m) return;
     m.classList.remove('hidden');
+    _isOpen = true;
     _ensureRenderer();
     _renderCity();
+    _startLoop();
   }
 
   function _close(){
     const m = document.getElementById('city-modal');
     if (m) m.classList.add('hidden');
-    // 不 destroy gltf cache——下次打开还能复用
-    if (_plotGroup) _plotGroup.clear();
+    _isOpen = false;
+    _stopLoop();
+    /* 不 destroy gltf cache——下次打开还能复用；不清 _plotGroup，让
+       下次打开瞬间可以一次性把旧场面替换掉而不是空白闪烁。 */
+  }
+
+  function _startLoop(){
+    if (_rafId) return;
+    const tick = () => {
+      if (!_isOpen){ _rafId = 0; return; }
+      _rafId = requestAnimationFrame(tick);
+      if (_controls) _controls.update();
+      _renderFrame();
+    };
+    _rafId = requestAnimationFrame(tick);
+  }
+  function _stopLoop(){
+    if (_rafId){
+      cancelAnimationFrame(_rafId);
+      _rafId = 0;
+    }
   }
 
   function _ensureRenderer(){
@@ -62,44 +97,74 @@ window.APP = window.APP || {};
       console.warn('[cityModal] THREE 或 GLTFLoader 未加载 — modal 关闭');
       _enabled = false; return;
     }
+    if (typeof THREE.OrbitControls === 'undefined'){
+      console.warn('[cityModal] THREE.OrbitControls 未加载 — modal 关闭');
+      _enabled = false; return;
+    }
     _canvas = document.getElementById('city-canvas');
     if (!_canvas){ _enabled = false; return; }
     try {
       _renderer = new THREE.WebGLRenderer({
-        canvas: _canvas, antialias: false, alpha: false,
+        canvas: _canvas, antialias: true, alpha: false,
         powerPreference: 'low-power',
       });
       _renderer.setPixelRatio(1);
       _renderer.setSize(CANVAS_W, CANVAS_H, /*updateStyle*/false);
-      _renderer.setClearColor(0x0a0f14, 1);
+      _renderer.setClearColor(0x12161c, 1);
+      _renderer.shadowMap.enabled = true;
+      _renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      /* 不启用 sRGBEncoding —— glb 材质已经按 r140 默认 linear-space
+         显示正确,强开反而出现"整屏高亮钢灰"的偏色。 */
     } catch(e){
       console.warn('[cityModal] WebGLRenderer 构造失败:', e);
       _enabled = false; return;
     }
+
     _scene = new THREE.Scene();
-    /* 光照：与主线 map3d 同款（Ambient 1.0 + 两盏方向光）*/
-    _scene.add(new THREE.AmbientLight(0xffffff, 1.0));
-    const dirA = new THREE.DirectionalLight(0xffffff, 0.6);
-    dirA.position.set(1, 1, 1.5);
-    _scene.add(dirA);
-    const dirB = new THREE.DirectionalLight(0xffffff, 0.4);
-    dirB.position.set(-1, -1, 1);
-    _scene.add(dirB);
 
-    /* 正交相机俯视 —— 父代拍板：
-       position (5, 12, 5) → lookAt (5, 0, 5),
-       Ortho frustum -6..6 / -4..4(对应 900×600 比例 3:2)。 */
-    _camera = new THREE.OrthographicCamera(-6, 6, 4, -4, 0.1, 100);
-    _camera.position.set(5, 12, 5);
+    /* 灯光三件套：Ambient（主环境） + Directional（主阴影） + Hemisphere（氛围） */
+    _scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.85);
+    dir.position.set(20, 30, 15);
+    dir.castShadow = true;
+    dir.shadow.mapSize.set(2048, 2048);
+    dir.shadow.camera.left = -15;
+    dir.shadow.camera.right = 15;
+    dir.shadow.camera.top = 15;
+    dir.shadow.camera.bottom = -15;
+    dir.shadow.camera.near = 1;
+    dir.shadow.camera.far = 80;
+    dir.shadow.bias = -0.0005;
+    _scene.add(dir);
+    _scene.add(new THREE.HemisphereLight(0x87ceeb, 0x5c4a3a, 0.3));
+
+    /* 透视相机 */
+    _camera = new THREE.PerspectiveCamera(45, CANVAS_W / CANVAS_H, 0.1, 200);
+    /* 比拍板的 (10,11,10) 略近略低一点,让 1×1 cell 里的 3×3 子模型
+       有足够像素可辨。距离≈10.6,极角≈40°（俯视但不顶视）。 */
+    _camera.position.set(10.5, 7.5, 10.5);
     _camera.up.set(0, 1, 0);
-    _camera.lookAt(5, 0, 5);
-    _camera.updateProjectionMatrix();
+    _camera.lookAt(GRID_CENTER, 0, GRID_CENTER);
 
-    /* 底盘：BoxGeometry(11, 0.3, 11),top 面在 y=0,深绿色 */
-    const groundGeo = new THREE.BoxGeometry(11, 0.3, 11);
-    const groundMat = new THREE.MeshLambertMaterial({ color: 0x2a4a2a });
+    /* OrbitControls：阻尼、限制滚出地面 */
+    _controls = new THREE.OrbitControls(_camera, _canvas);
+    _controls.target.set(GRID_CENTER, 0, GRID_CENTER);
+    _controls.enableDamping = true;
+    _controls.dampingFactor = 0.06;
+    _controls.minDistance = 4;
+    _controls.maxDistance = 40;
+    _controls.maxPolarAngle = Math.PI / 2.1;
+    _controls.update();
+
+    /* 底盘：平面（20×20）中心 (5, -0.01, 5)，蓝黑，收影 */
+    const groundGeo = new THREE.PlaneGeometry(20, 20);
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0x1a2130, roughness: 1.0, metalness: 0.0,
+    });
     _ground = new THREE.Mesh(groundGeo, groundMat);
-    _ground.position.set(5, -0.15, 5);
+    _ground.rotation.x = -Math.PI / 2;
+    _ground.position.set(GRID_CENTER, -0.01, GRID_CENTER);
+    _ground.receiveShadow = true;
     _scene.add(_ground);
 
     _plotGroup = new THREE.Group();
@@ -107,8 +172,7 @@ window.APP = window.APP || {};
     _gltfLoader = new THREE.GLTFLoader();
   }
 
-  /* 异步加载一份 glb（独立缓存 + 15s timeout 防悬挂）。
-     与主线 _loadGlb 同一份代码,只是 warn 前缀不同。 */
+  /* 异步加载一份 glb（独立缓存 + 15s timeout 防悬挂）。 */
   function _loadGlb(name){
     if (_gltfCache[name]) return _gltfCache[name];
     const url = '/static/assets/plots/' + encodeURIComponent(name) + '.glb';
@@ -145,39 +209,109 @@ window.APP = window.APP || {};
     return _gltfCache[name];
   }
 
-  /* 把 gltf 实例摆到 (x, 0, z) —— glb 必须 y 朝上,相机已经配好俯视角度。
-     scale = 0.9 / max(size.x, size.z)（让 glb 最宽处恰好 0.9 个 cell 单位,
-     cell 中心间距 1.0,模型间不重叠,再加 1.1 倍水平跨距更宽限）。
-     asGray=true 时换共享灰色 Basic 材质。 */
-  function _placeGlb(gltf, x, z, asGray){
+  /* 把 gltf 实例摆到 (x, 0, z)。
+     glb 必须 y 朝上（外层 wrapper 不翻 -π/2——作者建模时 +y 就是上，
+     底盘也在 y=0 平面）；
+     scale = (0.95 * CELL_SPACING) / horizSpan。
+     2026-10-18 拍板：constructing 用专用 `在建.glb`（_renderCity 选 key），
+     不再走"灰化同款"分支，asGray 参数与 MeshBasicMaterial 0x888888 已删。 */
+  function _placeGlb(gltf, x, z){
     const inst = gltf.scene.clone(true);
-    if (asGray){
-      const gray = new THREE.MeshBasicMaterial({ color: 0x888888 });
-      inst.traverse(o => { if (o.isMesh) o.material = gray; });
+    /* 阴影开关（全模型 cast+receive）。 */
+    inst.traverse(o => {
+      if (o.isMesh){
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
+    /* ★ 提亮近纯黑 Standard/Lambert/Phong 材质（沿用 03ca40b 的修复策略——
+       本仓库 plots/*.glb 的 MeshStandardMaterial color 多是 (0,0,0) 近纯黑，
+       照三盏灯也输出近零。凡 color RGB 和 < 0.05 且无 base color 贴图
+       (m.map == null)，把 color 强制改写成浅灰 0.85,既保留金属度/粗糙度
+       质感,又能让灯光真正起作用；有贴图的材质不动,贴图颜色会乘上来。 */
+    {
+      const seen = new Set();
+      inst.traverse(o => {
+        if (!o.isMesh) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach(m => {
+          if (!m || seen.has(m)) return;
+          seen.add(m);
+          const c = m.color;
+          if (!c) return;
+          const sum = c.r + c.g + c.b;
+          if (sum < 0.05 && !m.map){
+            c.setRGB(0.85, 0.85, 0.85);
+            m.needsUpdate = true;
+          }
+        });
+      });
     }
-    /* identity 下量 bbox */
+
+    /* identity 下量 bbox。本仓库 plots/*.glb 实测：单件 bbox ≈ 1.87×0.98×1.89
+       （一个建筑的尺寸），即 glb 文件本身**不含** 3×3 烘焙阵。按拍板 v3
+       （"glb 已烘 9 件则 add 一次否则 clone×9"）和用户原话（"每一个地块应该
+       有 3*3=9 个原本的建模"），单个 glb 需要在前端**克隆 9 次**摆出 3×3。
+       判定：如果 bbox horizSpan > 2.5,就认为 glb 自带 3x3,不再克隆。
+       基础教育 1.87 < 2.5,所以会进克隆分支。
+       克隆的 3×3 阵列为 plot 内聚簇,子 cell 间距 = cell_span/3,单个模型缩到
+       plot_span * 0.95/3。 */
     const bbox = new THREE.Box3().setFromObject(inst);
     const size = new THREE.Vector3();
     bbox.getSize(size);
     const center = new THREE.Vector3();
     bbox.getCenter(center);
     const horizSpan = Math.max(size.x, size.z) || 1;
-    /* 0.9 / 1.0：cell 物理宽 1.0,模型占 0.9。父代说"1.1 倍水平跨距摆"
-       意思是 cell 中心间距 1.1 —— 我们的底盘已经按 11 设计(10 × 1.1),
-       所以这里 scale 按 cell=1.0 算即可,摆放时 x/z 用 ×1.1 间隔。 */
-    const scale = 0.9 / horizSpan;
-    inst.position.set(-center.x, -center.y, -center.z);
-    const wrapper = new THREE.Group();
-    wrapper.add(inst);
-    wrapper.scale.setScalar(scale);
-    /* 模型几何中心贴地：bbox 高度尺寸 × scale 后,把 wrapper 抬高
-       半个模型高度 —— 但因为 center.y 已被移到原点,此时 glb 的
-       几何中心在原点,要让底面在 y=0,需要把 wrapper 抬高 size.y*scale/2。 */
-    wrapper.position.set(x, size.y * scale / 2, z);
-    _plotGroup.add(wrapper);
+    /* 是否自带 3×3：horizSpan 显著大于典型单件 span(约2),即已烘焙多件套 */
+    const IS_BAKED_3X3 = horizSpan > 2.5;
+
+    if (IS_BAKED_3X3){
+      /* glb 自带 3×3 → 单摆。0.95 缩到 plot_span。 */
+      const scale = (0.95 * CELL_SPACING) / horizSpan;
+      inst.position.set(-center.x, -center.y, -center.z);
+      const wrapper = new THREE.Group();
+      wrapper.add(inst);
+      wrapper.scale.setScalar(scale);
+      wrapper.position.set(x, size.y * scale / 2, z);
+      _plotGroup.add(wrapper);
+    } else {
+      /* glb 只一件 → 克隆 9 件摆 3×3。子 cell 间距 = CELL_SPACING/3,
+         每件缩到子 cell 物理宽 ×0.95 几乎贴边。同时把整体均匀放大,
+         让用户能看清：cell 宽 1,子 cell 宽 1/3 ≈ 0.333,模型水平跨距
+         取该宽的 0.95 ≈ 0.317。考虑模型在屏幕上的可读性,把所有 plot 都
+         缩到只占 cell 的 0.9,3×3 子阵每子格 0.3,单件渲染尺寸按 0.285。 */
+      const SUB = CELL_SPACING / 3;
+      const SUB_TARGET = SUB * 0.95;
+      const scale = SUB_TARGET / horizSpan;
+      /* 子中心相对 plot 中心 (0,0) 的偏移：3×3 阵两轴各 -SUB, 0, +SUB */
+      const offsets = [-SUB, 0, SUB];
+      /* 共用：把 glb 中心拿到原点的"内层"逻辑独立做 */
+      inst.position.set(-center.x, -center.y, -center.z);
+      const innerWrapper = new THREE.Group();
+      innerWrapper.add(inst);
+      innerWrapper.scale.setScalar(scale);
+      /* 9 件：除了第一件用 innerWrapper,其余 clone */
+      for (let ii = 0; ii < 3; ii++){
+        for (let jj = 0; jj < 3; jj++){
+          let subRoot;
+          if (ii === 1 && jj === 1){
+            subRoot = innerWrapper;
+          } else {
+            subRoot = innerWrapper.clone(true);
+          }
+          subRoot.position.set(
+            x + offsets[ii],
+            size.y * scale / 2,
+            z + offsets[jj]
+          );
+          _plotGroup.add(subRoot);
+        }
+      }
+    }
+
   }
 
-  /* 主渲染：清空 → 摆全部 plot → 渲染 */
+  /* 主渲染：清空 → 摆全部 plot → 起循环 */
   async function _renderCity(){
     if (!_enabled || !_renderer) return;
     if (typeof STATE === 'undefined' || typeof MAP === 'undefined'){
@@ -190,7 +324,6 @@ window.APP = window.APP || {};
       _plotGroup.remove(_plotGroup.children[0]);
     }
 
-    /* cell 索引 */
     const cellById = {};
     (MAP.cells || []).forEach(c => { if (c && c.plot_id) cellById[c.plot_id] = c; });
 
@@ -202,40 +335,31 @@ window.APP = window.APP || {};
       subtitleEl.textContent = `第 ${q} 季 · ${n} 块地块`;
     }
 
-    /* cell 中心间距 1.1（父代拍板的"加宽不重叠"）。
-       cell (row,col) → 世界 (col*1.1 + 0.05, 0, row*1.1 + 0.05),
-       范围 [0.05, 9.95],中心 5 正好对齐底盘中心 (5,·,5)。 */
-    const SPACING = 1.1;
-    const OFFSET = 0.05;
-
     const tasks = [];
     (STATE.plots || []).forEach(p => {
       const pid = p.plot_id;
       const cell = cellById[pid];
       if (!cell || !cell.asset) return;
-      const key = cell.asset;
-      const asGray = (p.status === 'constructing') || (cell.status === 'constructing');
-      /* plot_id 是 "r,c" 字符串 */
+      /* 2026-10-18 拍板：constructing 改用专用 `在建` 模型（在建.glb），
+         不再用灰化同款；running 走原 cell.asset。 */
+      const isConstructing = (p.status === 'constructing') || (cell.status === 'constructing');
+      const key = isConstructing ? '在建' : cell.asset;
       const parts = pid.split(',');
       const row = parseInt(parts[0], 10);
       const col = parseInt(parts[1], 10);
       if (isNaN(row) || isNaN(col)) return;
-      const x = col * SPACING + OFFSET;
-      const z = row * SPACING + OFFSET;
+      const x = col * CELL_SPACING + CELL_SPACING / 2;
+      const z = row * CELL_SPACING + CELL_SPACING / 2;
       tasks.push(
         _loadGlb(key).then(gltf => {
-          _placeGlb(gltf, x, z, asGray);
-          _renderFrame();
-        }).catch(() => {/* 已 warn,静默 */})
+          _placeGlb(gltf, x, z);
+        }).catch(() => {/* 已 warn，静默 */})
       );
     });
 
-    /* 即便一个 plot 都没有,也把底盘 render 出来 */
-    _renderFrame();
     if (tasks.length){
       await Promise.allSettled(tasks);
     }
-    _renderFrame();
   }
 
   function _renderFrame(){
@@ -252,7 +376,7 @@ window.APP = window.APP || {};
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') _close();
     });
-    /* 点击 modal_batch 背景也关闭（除了 canvas box） */
+    /* 点击 modal 背景也关闭（除了 canvas box） */
     const m = document.getElementById('city-modal');
     if (m){
       m.addEventListener('click', (e) => {

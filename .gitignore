@@ -20,5 +20,10 @@ saves/
 # Office 临时锁文件（~$xxx.docx）
 ~$*
 
-# 3D 建模原始文件（326MB+，用户拍板不入仓；运行用的 glb 在 web/assets/plots/，已单独忽略）
+# 3D 建模原始文件与运行时二进制（540MB+，用户拍板不入仓）
 建模/
+*.rar
+*.zip
+.scratch/
+# 运行用的 glb（含 pbr 彩色版 + 在建.glb），体积约 540MB 不入仓
+region-sim/web/assets/plots/*.glb

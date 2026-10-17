@@ -282,7 +282,10 @@
   #city-modal .cm-close:hover{ background:var(--line); }
   #city-canvas{
     border:1px solid var(--line); border-radius:8px;
-    background:#0a0f14;
+    background:#12161c;
+    max-width:90vw; max-height:80vh;
+    cursor:grab;
+    touch-action:none;
   }
   #city-modal .cm-foot{
     margin-top:10px; color:var(--dim); font-size:12px;

@@ -5,14 +5,10 @@
    2026-10-17 视觉打磨版：emoji 锚 + 渐变 + 状态动效。
    ══════════════════════════════════════════════════════════════ */
   /* ── 地图 ─────────────────────────────────────────────── */
-  /* ★ S5 3D 叠加层：#map 要作为 <canvas id="map3d"> 的定位父，
-        原 display:grid 行为不变；新增 position:relative。 */
+  /* 2026-10-18 · #map{position:relative} 仍要保留 —— .cell-tooltip 是
+     absolute 定位,相对最近的 positioned 祖先;#map3d (S5 3D 层画布) 已
+     随 map.js S5 段同步删除,不再需要。 */
   #map{display:grid; gap:3px; margin-top:8px; position:relative;}
-  /* ★ S5 3D 叠加层：覆盖整个 #map 的 WebGL 画布。 */
-  #map3d{
-    position:absolute; top:0; left:0; z-index:5;
-    pointer-events:none; display:block;
-  }
 
   /* ── cell 基础 ────────────────────────────────────────── */
   .cell{
