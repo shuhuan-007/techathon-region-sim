@@ -401,9 +401,16 @@ def test_build_agriculture_with_product_passes():
 
 
 def test_build_service_needs_no_product():
-    """★ 服务 / 资源 / 研究**没有多路线**，不该被要求选产出。"""
+    """★ 服务 / 资源**没有多路线**，不该被要求选产出。
+
+    ⚠️ 2026-10-18 调整：`research` 是**场景预置**的地块类型，工程表里
+       没有 `research 0→1`（config 只有 agriculture/industry/resource/service）。
+       旧测试把 research 也放进“不该要求 product”的循环里，等于要求校验
+       放行一条**结算必炸**的工程。现在校验提前拒绝它——这才是 §11.3
+       要的“错误点靠近犯错点”。product 的断言仍由 service/resource 覆盖。
+    """
     cfg = load_config()
-    for ptype in (PlotType.SERVICE, PlotType.RESOURCE, PlotType.RESEARCH):
+    for ptype in (PlotType.SERVICE, PlotType.RESOURCE):
         plan = plan_for(builds=[
             BuildOrder(plot_id="0,0", plot_type=ptype, target_level=1, product=None),
         ])
@@ -411,6 +418,16 @@ def test_build_service_needs_no_product():
         assert issues == [], (
             f"{ptype.value} 没有多路线，不该要求填产出，实得：{[str(i) for i in issues]}"
         )
+
+    # research 0→1 没有工程 → 必须在校验阶段就报“查不到工程”
+    plan = plan_for(builds=[
+        BuildOrder(plot_id="0,0", plot_type=PlotType.RESEARCH,
+                   target_level=1, product=None),
+    ])
+    issues = validate.validate_plan(plan, make_player(), cfg)
+    assert codes(issues) == {"build_work_unavailable"}, (
+        f"research 0→1 不在工程表，应在校验阶段被挡；实得：{codes(issues)}"
+    )
 
 
 def test_build_on_existing_plot_must_be_an_upgrade():

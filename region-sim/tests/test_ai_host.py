@@ -537,6 +537,21 @@ def test_state_context_size_is_capped():
     )
 
 
+def test_state_context_includes_actionable_capabilities():
+    """★ 2026-10-18：局面必须带「能往哪建 / 哪些地能开工 / 要多少口粮」的快照。
+
+    这是真实故障的修法：以前模型只看得到自己的地块，没有空地清单，
+    于是把已有地块写成 `builds`。快照块名是契约，缺一块就说明接入断了。
+    """
+    user, _ = _grab_user_message()
+    for token in ("[现金/预算]", "[空地]", "[可建]", "[可开工]", "[人口/口粮]"):
+        assert token in user, f"可行动作快照缺 {token} 块：{user}"
+    # 开局 10×10、0 地块 → 第一格必须在空地表里
+    assert "0,0" in user, f"空地表应列出 0,0：{user}"
+    # 末尾硬提示（模型最容易犯的错）
+    assert "漏写=不开工" in user, f"缺「漏写=不开工」硬提示：{user}"
+
+
 def test_state_context_keeps_original_seven_keys():
     """★ 不许倒退：原来那 7 个局面键**一个都不能丢**。
 
@@ -690,8 +705,16 @@ def test_draft_fenced_json_is_parsed():
     assert out["suggested_plan"]["builds"][0]["plot_id"] == "0,0"
 
 
-def test_draft_invalid_plan_yields_issues_not_suggested_plan():
-    """模型回**非法计划**（往 plot_plans 里塞不存在的地块 id）→ `suggested_plan is None`**且** `plan_issues` 非空。"""
+def test_draft_invalid_plan_is_repaired_or_rejected_not_leaked():
+    """坏项（不存在的 plot_plan）→ 编译器丢掉它并留 notes；**到达前端的计划必须合法**。
+
+    ⚠️ 2026-10-18 行为变更：旧实现把模型输出直接丢给 `validate`，只要有一处
+       坏项整份草案就作废（真跑实测：模型把已有地块写进 builds → 3 条
+       `build_not_an_upgrade` → `suggested_plan=null`）。现在先过编译器：
+       能定位的坏项被丢掉、能归位的意图被归位；**返回的 plan 必须过 validate**。
+       如果修不好，仍然 `suggested_plan=None` + `plan_issues`——两条出口都守住
+       「绝不把坏计划交给前端」。
+    """
     app = _fresh_app()
     session = _fresh_session(app)
     bad_plan = _valid_draft_json()
@@ -705,17 +728,31 @@ def test_draft_invalid_plan_yields_issues_not_suggested_plan():
     ))
     out = ai_host.advise(session, "p1", client=fake, draft=True)
     assert out["ok"] is True
-    assert out["suggested_plan"] is None, (
-        f"★ 非法计划绝不许到达前端：suggested_plan 应为 None，实得 {out['suggested_plan']!r}"
-    )
-    assert out.get("plan_issues"), (
-        "校验不过时要带上 issues 清单（前端要能告诉玩家\"哪不行\"）"
-    )
-    assert out["plan_source"] == "model", "模型起草的它仍然是 model，只是没过校验"
-    # issues 形状要能告诉人"为什么不行"（五要素）
-    codes = [i.get("code", "") for i in out["plan_issues"]]
-    assert codes and all(codes), f"issues 里要有 code（五要素之错误类型）：{codes}"
-    # 不能让坏 plan 被编造成"看起来合法" —— 绝不能这样偷渡
+    # 两条合法出口：要么明确失败（plan=None + issues），要么修复后交付合法计划。
+    if out["suggested_plan"] is None:
+        assert out.get("plan_issues"), (
+            "修不好时必须带上 issues（前端要能告诉玩家\"哪不行\"）"
+        )
+        assert out["plan_source"] == "model", "模型起草的它仍然是 model，只是没过校验"
+        codes = [i.get("code", "") for i in out["plan_issues"]]
+        assert codes and all(codes), f"issues 里要有 code（五要素之错误类型）：{codes}"
+    else:
+        # 修复出口：99,99 被丢掉，0,0 的合法建造保留 → 必须过 validate
+        from engine.models import Plan
+        from engine import validate as engine_validate
+
+        plan = Plan.from_dict(out["suggested_plan"])
+        issues = engine_validate.validate_plan(
+            plan, session.state.player("p1"), session.cfg, "p1"
+        )
+        assert not issues, (
+            f"★ 到达前端的计划必须合法，实得 issues={[i.to_dict() for i in issues]}"
+        )
+        assert "99,99" not in plan.plot_plans, "不存在的 plot_plan 应被丢掉"
+        assert plan.builds, "合法建造不该被连累"
+        assert any("99,99" in n for n in (out.get("plan_notes") or [])), (
+            f"必须留下\"99,99 被丢弃\"的校正说明：{out.get('plan_notes')}"
+        )
 
 
 def test_draft_garbage_is_clear_failure_not_fabricated():

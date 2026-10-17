@@ -56,11 +56,14 @@ from ai.rules_digest import digest
 #:   · `validate`    —— `validate_plan` 本身只收 Plan/Player/Config，
 #:                      签名上就杜绝了改状态。
 #:   · `loader`/`models` —— 纯数据，没有写入口。
+#:   · `construction` —— 工程表/路线/开局减免的**只读查表**（2026-10-18
+#:                      起草编译器要用；它没有 commit 入口）。
 ALLOWED_ENGINE_MODULES: frozenset[str] = frozenset({
     "engine.pipeline",
     "engine.validate",
     "engine.loader",
     "engine.models",
+    "engine.construction",
 })
 
 #: 黑名单：`advance` = 真结算（§11.4「AI 永远调不到 advance」）。

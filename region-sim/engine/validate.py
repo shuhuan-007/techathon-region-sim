@@ -47,6 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from engine import construction
 from engine.loader import Config, ConfigError
 from engine.models import (
     BuildOrder,
@@ -55,6 +56,7 @@ from engine.models import (
     PlotPlan,
     PlotStatus,
     PlotType,
+    parse_plot_id,
 )
 
 
@@ -398,20 +400,102 @@ def _check_food(plan: Plan, cfg: Config) -> list[PlanIssue]:
 def _check_builds(
     plan: Plan, player: PlayerState, cfg: Config
 ) -> list[PlanIssue]:
-    """建设 / 升级指令的形状校验。
+    """建设 / 升级指令的**可执行性**校验（形状 + 坐标 + 重复 + 工程表）。
 
-    ⚠️ **这里只查"这条指令本身合不合法"，不查"能不能负担"** ——
-       `construction.works`（工程表）**目前是空的**（M4 才录，见 §5.2），
-       所以任何建设指令都会在结算时被 `pipeline._construction_materials()`
-       明确报错。本函数的作用是**让错误更早、更具体**，而不是替代那一步。
+    ★ 2026-10-18 硬化（AI 秘书起草方案的漏洞修复，见
+      `docs/03-架构/AI秘书-有效起草方案.md` §二 / §三.1）：
+
+        ① `plot_id` 必须是合法的 `"r,c"`，且落在
+           `0 ≤ r < cfg.rows`、`0 ≤ c < cfg.cols` 之内（越界 = 地图上没这块地）；
+        ② 同一份 `plan.builds` 里**同一块地只能下一条**建设指令
+           （第一条保留，后面每一条都报 `duplicate_build_plot`）；
+        ③ 农业 / 工业的 `product` 必须是该类型、该等级**真实存在**的
+           产出 / 路线（真值表见 `_BUILD_PRODUCTS`）；
+        ④ 用 `construction.find_work_for_build()` 做一次 **dry-run** ——
+           结算第 6 步真去找的就是这条工程，查不到就现在报
+           `build_work_unavailable`。
+
+    ⚠️ 为什么必须有 ④：`construction.works` 已经按基线 §5.2 录满 14 行，
+       "查不到工程"不再是"表还没填"，而是**这条指令根本执行不了**。
+       在此之前校验只查 `product` 非空，于是"在空地上建研究地块"这类计划
+       能过校验、提交成功，直到结算才抛 `ConfigError` —— 那一季直接作废。
+       这是 AI 起草计划时最容易踩的一类坑（模型不知道工程表长什么样）。
+
+    ⚠️ 仍然**不查"能不能负担"**（现金在 `_check_cash` 里按 P0 粗估）。
+       本函数只回答"这条指令本身能不能执行"。
     """
     issues: list[PlanIssue] = []
+
+    #: 已经下过指令的地块：`(row, col)` → 第一次出现的下标（0 基）。
+    #   ⚠️ 用**解析后的坐标**而不是原始字符串做键：'3,4' 与 '03,4' 是同一块地，
+    #      用字符串会让"同一块地下两条指令"漏过去（重复建造 = 重复扣钱/重复改状态）。
+    seen_plots: dict[tuple[int, int], int] = {}
 
     for idx, order in enumerate(plan.builds):
         bid = order.plot_id
         plot = player.plots.get(bid)
 
-        # ── ⓪ 空地新建：**只能从 1 级起**（工程表只有 0→1 / 1→2 / 2→3）──
+        # ── ① 坐标格式：必须是 "r,c" ────────────────────────
+        coords = _parse_build_coords(bid)
+        if coords is None:
+            issues.append(
+                PlanIssue(
+                    code="bad_build_plot_id",
+                    target=bid,
+                    message=(
+                        f"第 {idx + 1} 条建设指令的地块 ID {bid!r} 格式非法。\n"
+                        f"    地块 ID 一律是 'r,c'（行列从 0 起，如 '0,0' / '3,4'）。"
+                    ),
+                )
+            )
+            continue
+
+        r, c = coords
+        if not (0 <= r < cfg.rows and 0 <= c < cfg.cols):
+            axis, value, limit = (
+                ("行 r", r, cfg.rows) if not 0 <= r < cfg.rows
+                else ("列 c", c, cfg.cols)
+            )
+            issues.append(
+                PlanIssue(
+                    code="build_plot_out_of_bounds",
+                    target=bid,
+                    message=(
+                        f"第 {idx + 1} 条建设指令的地块 {bid!r} 超出了地图范围："
+                        f"{axis} = {value}，而地图是 "
+                        f"{cfg.rows} 行 × {cfg.cols} 列"
+                        f"（合法下标 0–{cfg.rows - 1} / 0–{cfg.cols - 1}）。\n"
+                        f"    ⚠️ 地块 ID 用 'r,c'（0 基）：'0,0' 是左上角、"
+                        f"'{cfg.rows - 1},{cfg.cols - 1}' 是右下角。"
+                    ),
+                    requested=float(value),
+                    available=float(limit - 1),
+                )
+            )
+            continue
+
+        # ── ② 同一份计划里重复下指令 ────────────────────────
+        first_idx = seen_plots.get(coords)
+        if first_idx is not None:
+            issues.append(
+                PlanIssue(
+                    code="duplicate_build_plot",
+                    target=bid,
+                    message=(
+                        f"第 {idx + 1} 条建设指令与第 {first_idx + 1} 条**重复**："
+                        f"同一份计划里，地块 {bid!r} 只能下**一条**建设指令。\n"
+                        f"    ⚠️ 这里只认第 {first_idx + 1} 条，后面的不生效；"
+                        f"想「先新建再升级」请分两季（工程表只有 0→1 / 1→2 / 2→3，"
+                        f"一季只能推进一步）。"
+                    ),
+                    requested=float(idx + 1),
+                    available=float(first_idx + 1),
+                )
+            )
+            continue
+        seen_plots[coords] = idx
+
+        # ── ③ 空地新建：**只能从 1 级起**（工程表只有 0→1 / 1→2 / 2→3）──
         # ⚠️ 2026-10-17 修：原来没有这条。玩家（或 AI 起草的计划）在空地上直接写
         #    target_level=2 时，校验**放行**，到**结算**才抛 ConfigError
         #    「没有这条工程：agriculture 0→2」—— 那一季直接结算失败。
@@ -433,8 +517,8 @@ def _check_builds(
             )
             continue
 
-        # ── ① 空地新建：plot_id 可以不在 plots 里（还没建）──
-        # 但一旦存在，就必须满足状态约束。
+        # ── ④ 已有地块：状态 / 等级 / 类型约束 ──────────────
+        # 空地（plot is None）跳过这一段：`plot_id` 可以不在 plots 里（还没建）。
         if plot is not None:
             if plot.status is PlotStatus.CONSTRUCTING:
                 issues.append(
@@ -482,7 +566,7 @@ def _check_builds(
                 )
                 continue
 
-        # ── ② 目标等级必须在 1–3 ────────────────────────────
+        # ── ⑤ 目标等级必须在 1–3 ────────────────────────────
         if not 1 <= order.target_level <= 3:
             issues.append(
                 PlanIssue(
@@ -497,52 +581,130 @@ def _check_builds(
             )
             continue
 
-        # ── ③ ★ 产出/路线：建造时选定，建后不可更换（§5.1）──
-        issues += _check_build_product(order, idx)
+        # ── ⑥ ★ 产出/路线：建造时选定，建后不可更换（§5.1）──
+        # ⚠️ 有产品问题时**直接 continue**：`find_work_for_build()` 是用 product
+        #    反推工业路线的（研究线 vs 机械线），product 本身不合法时再去 dry-run，
+        #    只会按一条错误的路线上报个"工程查到了"，把真正的问题埋掉。
+        product_issues = _check_build_product(order, idx)
+        if product_issues:
+            issues += product_issues
+            continue
+
+        # ── ⑦ ★ 工程表 dry-run：结算第 6 步真去找的就是这条工程 ──
+        # 查不到 = 这条指令根本执行不了（例如"空地上新建研究地块"——工程表
+        # 14 行里没有 research 这一类）。校验阶段就挡住，别拖到结算把整季废掉。
+        try:
+            construction.find_work_for_build(cfg, plot, order)
+        except ConfigError as e:
+            issues.append(
+                PlanIssue(
+                    code="build_work_unavailable",
+                    target=bid,
+                    message=(
+                        f"第 {idx + 1} 条建设指令在工程表里查不到对应的工程：{e}\n"
+                        f"    ⚠️ 结算时会在这里失败，整份账单不成立"
+                        f"（§11.3 不允许部分执行），所以提交前就挡住。"
+                    ),
+                )
+            )
+            continue
 
     return issues
 
 
+def _parse_build_coords(plot_id: object) -> Optional[tuple[int, int]]:
+    """把 `plot_id` 解析成 `(row, col)`；格式不对返回 `None`。
+
+    ⚠️ **不抛异常**：`PlotIssue` 才是本模块的出口，
+       抛 `ValueError` 会把一次"计划有错"变成服务层的 500。
+    """
+    try:
+        return parse_plot_id(plot_id)   # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★ 建造时可选产出 / 路线的**真值表**（校验用）
+# ══════════════════════════════════════════════════════════════════
+#
+# ⚠️ 为什么另起一张表，而不是复用 `buildable_products()`：
+#    后者是**给前端下拉框**用的，工业二级只列 H-A/H-F/H-G/H-J；
+#    但"研究线"（`product="研究"`）是**规则上合法**的二级路线
+#    （`construction.find_work_for_build` 认它 → `ind_1_2_research`，6 季），
+#    只是前端暂时没把它放进下拉框。校验若照抄下拉框，就会把这条合法路线判死。
+#    → 校验真值以本表为准；UI 选项等前端契约定了再单独改 `buildable_products()`。
+#
+# 资源 / 服务 / 研究三类没有多路线（不在这张表里 → 不校验 product）。
+_BUILD_PRODUCTS: dict[tuple[PlotType, int], tuple[str, ...]] = {
+    (PlotType.AGRICULTURE, 1): ("A", "B", "C", "D"),
+    (PlotType.AGRICULTURE, 2): ("A", "B", "C", "D"),
+    (PlotType.AGRICULTURE, 3): ("A", "B", "C", "D"),
+    (PlotType.INDUSTRY, 1): ("G",),
+    # ★ 工业二级多一条「研究」（研究线：6 季，之后才能升三级 I）
+    (PlotType.INDUSTRY, 2): ("H-A", "H-F", "H-G", "H-J", "研究"),
+    (PlotType.INDUSTRY, 3): ("H-A+", "H-F+", "H-G+", "H-J+", "I"),
+}
+
+
+def _allowed_build_products(
+    plot_type: PlotType, target_level: int
+) -> Optional[tuple[str, ...]]:
+    """某类型 / 某等级**建造时**允许的产出或路线；`None` = 该类型没有多路线。"""
+    return _BUILD_PRODUCTS.get((plot_type, target_level))
+
+
 def _check_build_product(order: BuildOrder, idx: int) -> list[PlanIssue]:
-    """农业 / 工业**建造时必须选定产物或路线**（✅ 2026-10-16 用户拍板）。
+    """农业 / 工业**建造时必须选定产物或路线**，且必须是真实存在的那几条。
 
     > 「建造动作里有"选产出/路线"这一步 → 农业/工业建造时必须选定产物/路线，
-    >   建后不可更换」
+    >   建后不可更换」（✅ 2026-10-16 用户拍板）
 
-    这是**刻意的强制**：不选就报错，而不是替玩家挑一个默认值 ——
-    选错了要拆掉重建，代价太大，不能让程序替他猜。
+    两条检查（**不选** / **选错** 分开报，玩家要修的地方不一样）：
+
+        · 留空 → `build_product_required`（程序不替玩家挑默认值：选错要拆掉重建）
+        · 不在真值表里 → `bad_build_product`（如农业写 "Z"、工业二级写 "G"）
     """
     ptype = order.plot_type
-    if ptype not in (PlotType.AGRICULTURE, PlotType.INDUSTRY):
+    allowed = _allowed_build_products(ptype, order.target_level)
+    if not allowed:
         # 资源 / 服务 / 研究没有多路线，不需要选
         return []
 
-    if order.product:
-        return []
-
     where = "农业" if ptype is PlotType.AGRICULTURE else "工业"
-    if ptype is PlotType.AGRICULTURE:
-        options = ["A", "B", "C", "D"]
-    else:
-        options = (
-            ["G"] if order.target_level == 1
-            else ["H-A", "H-F", "H-G", "H-J"] if order.target_level == 2
-            else ["H-A+", "H-F+", "H-G+", "H-J+", "I"]
-        )
+    options = list(allowed)
 
-    return [
-        PlanIssue(
-            code="build_product_required",
-            target=order.plot_id,
-            message=(
-                f"第 {idx + 1} 条建设指令：{where} {order.target_level} 级"
-                f"**必须选定产出/路线**，不能留空。\n"
-                f"    可选：{options}\n"
-                f"    ⚠️ 产出/路线**建造时选定、建后不可更换**（§5.1，"
-                f"2026-10-16 拍板）—— 选错要拆掉重建，所以程序不替你猜默认值。"
-            ),
-        )
-    ]
+    if not order.product:
+        return [
+            PlanIssue(
+                code="build_product_required",
+                target=order.plot_id,
+                message=(
+                    f"第 {idx + 1} 条建设指令：{where} {order.target_level} 级"
+                    f"**必须选定产出/路线**，不能留空。\n"
+                    f"    可选：{options}\n"
+                    f"    ⚠️ 产出/路线**建造时选定、建后不可更换**（§5.1，"
+                    f"2026-10-16 拍板）—— 选错要拆掉重建，所以程序不替你猜默认值。"
+                ),
+            )
+        ]
+
+    if order.product not in allowed:
+        return [
+            PlanIssue(
+                code="bad_build_product",
+                target=order.plot_id,
+                message=(
+                    f"第 {idx + 1} 条建设指令：{where} {order.target_level} 级"
+                    f"没有 {order.product!r} 这条产出/路线。\n"
+                    f"    可选：{options}\n"
+                    f"    ⚠️ 产出/路线**建造时选定、建后不可更换**（§5.1）；"
+                    f"写错的产物结算时不会被纠正，只会在建完之后一直产错东西。"
+                ),
+            )
+        ]
+
+    return []
 
 
 def _check_contracts(plan: Plan, cfg: Config) -> list[PlanIssue]:
@@ -630,6 +792,70 @@ def _check_contracts(plan: Plan, cfg: Config) -> list[PlanIssue]:
     return issues
 
 
+def _p0(cfg: Config, goods: str) -> Optional[float]:
+    """取参考价；商品不在市场表里返回 `None`（**不编造价格**）。"""
+    curve = cfg.market.get(goods)
+    return None if curve is None else curve.P0
+
+
+def _p0_value(cfg: Config, goods: str, qty: float) -> Optional[float]:
+    """按参考价折一份货值；查不到参考价返回 `None`。"""
+    p0 = _p0(cfg, goods)
+    return None if p0 is None else p0 * qty
+
+
+def _estimate_build_cash(plan: Plan, player: PlayerState, cfg: Config) -> float:
+    """本季**建造项**的粗估 = 折后现金费 + 工程物资按 P0 折算。
+
+    ★ 2026-10-18 新增。它直接复用 `construction.build_cash_plan()`
+      （与结算第 5 步**同一个函数**），所以开局减免名额、折后价、
+      名额按 `plan.builds` 顺序消耗这些细节**不会在两处算出两个数**。
+
+    ⚠️ 物资按 **P0** 估（结算时按上季价买，本模块拿不到历史价）。
+
+    ⚠️ 查不到工程（`ConfigError` / 商品缺价 `KeyError`）时**整段跳过**，
+       绝不从这里抛 —— 那是 `_check_builds`（`build_work_unavailable`）
+       该报的问题。这里再抛一次只会把"计划有问题"变成 500。
+       代价是：坏掉的那条会让建造项估成 0（少报），但那份计划本来就会被拒。
+    """
+    if not plan.builds:
+        return 0.0
+
+    try:
+        rows = construction.build_cash_plan(plan, player, cfg)
+    except (ConfigError, KeyError):
+        # 有一条查不到工程 → 整份建造报价不可信 → 跳过建造项（见 docstring）
+        return 0.0
+
+    total = 0.0
+    for row in rows:
+        total += float(row["cash"])                    # 折后实付现金费
+        for goods, qty in (row["work"].materials or {}).items():
+            value = _p0_value(cfg, goods, float(qty))
+            if value is not None:
+                total += value
+    return total
+
+
+def _estimate_food_cash(plan: Plan, cfg: Config) -> float:
+    """本季**口粮**的粗估：`plan.food` 按 P0 全额折价。
+
+    ⚠️ 只估**申报量的全额**，不扣"自产顶上"那部分（本模块算不出产量：
+       `E` 要看邻接/幸福/磨合）。所以这一项**偏保守**（可能高估），
+       宁可多提醒一次"可能不够"，也不要漏掉一笔自动买入。
+    ⚠️ 口粮缺口是**自动买**的（用户原话："会在购入环节购入"），
+       所以它必须算进现金压力里，否则又是一个"结算才爆"的口子。
+    """
+    total = 0.0
+    for goods, qty in plan.food.items():
+        if qty <= 0:
+            continue                                   # 负数由 _check_food 报
+        value = _p0_value(cfg, goods, float(qty))
+        if value is not None:
+            total += value
+    return total
+
+
 def _check_cash(
     plan: Plan, player: PlayerState, cfg: Config
 ) -> list[PlanIssue]:
@@ -641,21 +867,35 @@ def _check_cash(
         （那是 `GameState.world.price_history`，本模块只收 `PlayerState`）；
       · 真正的账单要到第 4.5 步算完 `B_t` 才知道。
 
-    所以这里的估算**可能偏低或偏高**。它的价值只有一个：**早说**。
-    **第 5 步的资金检查才是最终判据**（§11.3 不允许部分执行）。
+    估算口径（★ 2026-10-18 起不再只算采购）：
+
+        采购  = Σ `plan.purchases` × P0
+        建造  = Σ `plan.builds` 的**折后现金费** + 工程物资 × P0
+                （见 `_estimate_build_cash`，与第 5 步同一个 `build_cash_plan`）
+        口粮  = Σ `plan.food` × P0（口粮缺口是自动买的，见 `_estimate_food_cash`）
+
+    ⚠️ 这三项之外**仍然没算**工资与经营费（要等第 3、4 步），
+       所以真实账单只会更贵。这里的价值只有一个：**早说**。
+       **第 5 步的资金检查才是最终判据**（§11.3 不允许部分执行）。
 
     ⚠️ **不要**为了"消除重复"而删掉第 5 步的检查。
+       本模块拿不到本季真实价，只能估；第 5 步才是权威。
     """
-    # 无采购 → 工资/经营费要等第 3、4 步算完才知道，这里估不了，放行。
-    if not plan.purchases:
-        return []
-
-    estimate = 0.0
+    estimate_purchases = 0.0
     for goods, qty in plan.purchases.items():
-        if goods in cfg.market and qty > 0:
-            estimate += cfg.market[goods].P0 * qty
+        if qty <= 0:
+            continue                                   # 负数由 _check_purchases 报
+        value = _p0_value(cfg, goods, float(qty))
+        if value is not None:
+            estimate_purchases += value
 
-    if estimate <= player.cash + 1e-9:
+    estimate_builds = _estimate_build_cash(plan, player, cfg)
+    estimate_food = _estimate_food_cash(plan, cfg)
+
+    estimate = estimate_purchases + estimate_builds + estimate_food
+
+    # 没有任何可估的支出 → 放行（工资/经营费要等第 3、4 步才知道，估不了）。
+    if estimate <= 0.0 or estimate <= player.cash + 1e-9:
         return []
 
     return [
@@ -663,8 +903,11 @@ def _check_cash(
             code="insufficient_cash_estimate",
             target=player.player_id,
             message=(
-                f"现金可能不够：仅采购一项按参考价估算就要 {estimate:.2f}，"
-                f"手上只有 {player.cash:.2f}。\n"
+                f"现金可能不够：按参考价 P0 粗估，本季至少要约 {estimate:.2f}"
+                f"（采购 {estimate_purchases:.2f} + 建造 {estimate_builds:.2f} + "
+                f"口粮 {estimate_food:.2f}），手上只有 {player.cash:.2f}。\n"
+                f"    ⚠️ 建造 = 工程现金费（已含开局减免）+ 工程物资按 P0 折算；"
+                f"口粮按申报量全额估（自产可能顶掉一部分，这一项偏保守）。\n"
                 f"    ⚠️ 这还**没算**工资与经营费，实际只会更贵。\n"
                 f"    ⚠️ 这是**按参考价 P0 的粗估**（买入实际按上季价记账），"
                 f"最终以结算第 5 步为准。"
@@ -685,6 +928,12 @@ def buildable_products(plot_type: PlotType, target_level: int) -> list[str]:
 
     给前端建造面板填下拉框用（**前端零计算**，所以选项在引擎给）。
     没有多路线的类型返回空列表。
+
+    ⚠️ 本函数是**前端下拉框契约**，不等于校验真值：
+       工业二级的「研究」线（`product="研究"` → `ind_1_2_research`，6 季）
+       规则上合法、`_check_build_product` 也放行它，但**这里不列**——
+       前端下拉框要不要放它，得先问 UI（`/api/build_options` 直接吃这个列表）。
+       校验以 `_BUILD_PRODUCTS` 为准，见那里的注释。
     """
     if plot_type is PlotType.AGRICULTURE:
         return ["A", "B", "C", "D"]

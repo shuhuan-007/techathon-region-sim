@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Optional
 # ══════════════════════════════════════════════════════════════════
 from ai import assert_import_boundary, tool_preview, tool_validate
 from ai import rules_digest
+from ai.plan_compile import compile_draft
 from server import llm_client
 
 if TYPE_CHECKING:  # 仅供类型标注；运行时不 import（不起 server.session）
@@ -118,8 +119,12 @@ def advise(
     都翻成 `ok=False` 的 dict —— **绝不抛穿到调用方 / 绝不编造建议**。
     """
     # ── 0. 拿局面（只读）───────────────────────────────────────────
+    # ⚠️ `with_narratives=False`：起草只需要数字事实，**不需要**新闻/财报叙事。
+    #    默认的 `state_for()` 会在 quarter>1 时顺手调两路模型生成叙事
+    #    （实测单次可到 1–3 分钟），把「点一下 AI 起草」拖成几分钟；
+    #    而叙事正文根本不进 `_compact_state`，纯属白等。
     try:
-        state = session.state_for(player_id)
+        state = session.state_for(player_id, with_narratives=False)
     except Exception as e:  # noqa: BLE001 —— 局面都拿不到，明说
         return _failure(
             "no_state",
@@ -179,6 +184,22 @@ def advise(
 
     # ── 3. 组装 messages 调模型 ─────────────────────────────────────
     evidence = _evidence_from_state(player_id, state) + preview_evidence
+    # ★ 可行动作快照（2026-10-18）：空地 / 可建材料 / 可开工 / 口粮需求。
+    #   模型之前只能看到“自己的地块”，于是把已有地块写成 builds —— 这份快照
+    #   就是给它一份“能往哪建、要花什么、哪些地能开工”的 ground truth。
+    cap_text = ""
+    try:
+        from ai.plan_context import describe_capabilities, format_capabilities
+
+        cap_text = format_capabilities(
+            describe_capabilities(session.state, player_id, session.cfg)
+        )
+    except Exception as e:  # noqa: BLE001 —— 快照拿不到就诚实缺席，不编
+        cap_text = (
+            f"[可行动作] 生成失败（{type(e).__name__}: {e}）；"
+            f"不要臆造空地/成本，按上面已有的局面回答。"
+        )
+
     messages = _build_messages(
         player_id=player_id,
         state=state,
@@ -187,6 +208,7 @@ def advise(
         preview_report=preview_report,
         cfg=getattr(session, "cfg", None),
         draft=draft,
+        cap_text=cap_text,
     )
 
     result = client.chat_completions(messages)
@@ -241,7 +263,7 @@ def advise(
     #       （advise 主体），边界基线早已固定；② preview 分支 import 过
     #       `server.app` 之后，本分支再拉一次也只是命中 sys.modules 缓存。
     if draft:
-        plan_candidate = None
+        compiled = None
         plan_candidate_error: Optional[str] = None
 
         # 4a. 皮实解析（复用 narrate 的 parser：剥围栏 / 跳前言 / 数括号）
@@ -251,22 +273,21 @@ def advise(
         except Exception as e:  # noqa: BLE001 —— parser 自己都不能崩
             obj, problem = None, f"parse_model_json 抛异常（{type(e).__name__}: {e}）"
 
-        # 4b. 形状转换（**只转换、不校验**；合法性由 tool_validate 说了算）
+        # 4b. ★ 编译器（2026-10-18）：模型给的是“意图”，引擎给的是“事实”。
+        #     `compile_draft` 负责把已有地块当建造、漏写开工、超预算、非法产物
+        #     等模型常见错误规整掉，并且**只有 validate + preview 都过**才返回 plan。
+        #     —— 这一步取代了旧的 `plan_from_dict → tool_validate` 裸转换：
+        #        旧路径只要模型写错一个字，整份草案就作废（真跑实测的故障）。
         if obj is not None:
             try:
-                from server.app import plan_from_dict
-
-                candidate = dict(obj)
-                candidate["player_id"] = player_id  # 钉死：这份起草是给谁的
-                plan_candidate = plan_from_dict(candidate)
-                plan_candidate.player_id = player_id
-            except Exception as e:  # noqa: BLE001
+                compiled = compile_draft(obj, session.state, player_id, session.cfg)
+            except Exception as e:  # noqa: BLE001 —— 编译器自己都不能崩
+                compiled = None
                 plan_candidate_error = f"{type(e).__name__}: {e}"
 
         return _draft_advice(
-            session,
             player_id,
-            plan_candidate,
+            compiled=compiled,
             parse_problem=problem,
             shape_error=plan_candidate_error,
             evidence=evidence,
@@ -331,16 +352,20 @@ _DRAFT_JSON_INSTRUCTION = (
     '  "purchases": {"<商品>": <数量>},\n'
     '  "food": {"<商品>": <数量>}\n'
     "}\n"
-    "★ **两种地块操作千万别混**（这是最容易错的地方）：\n"
-    "· `builds` —— 在**空地**上**新建**（玩家现在没有任何地块时，**只能用这个**）；\n"
-    "· `plot_plans` —— 只用于**已经属于玩家、且已建成**的地块，用来调它的开工率 u；\n"
-    "  玩家还没有的地块**一律不许写进 plot_plans**，否则引擎会判「地块不存在」。\n"
+    "★ 两条最容易错、必须遵守：\n"
+    "① `builds` 只能建在 **[空地]** 列出的格子上；你**已有**的地块绝不能写进 "
+    "builds（想让它开工就写 `plot_plans`）。\n"
+    "② **要开工必须写进 `plot_plans`；漏写 = 本季不开工。** 建议把 [可开工] "
+    "里的地块都写上 u=1.0（不想开就写 0）。\n"
     "要求：\n"
-    "· 只能从上面局面里 [可建] 那一节选出能建的类型/产物，不要自己编；\n"
-    "· 坐标用「r,c」格式（从 0 起算），且必须是**地图上的空地**；\n"
-    "· 每个 builds 都要给出 plot_type 与 target_level（新建为 1），"
-    "农业/工业还要给 product；\n"
-    "· 现金够不够不用你在文字里算 —— 校验由引擎做，你只管起草；\n"
+    "· 类型/产物只能从 [可建] 选：农业 product 填 A/B/C/D；工业 1 级填 G；"
+    "2 级填 H-A/H-F/H-G/H-J（研究线填 `研究`）；3 级填 "
+    "H-A+/H-F+/H-G+/H-J+/I；\n"
+    "· 空地新建只能 `target_level: 1`；升级才是 2/3，且一次只能升一级；\n"
+    "· 现金/材料/口粮都要钱：优先只建 [可建] 里总成本估得起的数量；"
+    "引擎会试算，超预算会自动缩量（但不会替你选路线）；\n"
+    "· 口粮可省略（引擎按 [人口/口粮] 的基准档补）；想冲优秀档就按优秀档填 "
+    "A/B/C/D；\n"
     "· 用不到的字段可以省略或留空，但 **player_id 必须写「{player_id}」**。"
 )
 
@@ -354,11 +379,16 @@ def _build_messages(
     preview_report: Optional[dict],
     cfg=None,
     draft: bool = False,
+    cap_text: str = "",
 ) -> list[dict]:
-    """把局面 / 规则摘要 / 试算数字 / 玩家问题拼成 OpenAI messages。"""
+    """把局面 / 可行动作 / 规则摘要 / 试算数字 / 玩家问题拼成 OpenAI messages。"""
     lines = [
         f"[当前局面 · 玩家 {player_id}]",
         _compact_state(player_id, state, cfg),
+    ]
+    if cap_text:
+        lines += ["", cap_text]
+    lines += [
         "",
         f"[规则摘要 · 基线 §{rule.get('key')}]",
         rule.get("summary", ""),
@@ -638,6 +668,8 @@ def _ok_advice(
     suggested_plan: Optional[dict],
     plan_source: Optional[str] = None,
     plan_issues: Optional[list[dict]] = None,
+    plan_notes: Optional[list[str]] = None,
+    plan_preview: Optional[dict] = None,
     evidence: list[dict],
     model: str,
     rule_key: Optional[str],
@@ -647,6 +679,11 @@ def _ok_advice(
 
     ⚠️ 这里**不收空 summary**：调用方必须先确认正文非空（见 `advise` 里的
        `empty_response` 分支）。留这道断言是为了让"假装成功"不可能再溜进来。
+
+    ★ 2026-10-18 新增两个**只加不改**的字段（前端用于显示“引擎改了什么”）：
+
+        `plan_notes`   —— 编译器校正说明（字符串数组，可能为空）
+        `plan_preview` —— 编译后真跑 `preview` 的摘要（dict 或 None）
     """
     assert summary.strip(), "空 summary 不许走成功路径 —— 应报 empty_response"
     return {
@@ -655,6 +692,8 @@ def _ok_advice(
         "suggested_plan": suggested_plan,
         "plan_source": plan_source,
         "plan_issues": plan_issues,
+        "plan_notes": list(plan_notes or []),
+        "plan_preview": plan_preview,
         "evidence": evidence,
         "model": model,
         "rule_key": rule_key,
@@ -666,10 +705,9 @@ def _ok_advice(
 
 
 def _draft_advice(
-    session: "GameSession",
     player_id: str,
-    plan_obj,
     *,
+    compiled,
     parse_problem: Optional[str],
     shape_error: Optional[str],
     evidence: list[dict],
@@ -677,18 +715,19 @@ def _draft_advice(
     rule_key: Optional[str],
     question: Optional[str],
 ) -> dict:
-    """draft=True 的收尾：把模型回的 JSON 解析成 Plan 候选 → 校验 → 收建议。
+    """draft=True 的收尾：编译器结果 → 建议形状。
 
-    三条出口（对应任务 A 的铁律）：
+    四条出口（对应 §11.4 与《AI秘书-有效起草方案》的验收）：
 
       ① 模型连 JSON 都没给出（一堆废话 / 全不是 JSON）→ **明确失败**（不编）；
-      ② 给了 JSON，但 **validate 不过** → `suggested_plan=None` + `plan_issues`
-         （**绝不把坏计划交给前端**）；
-      ③ 给了 JSON 且 **validate 通过** → `suggested_plan=该对象`、
-         `plan_source='model'`。
+      ② 编译器自己抛异常 → 明确失败（不编）；
+      ③ 编译器说 `ok=False`（validate 或 preview 过不了）→
+         `suggested_plan=None` + `plan_issues`（**绝不把坏计划交给前端**）；
+      ④ 编译器说 `ok=True` → `suggested_plan=编译后的 Plan`、
+         `plan_source='model'`、`plan_notes=校正说明`、`plan_preview=试算摘要`。
     """
     # ── ① 模型连 JSON 都没给（废话 / 全不是 JSON）→ 明确失败（不编）───
-    if plan_obj is None and parse_problem:
+    if compiled is None and parse_problem:
         return _ok_advice(
             summary=(
                 f"模型没给出一份能解析的计划 JSON（{parse_problem}）。"
@@ -703,11 +742,11 @@ def _draft_advice(
             question=question,
         )
 
-    # ── ② 给了 JSON，但翻不成 Plan（乱给键名 / 非法枚举值 / 缺必填）───
-    if plan_obj is None:
+    # ── ② 编译器自己抛了异常（输入形状完全不对等）───
+    if compiled is None:
         return _ok_advice(
             summary=(
-                f"模型给的 JSON 翻不成 Plan（{shape_error or '未知形状错误'}）。"
+                f"模型给的 JSON 编译器处理不了（{shape_error or '未知形状错误'}）。"
                 "这次起草被放弃——玩家仍得自己填表，或再点一次重新起草。"
             ),
             suggested_plan=None,
@@ -719,72 +758,65 @@ def _draft_advice(
             question=question,
         )
 
-    # ── ③ 引擎校验：与 /api/submit 走同一条 validate（只读）─────────────
-    #    ⚠️ 为什么不能直接调 ai.tools.tool_validate：
-    #       tool_validate 自带**第一次自省** `assert_import_boundary()`，
-    #       用 sys.modules 倒推「ai/ 有没有把 server.session/storage 拉进来」。
-    #       生产链不会炸（server.app 先起，ai 后 import，基线认得 server.* 是
-    #       既成事实）；**测试链**先 import ai 再拉起 server.app（FakeClient
-    #       只能这么搭），`server.registry/session` 必然后于 ai 进驻
-    #       sys.modules，自检**必炸**。
-    #       —— 这条自检的任务是「ai/ 内部不许越界」，不是「主机层不许校验」；
-    #          ai_host 本来就是 server 层，它调 engine.validate 天经地义。
-    #       所以走 tool_draft_plan 里的**同一条** engine.validate.validate_plan
-    #       （任务书给的备选校验路径），与 /api/submit 一个入口、一份 issues。
-    from engine import validate as _engine_validate
-    try:
-        cfg = session.cfg
-        player = session.state.player(player_id)
-        issues = [i.to_dict() for i in
-                  _engine_validate.validate_plan(plan_obj, player, cfg, player_id)]
-    except Exception as e:  # noqa: BLE001
-        return _ok_advice(
-            summary=(
-                f"起草出来的计划跑校验时出了意外（{type(e).__name__}: {e}）。"
-                "这次起草被放弃——玩家仍得自己填表，或再点一次重新起草。"
-            ),
-            suggested_plan=None,
-            plan_source=None,
-            plan_issues=None,
-            evidence=evidence,
-            model=model,
-            rule_key=rule_key,
-            question=question,
-        )
+    notes = list(compiled.notes or [])
 
-    # ── ④ 三种情况分出口 ──────────────────────────────────────────
-    if issues:
-        # 校验不过：suggested_plan=None + plan_issues（**绝不把坏计划交出去**）
-        plan_dict = plan_obj.to_dict()
-        return _ok_advice(
-            summary=(
-                f"模型起草的计划没过校验（{len(issues)} 条问题），"
+    # ── ③ 编译器说不过：suggested_plan=None + issues（绝不交坏计划）───
+    if not compiled.ok:
+        issues = list(compiled.issues or [])
+        if issues:
+            summary = (
+                f"模型起草的计划没过引擎校验（{len(issues)} 条问题），"
                 "这次起草被放弃——玩家仍得自己填表，或再点一次重新起草。"
-            ),
+            )
+        else:
+            summary = (
+                f"模型起草的计划试算没跑通（{compiled.settle_error or '原因未明'}），"
+                "这次起草被放弃——玩家仍得自己填表，或再点一次重新起草。"
+            )
+        return _ok_advice(
+            summary=summary,
             suggested_plan=None,
             plan_source="model",          # 它**确实**是模型起草的，只是不过
             plan_issues=issues,
+            plan_notes=notes,
+            plan_preview=None,
             evidence=evidence,
             model=model,
             rule_key=rule_key,
             question=question,
         )
 
-    # 校验通过：suggested_plan=该对象、plan_source='model'
-    # 这里的 summary 不能是 JSON 原文（太长），给玩家一句能看懂的说明。
-    plan_dict = plan_obj.to_dict()
+    # ── ④ 编译器说能跑：plan 已过 validate + preview ──
+    plan_dict = compiled.plan.to_dict()
     n_builds = len(plan_dict.get("builds") or [])
-    n_plots = len(plan_dict.get("plot_plans") or {})
+    n_plots = sum(
+        1 for pp in (plan_dict.get("plot_plans") or {}).values()
+        if pp.get("active", True) and float(pp.get("u", 0) or 0) > 0
+    )
     summary = (
         "模型起草了一份计划" +
-        (f"（含 {n_builds} 条建造、{n_plots} 块地的安排）" if (n_builds or n_plots) else "") +
-        "。下方 `suggested_plan` 就是它，玩家确认后可一键复制走 /api/submit。"
+        (f"（含 {n_builds} 条建造、{n_plots} 块地开工）" if (n_builds or n_plots) else "")
     )
+    if notes:
+        summary += f"；引擎校正 {len(notes)} 处（见 plan_notes）"
+    summary += "。下方 `suggested_plan` 就是它，玩家确认后可一键复制走 /api/submit。"
+
+    preview = compiled.preview or None
+    if isinstance(preview, dict):
+        # 只留前端要显示的两三个数（完整报告太长，进对话会淹掉重点）
+        preview = {
+            k: preview.get(k) for k in
+            ("total_deduction", "cash_after", "sales_revenue", "value_added")
+            if k in preview
+        }
+
     return _ok_advice(
         summary=summary,
         suggested_plan=plan_dict,
         plan_source="model",
         plan_issues=None,
+        plan_notes=notes,
+        plan_preview=preview,
         evidence=evidence,
         model=model,
         rule_key=rule_key,

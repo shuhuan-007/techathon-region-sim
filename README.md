@@ -187,6 +187,7 @@ M1 最小账本 → **M1.5 粮食/幸福度链** → M2 效率/全配方 → M3 
 > - **`ai/` 层已建**：`region-sim/ai/tools.py`（preview / validate / draft_plan）＋ `rules_digest.py`，**import 边界自检**（`assert_import_boundary()`）钉住「AI 无 commit」，测试见 `tests/test_ai_layer.py`。
 > - glB 地块资产接口已定（`docs/03-架构/glB地块资产接口.md`），目录统一为 `web/assets/plots/`（模型未到位，前端回退 2D 格子）。
 > - **2026-10-17 补**：**新闻叙事链已通**（`ai/narrate.py` 真跑成功两次，数字全对、守规则）；**财报解读在加固**（第一次真跑已修成接受模型按提示词返回的 Markdown，第二次撞上网关返回空正文——按失败如实报，不编造）；**AI 建议面板已接** `POST /api/ai/advise`。叙事生成时机＝结算后、下季行动前、按季缓存，`/api/state` 触发；真跑需设 `NARRATE_OFFLINE=0`。
+> - **2026-10-18 补：AI 起草已闭环**。新增 `ai/plan_context.py`（空地/可建材料折后价/可开工/人口口粮快照）＋`ai/plan_compile.py`（把模型输出规整成计划，只有 `validate` + `preview` 双过才交前端；已有地块误写 builds、漏写 plot_plans、超预算、产物/路线错都可修）。真模型实测：`g1` 开局建 2 块农业 → 提交 → 结算成功（2.19s）；`saves/1.json` 第 4 季 5 块地全开工 → 提交 → 结算成功。详见 [`docs/03-架构/AI秘书-有效起草方案.md`](docs/03-架构/AI秘书-有效起草方案.md)。
 
 ---
 
