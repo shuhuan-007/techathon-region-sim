@@ -12,7 +12,7 @@
      · 场景尺寸宽 5 × 高 2.8(scene 中 cell ≈ 1,这块屏大约是 5×3 格)
      · y = 8.5(远高于模型,模型高约 1)
      · xz = 视野 bbox 中心(沿用 city-modal._cityViewBBox 算法)
-     · rotation.x = -π/2 × 0.35 ≈ 向下微倾 63°(面板斜躺,从斜下方能看到正面;
+     · rotation.x = -π/2 × (30/90) = -π/6 ≈ 向下微倾 30°(v6 拍板"斜 30 度";
        缺省 rotation 面朝 +z 完全竖直,相机几乎只能看到一条边)
    ─────────────────────────────────────────────────────────────
    与 city-modal 的契约
@@ -279,8 +279,8 @@ window.APP = window.APP || {};
     const mesh = new THREE.Mesh(_geo, _mat);
     const { cx, cz } = _viewCenter();
     mesh.position.set(cx, SKY_Y, cz);
-    /* 向下微倾 63°(斜躺),从斜下/侧面能看到正面 */
-    mesh.rotation.x = -Math.PI / 2 * 0.35;
+    /* 向下微倾 30°(用户原话"斜 30 度"),从斜下/侧面能看到正面主体 */
+    mesh.rotation.x = -Math.PI / 2 * (30 / 90);  /* = -π/6 ≈ -30° */
     mesh.renderOrder = 1000;    /* depthTest=false 时压底渲染,确保最后画 */
     /* 不调 lookAt —— 静止的天上屏 */
     scene.add(mesh);

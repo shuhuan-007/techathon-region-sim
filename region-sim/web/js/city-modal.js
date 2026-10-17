@@ -1,4 +1,4 @@
-/* APP.cityModal —— 全屏 3D 城市预览 modal（多角度 + 阴影 + 蓝黑背景）
+﻿/* APP.cityModal —— 全屏 3D 城市预览 modal（多角度 + 阴影 + 蓝黑背景）
    ─────────────────────────────────────────────────────────────
    与 APP.map3d 完全独立的第二份 three.js 实例：自己的 canvas /
    scene / camera / renderer，互不共享,避免互相污染。
@@ -20,8 +20,8 @@
    · glb 本身已经是 3×3 烘焙阵（拍板 v7 §3），摆 1 次就是 9 个建模，
      不在这里 clone 9 次。
    · 背景 = var(--bg) ≈ #12161c → renderer.setClearColor(0x12161c)。
-   · 底盘 PlaneGeometry(20, 20) × MeshStandardMaterial(0x1a2130)，
-     中心 (5, -0.01, 5)，receiveShadow = true。**不是墨绿**。
+   · 底盘已删（v6 拍板）：整个空间一个颜色,无底面漂浮平面。
+      （原 v2 底盘 PlaneGeometry(20,20) 蓝黑 0x1a2130 段已整段删除。）
    · 灯光三件套：Ambient 0.55 + Directional 0.85 + castShadow （位置
      (20, 30, 15), shadow.camera ±15, mapSize 2048²) + Hemisphere 0.3。
    · 阴影：renderer.shadowMap.enabled = true, type PCFSoftShadowMap，
@@ -42,7 +42,6 @@ window.APP = window.APP || {};
   let _controls = null;        // THREE.OrbitControls
   let _plotGroup = null;
   let _wasteGroup = null;      // 简陋荒地（一块薄片 box，不占 gltf）
-  let _ground = null;
   let _enabled = true;
   let _failedUrls = {};
   let _rafId = 0;              // animation frame id
@@ -71,8 +70,8 @@ window.APP = window.APP || {};
       if (col > maxC) maxC = col;
     });
     const w = maxC - minC + 1, h = maxR - minR + 1;
-    const PAD = 1;
-    const side = Math.min(10, Math.max(3, Math.max(w, h) + PAD * 2));
+    const PAD = 0;   /* 2026-10-18 v6 拍板：最小容纳现有地块的正方形,不加 padding */
+    const side = Math.min(10, Math.max(1, Math.max(w, h) + PAD * 2));
     const cx = (minC + maxC + 1) / 2;
     const cz = (minR + maxR + 1) / 2;
     /* 方形中心不动 */
@@ -188,17 +187,6 @@ window.APP = window.APP || {};
     _controls.maxDistance = 40;
     _controls.maxPolarAngle = Math.PI / 2.1;
     _controls.update();
-
-    /* 底盘：平面（20×20）中心 (5, -0.01, 5)，蓝黑，收影 */
-    const groundGeo = new THREE.PlaneGeometry(20, 20);
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: 0x1a2130, roughness: 1.0, metalness: 0.0,
-    });
-    _ground = new THREE.Mesh(groundGeo, groundMat);
-    _ground.rotation.x = -Math.PI / 2;
-    _ground.position.set(GRID_CENTER, -0.01, GRID_CENTER);
-    _ground.receiveShadow = true;
-    _scene.add(_ground);
 
     _plotGroup = new THREE.Group();
     _scene.add(_plotGroup);
@@ -407,23 +395,16 @@ window.APP = window.APP || {};
       await Promise.allSettled(tasks);
     }
 
-    /* ── 视野方形 + 荒地填充（2026-10-18 v4 拍板）──────────────
+    /* ── 视野方形 + 荒地填充（2026-10-18 v6 拍板）──────────────
        1. 用 _cityViewBBox 拿 {cx, cz, side}；
-       2. _ground 用 scale 改成 side×side，position 移到 (cx, -0.01, cz)；
-       3. OrbitControls target 跟到 (cx, 0, cz)，camera 平行平移；
-       4. side ≤ 6 时，对 bbox 方形内"既不是 STATE.plots 也不是 MAP.cells 任一 asset"
+       2. OrbitControls target 跟到 (cx, 0, cz)，camera 平行平移；
+       3. side ≤ 6 时，对 bbox 方形内"既不是 STATE.plots 也不是 MAP.cells 任一 asset"
           的 (row,col)，生成简陋荒地（深棕薄片 box）。
-       无 plot 时保持原 GRID_CENTER=5、底盘 20×20 不变。 */
+       底盘已删（v6 拍板），不再对底面做缩放/平移。 */
     const view = _cityViewBBox(placedCells);
     if (view){
       const { cx, cz, side } = view;
-      /* 1) 底盘：用 scale 缩放替代重建，原 PlaneGeometry 尺寸保持 side=20 */
-      const scaleRatio = side / 20;
-      if (_ground){
-        _ground.scale.set(scaleRatio, 1, scaleRatio);
-        _ground.position.set(cx, -0.01, cz);
-      }
-      /* 2) controls target / camera */
+      /* 1) controls target / camera */
       if (_controls){
         const dx = cx - _controls.target.x;
         const dz = cz - _controls.target.z;
@@ -467,13 +448,8 @@ window.APP = window.APP || {};
           }
         }
       }
-    } else {
-      /* 无 plot：底盘还原到 GRID_CENTER=5、20×20 */
-      if (_ground){
-        _ground.scale.set(1, 1, 1);
-        _ground.position.set(GRID_CENTER, -0.01, GRID_CENTER);
-      }
     }
+    /* 无 plot：底盘已删（v6 拍板,整个空间一个颜色 0x12161c）,无额外回退逻辑 */
   }
 
   function _renderFrame(){
