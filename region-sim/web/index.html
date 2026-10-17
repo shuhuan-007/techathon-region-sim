@@ -206,13 +206,19 @@
           <p class="muted" style="margin:8px 0 0" id="proj-note">—</p>
         </div>
 
-        <!-- ★ AI 建议（待接）—— 另一路（AI 路由）填它。今天只留可见空位。 -->
+        <!-- ★ AI 建议 —— 只起草；确认后由玩家走 /api/submit（§11.4，AI 无 commit）。 -->
         <div class="panel" id="ai-panel" style="border-style:dashed;">
-          <h2>🤖 AI 建议（待接）</h2>
-          <p class="muted" style="margin:0">
-            提示词将由用户于 <b>2026-10-18</b> 提供，
-            届时接在 <code>server/ai_host.py</code> 的同一条模型通道上。
-            今天的事实包已就位（<code>/state.news.facts</code>）。
+          <h2>🤖 AI 建议</h2>
+          <div class="row" style="margin-bottom:8px">
+            <input id="ai-question"
+                   placeholder="（可空）例：这季先建什么？口粮要不要多买？"
+                   style="flex:1">
+            <button id="btn-ai-ask" class="primary">问 AI</button>
+          </div>
+          <div id="ai-status" class="muted" style="margin:0 0 8px"></div>
+          <div id="ai-result"></div>
+          <p class="muted" style="margin:8px 0 0">
+            AI 只能<b>起草</b>，提交计划永远是你点「采纳」或「推进本季度」的动作（§11.4）。
           </p>
         </div>
 
@@ -752,6 +758,98 @@ $("btn-report").onclick = () => {
   toast(`第 ${r.quarter} 季：扣款 ${fmt(r.total_deduction)}，` +
         `销售 ${fmt(r.sales_revenue)}，期末现金 ${fmt(r.cash_after)}，` +
         `增加值 ${fmt(r.value_added)}`, "ok");
+};
+
+/* ══════════════════════════════════════════════════════════
+   五、AI 建议（§11.4：AI 只起草，提交永远是玩家的动作）
+   ══════════════════════════════════════════════════════════ */
+let AI_LAST_PLAN = null;   // 最近一份AI起草的suggested_plan（未采纳前只是草稿）
+
+$("btn-ai-ask").onclick = async () => {
+  if (!GAME) return toast("先开局 / 读档，AI 要有局面才能出主意。", "warn");
+  const q = $("ai-question").value.trim();
+  const btn = $("btn-ai-ask"), status = $("ai-status");
+
+  btn.disabled = true;
+  status.textContent = "正在问 AI…（真调模型可能要几十秒，请稍候，页面没死）";
+  status.style.color = "var(--warn)";
+  $("ai-result").innerHTML = "";
+
+  let resp;
+  try{
+    resp = await api("POST", "/api/ai/advise", {
+      game: GAME, player: PLAYER, question: q || undefined,
+    });
+  }catch(e){
+    /* 分支①：网络层失败（fetch 抛错 / 非 JSON / HTTP 层错误）——人话，不崩 */
+    status.textContent = "";
+    status.style.color = "";
+    $("ai-result").innerHTML =
+      `<p style="color:var(--bad);margin:0">⚠️ 这次没能联系上 AI 服务：` +
+      `${e.message || e}。</p>` +
+      `<p class="muted" style="margin:6px 0 0">可能是网关没在跑或网络抖动——可以再点一次「问 AI」。</p>`;
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+  status.style.color = "";
+
+  const adv = (resp && resp.advice) || (resp && resp.ok === false ? resp : null);
+  if (adv && adv.ok === true && (adv.summary || "").trim()){
+    /* 分支②：ok:true 且 summary 非空 → 显示建议；有计划只显示，不执行 */
+    AI_LAST_PLAN = adv.suggested_plan || null;
+    status.textContent =
+      `已拿到建议（模型：${adv.model || "—"}${adv.rule_key ? "　规则节：§" + adv.rule_key : ""}）`;
+    let html = `<div style="white-space:pre-wrap;word-break:break-word">${adv.summary}</div>`;
+
+    if (AI_LAST_PLAN){
+      html += `<div class="msg" style="border-left-color:var(--accent);margin-top:10px">` +
+        `<b>AI 起草了一份计划</b>（<b>只是草稿，未执行</b>）：` +
+        `<pre style="margin:6px 0;font-size:11px;white-space:pre-wrap;word-break:break-all">${
+          JSON.stringify(AI_LAST_PLAN, null, 1)}</pre>` +
+        `<div class="muted">${adv.next_step || ""}</div></div>` +
+        `<button id="btn-ai-accept" class="primary" style="margin-top:8px">` +
+        `采纳这份计划（走玩家提交）</button>`;
+    } else {
+      html += `<p class="muted" style="margin:8px 0 0">（这次 AI 没起草具体计划，只给了建议。）</p>`;
+    }
+    if (adv.evidence && adv.evidence.length){
+      html += `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer">` +
+        `数字来源（evidence，${adv.evidence.length} 条）</summary>` +
+        `<table style="margin-top:4px"><thead><tr><th>来源</th><th>字段</th><th>值</th></tr></thead><tbody>` +
+        adv.evidence.map(ev =>
+          `<tr><td>${ev.source || ""}</td><td>${ev.field || ""}</td>` +
+          `<td class="num">${typeof ev.value === "object" ? JSON.stringify(ev.value) : (ev.value == null ? "—" : ev.value)}</td></tr>`
+        ).join("") + `</tbody></table></details>`;
+    }
+    $("ai-result").innerHTML = html;
+
+    const acc = $("btn-ai-accept");
+    /* ★ 采纳才走既有的玩家提交流程（/api/submit）。默认绝不自动提交。 */
+    if (acc) acc.onclick = async () => {
+      acc.disabled = true;
+      try{
+        await api("POST", "/api/submit", {game:GAME, player:PLAYER, plan: AI_LAST_PLAN});
+        await refresh();
+        toast("已按 AI 草稿提交计划（走玩家通道 /api/submit）。可再点「▶ 推进本季度」结算。", "ok");
+      }catch(e){ fail(e); acc.disabled = false; }
+    };
+  } else if (adv && adv.ok === false){
+    /* 分支③：AI 不可用（200 + ok:false）→ detail 人话 + 可以再点一次 */
+    AI_LAST_PLAN = null;
+    status.textContent = "";
+    const tag = adv.error ? `<span class="tag">${adv.error}</span> ` : "";
+    $("ai-result").innerHTML =
+      `<p style="color:var(--warn);margin:0">${tag}${adv.detail || "AI 这次没给出可用回答。"}</p>` +
+      `<p class="muted" style="margin:6px 0 0">可以再点一次「问 AI」。</p>`;
+  } else {
+    /* 分支④：拿到响应但形状出乎意料（不崩，明说） */
+    AI_LAST_PLAN = null;
+    status.textContent = "";
+    $("ai-result").innerHTML =
+      `<p style="color:var(--warn);margin:0">⚠️ AI 服务的应答形状出乎意料，没拿到可用的建议。` +
+      `可以再点一次「问 AI」。</p>`;
+  }
 };
 
 /* 启动 */
