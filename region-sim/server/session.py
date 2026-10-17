@@ -112,9 +112,19 @@ class GameSession:
             )
 
     def map_for(self, player_id: str) -> dict:
-        """整张地图（含别人的格子）—— 前端画地图用。**只读。**"""
+        """整张地图（含别人的格子）—— 前端画地图用。**只读。**
+
+        ★ 2026-10-17：递入**已提交的本季计划**（`self.plans`，只读）。
+           它只驱动 `build_map` 在 cells 上叠"前影"（在建虚影），
+           方便玩家在递交后立刻看到哪几格已经下过指令；
+           **不改真状态**、不进 `self.plans`。
+        """
         with self.lock:
-            return report.build_map(self.state, player_id)
+            return report.build_map(
+                self.state,
+                player_id,
+                pending=self.plans.get(player_id),
+            )
 
     def build_quote(self, player_id: str, builds: list) -> dict:
         """一组**未提交**建设指令的报价（引擎公式真算 → 前端零计算）。

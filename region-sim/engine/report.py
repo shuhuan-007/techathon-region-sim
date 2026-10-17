@@ -537,11 +537,44 @@ def _news(state: GameState, player_id: str, cfg: Config) -> Optional[dict]:
     return {"facts": facts, "narrative": None}
 
 
+def _quota_types(player, cfg: Config, this_plan_used: dict[str, int] | None = None) -> dict:
+    """开局减免名额**逐类汇总**（§5.3）。 数字全来自引擎函数，不自算。
+
+        {"agriculture": {"used": n, "total": 3, "remaining": m,
+                         "this_plan": k}, ...}
+
+      · used      —— 存档里已登记（`player.opening_quota_used`，跨季累计）
+      · this_plan —— 本季这份计划**本身**会用掉的（`k` 条，来自 `builds`）
+      · remaining —— `max(0, total − used − this_plan)`：再下一条还能不能打折，
+                     **前端只显示、绝不重新判定**（判定在 `build_cash_plan` 里）。
+    """
+    from engine import construction as _C
+
+    used_map = getattr(player, "opening_quota_used", None) or {}
+    this_plan_used = this_plan_used or {}
+    rows: dict[str, dict] = {}
+    for ptype in PlotType:
+        used = int(used_map.get(ptype.value, 0))
+        total = int(_C._quota_of(cfg, ptype) or 0)
+        plan_use = int(this_plan_used.get(ptype.value, 0))
+        rows[ptype.value] = {
+            "used": used,
+            "total": total,
+            "this_plan": plan_use,
+            "remaining": max(0, total - used - plan_use),
+        }
+    return rows
+
+
 def build_quote(state: GameState, player_id: str, cfg: Config, builds: list) -> dict:
     """一组**未提交**建设指令的报价（**引擎公式真算** → 前端零计算）。
 
     ⚠️ **只读**：`build_cash_plan` 本就是纯函数，不扣钱、不登记名额、
        不改状态。报的价以**结算第 5 步**为准（`pipeline` 用的是同一公式）。
+
+    ★ 2026-10-17 增补 `quota_by_type`：名额条与报价行**同源**（§5.3），
+       前端不再读 `STATE.opening_quota`（那个只看存档、看不到"本季这份
+       计划会用掉几名"）。每个类型给 `used / total / this_plan / remaining`。
     """
     from engine import construction as _C
     from engine.models import BuildOrder
@@ -561,6 +594,7 @@ def build_quote(state: GameState, player_id: str, cfg: Config, builds: list) -> 
     total = 0.0
     error: Optional[str] = None
     discounted_any = False
+    this_plan_used: dict[str, int] = {}
     try:
         for r in _C.build_cash_plan(plan, player, cfg):
             this_cash = float(r["cash"])
@@ -575,6 +609,10 @@ def build_quote(state: GameState, player_id: str, cfg: Config, builds: list) -> 
             total += this_cash
             if r["discounted"]:
                 discounted_any = True
+                pt_key = r["plot_type"].value
+                # 只数**本季这份计划里**真吃到名额的指令数（跨季累计已
+                # 经在 `player.opening_quota_used` 里，不能重复算）。
+                this_plan_used[pt_key] = this_plan_used.get(pt_key, 0) + 1
     except Exception as e:  # noqa: BLE001
         # 引擎抛什么 -> 原样告诉玩家。到这里都是业务错误
         # （缺产出 / 在建中 / 没这工程 / 不存在这格……）。
@@ -586,6 +624,9 @@ def build_quote(state: GameState, player_id: str, cfg: Config, builds: list) -> 
         "discount_rate": _C._discount_rate(cfg),
         "discounted_any": discounted_any,
         "error": error,
+        # ★ 与报价行**同源**的名额速览：used 是存档跨季累计，
+        #   this_plan 是这份计划本身用掉的，remaining 已扣两者（只读）。
+        "quota_by_type": _quota_types(player, cfg, this_plan_used),
     }
 
 
@@ -653,7 +694,50 @@ def _settle_blockers(
 # ══════════════════════════════════════════════════════════════════
 
 
-def build_map(state: GameState, player_id: str) -> dict:
+def _builds_to_virtual_plots(pending: Plan, builder_id: Optional[str] = None) -> list:
+    """把本季 `plan.builds` 折成"前影" Plot（状态机之外的**显示层**）。
+
+    ★ `builder_id`（可选）：递交这份计划的玩家 id —— 虚地块**带归属**，
+    让地图在结算前就能把那一格画成"我的"（`owner`/`mine`）。
+    ⚠️ 只加不改：真实地块的归属仍由 `build_map` 里的真路径推导。
+
+    与 `_plots()` 的形状一一对应，专门给 `/api/map` 与 `/api/state` 用：
+    计划**递交后、结算前**，玩家已经指着地图下过指令，但那一格还是空地
+    （第 2 步不改状态）。这一层"前影"就是让界面马上把那块地画成
+    `constructing`，把本季已用名额也算进取景框——一结算，实体 Plot
+    由 `pipeline` 补上，这层前影自动消失（因为 `plan.plans` 已清空）。
+
+    ⚠️ 只用于读端点（**不改状态**）；产物的 `status` 一律
+    `PlotStatus.CONSTRUCTING`（新建一级）或保留旧
+    `construction_left` 但在 `status` 上仍记 `CONSTRUCTING`（升级）。
+    """
+    from engine.models import PlotStatus
+
+    out = []
+    for b in pending.builds or []:
+        # 与 `to_dict()` 形状一致。结算后由真 Plot 取代。
+        out.append({
+            "plot_id": b.plot_id,
+            "owner": builder_id,            # 这条建设指令是谁的（前影归属）
+            "plot_type": b.plot_type.value,
+            "level": 0,                    # 新建一级的“影子”还没有 level，
+            "status": PlotStatus.CONSTRUCTING.value,
+            "product": b.product,
+            "u": None,                     # 本季预览：没有 u（尚未试算/不必试算）
+            "efficiency": None,
+            "output_preview": None,
+            "construction_left": None,     # 引擎没真表格，前端别显示工期
+            "target_level": int(b.target_level),
+            "running_quarters": 0,
+        })
+    return out
+
+
+def build_map(
+    state: GameState,
+    player_id: str,
+    pending: Optional[Plan] = None,
+) -> dict:
     """整张地图，含**不属于该玩家**的格子（多人时看邻居要用）。
 
     前端画地图需要"这一格是谁的"，所以这里给全集，
@@ -664,6 +748,11 @@ def build_map(state: GameState, player_id: str) -> dict:
       · 空地 → ``None``（前端的**回退信号**：画现有 2D 格子）。
       响应另附 `assets` manifest（键 → glB 文件路径），
       前端拿键查 manifest 得路径，**不自己拼**。
+
+    ★ `pending`（可选）：本季该玩家**已递交的计划**。递交后、结算前
+      那几条 `builds` 也要在地图上显影（否则"已经下指令"的格子
+      长得跟空地一样）。引擎这层用 `_builds_to_virtual_plots` 折出
+      与 `plots` 同形的"前影"挂到 cells 上；**不改真实状态**。
     """
     # plot_id → ( owner, 地块本身 )——算 asset 要用类型/等级/产出
     cell_plot: dict[str, tuple[str, object]] = {}
@@ -671,23 +760,44 @@ def build_map(state: GameState, player_id: str) -> dict:
         for plot_id, plot in pl.plots.items():
             cell_plot[plot_id] = (pid, plot)
 
+    # 已递交（未结算）建设指令 → 虚地块，叠在 cell 上（带归属）
+    virtual = _builds_to_virtual_plots(pending, builder_id=player_id) if pending is not None else []
+    v_by_pid = {v["plot_id"]: v for v in virtual}
+
     cells = []
     for plot_id in state.world.all_plot_ids():
         entry = cell_plot.get(plot_id)
+        vplot = v_by_pid.get(plot_id)
         if entry is None:
             owner_id, plot, key = None, None, None
         else:
             owner_id, plot = entry
             key = asset_key(plot.plot_type, plot.level, plot.product)
-        cells.append({
+        cell = {
             "plot_id": plot_id,
             "owner": owner_id,
             "mine": owner_id == player_id,
             "asset": key,
-        })
+        }
+        if vplot is not None:
+            # 只在 cell 上**追加**字段，不删/不改既有键
+            if entry is None and vplot.get("owner") is not None:
+                cell["owner"] = vplot["owner"]             # 前影的归属（建设指令的发件人）
+                cell["mine"] = vplot["owner"] == player_id
+            cell["status"] = vplot["status"]
+            cell["level"] = vplot["level"]
+            cell["product"] = vplot["product"]
+            cell["plot_type"] = vplot["plot_type"]
+        elif plot is not None:
+            cell["status"] = plot.status.value
+            cell["level"] = plot.level
+            cell["product"] = plot.product
+            cell["plot_type"] = plot.plot_type.value
+        cells.append(cell)
     return {
         "rows": state.world.rows,
         "cols": state.world.cols,
         "cells": cells,
         "assets": asset_manifest(),
+        "virtual_plots": virtual,   # 本季已下建设指令（未结算）；结算后自动消失
     }

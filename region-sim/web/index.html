@@ -224,7 +224,7 @@
 
         <div class="panel">
           <h2>上季报告</h2>
-          <div id="report-body" class="muted">还没有结算过。</div>
+          <div id="report-body" class="muted">还没有结算过（第 1 季结算后出现）。</div>
         </div>
       </div>
     </div>
@@ -375,29 +375,53 @@ function renderTop(){
 }
 
 /* ── 地图 ─────────────────────────────────────────────── */
+/* 把 STATE.plots 与 MAP.virtual_plots（本季已下建设指令、未结算的影子）
+   合成一个"显示用"视图：pending 在先（递交后立刻显影）、结算后由真 plots 顶替。
+   引擎只给数、前端只展示 —— 此层不做任何判定/折扣计算。 */
+function displayPlots(MAP, STATE){
+  const out = {};
+  (STATE.plots || []).forEach(p => out[p.plot_id] = p);
+  (MAP.virtual_plots || []).forEach(v => {
+    if (!out[v.plot_id]) out[v.plot_id] = v;  // 已存在真地块 → 真地块为准
+  });
+  return out;
+}
+
 function renderMap(){
   const el = $("map");
   el.style.gridTemplateColumns = `repeat(${MAP.cols}, minmax(0,1fr))`;
-  const byId = {};
-  (STATE.plots || []).forEach(p => byId[p.plot_id] = p);
+  const byId = displayPlots(MAP, STATE);
 
   el.innerHTML = MAP.cells.map(c => {
-    const p = byId[c.plot_id];
+    // ★ 缺陷 2：cell 直接带 status（引擎 build_map 已补）。优先用 cell 自己的
+    //   status；空地上叠的"前影"（virtual_plots）也会带 status=constructing，
+    //   不用再去 STATE.plots 里找。
+    const cellStatus = c.status;             // 引擎给的；空地无此字段
+    const p = byId[c.plot_id];               // STATE.plots / virtual_plots
+    const status = cellStatus || (p && p.status);
+    const isConstructing = status === "constructing";
+    const isRunning = status === "running";
+
     const cls = ["cell"];
-    if (p){
-      cls.push("mine", p.plot_type);
-      if (p.status === "constructing") cls.push("constructing");
-      if (p.status === "running") cls.push("running");
+    if (p || cellStatus){
+      // 有真地块或有 pending 影子就高亮；类型色优先看 cell/c 实有
+      const pt = c.plot_type || (p && p.plot_type);
+      if (pt) cls.push("mine", pt);
+      if (isConstructing) cls.push("constructing");
+      if (isRunning) cls.push("running");
     }
     if (selected === c.plot_id) cls.push("sel");
     let inner;
-    if (!p){
+    if (!p && !cellStatus){
       inner = `+`;
     } else {
-      const lvl = p.status === "constructing"
-        ? `${p.level}→${p.target_level}` : `${p.level}`;
-      inner = `<span class="lt">${TYPE_CN[p.plot_type] || "?"}${lvl}</span>`
-            + `<span class="sub">${p.product || (p.status === "constructing" ? "在建" : "—")}</span>`;
+      const pt = c.plot_type || (p && p.plot_type);
+      const lvl = (p && p.level != null) ? p.level : (c.level != null ? c.level : 0);
+      const tgt = (p && p.target_level != null) ? p.target_level : lvl;
+      const lvlTxt = isConstructing ? `${lvl}→${tgt}` : `${lvl}`;
+      const prod = (p && p.product) || c.product;
+      inner = `<span class="lt">${TYPE_CN[pt] || "?"}${lvlTxt}</span>`
+            + `<span class="sub">${prod || (isConstructing ? "在建" : "—")}</span>`;
     }
     /* glB 资产键（引擎给，前端只挂到 DOM 上 —— 不拼键、不加载模型）。
        c.asset 为 null = 空地/无模型 → 没有 data-asset 属性，保持现有 2D 渲染。
@@ -415,7 +439,10 @@ function renderMap(){
 /* ── 地块安排（开工比例）───────────────────────────────── */
 function renderPlots(){
   const body = $("plots-body");
-  const plots = (STATE.plots || []).filter(p => p.status === "running");
+  // ★ 缺陷 2b：把"在建/影子"也显出来 —— 递交后本季安排不再空着。
+  //   只展示，开工比例只对 running 开放（constructing 本季不能排工）。
+  const disp = displayPlots(MAP, STATE);
+  const plots = Object.values(disp).sort((a,b) => String(a.plot_id).localeCompare(String(b.plot_id)));
   if (!plots.length){
     body.innerHTML = `<tr><td colspan="4" class="muted">还没有建成的地块。先在地图上建造。</td></tr>`;
     return;
@@ -509,22 +536,30 @@ function renderFood(){
   }
 }
 
-/* ── 开局减免名额速览（引擎给数，前端只显示，绝不算折扣）── */
+/* ── 开局减免名额速览（★ 与报价行同源：读 build_quote.quota_by_type）──
+   数据三块都来自引擎 build_quote（§5.3）：
+     · used      存档跨季已用（引擎登记）
+     · this_plan 本季这份计划自己会用掉几条（引擎按 plan.builds 数出）
+     · remaining total − used − this_plan（引擎算好）
+   前端**只展示**，不做折扣判定、不做名额累加。 */
 function renderQuota(){
-  const q = STATE.opening_quota;
+  const q = STATE.build_quote;
   const el = $("quota-strip");
-  if (!q){ el.textContent = ""; return; }
+  if (!q || !q.quota_by_type){ el.textContent = ""; return; }
   const order = ["agriculture","resource","industry","service","research"];
   const pieces = [];
   for (const t of order){
-    const r = q.types && q.types[t];
+    const r = q.quota_by_type[t];
     if (!r) continue;
     if (!(r.total > 0)) continue;   // 没配名额的类型不占位
+    const planUse = r.this_plan || 0;
     const off = r.remaining > 0;
+    // "本类已用 used/total（含本季已下指令 planUse）· 下块打/不打折"
+    const main = `${TYPE_CN[t] || t} 已用 ${r.used}/${r.total}` +
+                 (planUse > 0 ? `（含本季已下指令 ${planUse}）` : "");
     pieces.push(
       `<span class="tag" style="${off?'':'opacity:.5'}">` +
-      `${TYPE_CN[t] || t} ${r.used}/${r.total}` +
-      `${off ? "·下块减" : ""}</span>`
+      `${main}${off ? " ·下块打折" : " ·下块原价"}</span>`
     );
   }
   el.innerHTML = pieces.length
@@ -566,7 +601,11 @@ function renderProj(){
 /* ── 上季报告 ─────────────────────────────────────────── */
 function renderReport(){
   const r = STATE.report;
-  if (!r){ $("report-body").innerHTML = `<span class="muted">还没有结算过。</span>`; return; }
+  if (!r){
+    // ★ 缺陷 4：第 1 季常驻一句（不再只靠瞬时 toast）
+    $("report-body").innerHTML = `<span class="muted">还没有结算过（第 1 季结算后出现）。</span>`;
+    return;
+  }
   const sold = Object.entries(r.sold || {}).map(([g,q]) => `${g}×${fmt(q,1)}`).join("、") || "无";
   const prod = (r.production || []).map(o => {
     const out = o.output_goods ? `${o.output_goods}×${fmt(o.output_qty,1)}` : "（无产出）";
@@ -644,8 +683,9 @@ function renderWorkDetail(){
     $("row-product").classList.add("hidden");
     $("sel-product").innerHTML = "";
   }
-  $("work-info").textContent =
-    `${w.label}　现金 ${w.cash}（**原价**）　物资 ${
+  // ★ 缺陷 3：用 <b> 强调"原价"，不再把 Markdown 的 ** 留在界面上
+  $("work-info").innerHTML =
+    `${w.label}　现金 ${w.cash}（<b>原价</b>）　物资 ${
       Object.entries(w.materials).map(([g,q])=>`${g}×${q}`).join(" + ")}　工期 ${w.quarters} 季`;
   $("btn-build").disabled = false;
   renderQuote();
