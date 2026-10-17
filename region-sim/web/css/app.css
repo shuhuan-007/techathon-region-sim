@@ -290,3 +290,53 @@
   #city-modal .cm-foot{
     margin-top:10px; color:var(--dim); font-size:12px;
   }
+
+/* ===== 数据飞字层（city-modal-ticker）=========================
+   z-index:2 = 在 canvas(z:1) 之上、header(z:10) 之下。
+   pointer-events:none 必守，否则挡 OrbitControls。 */
+#city-ticker{
+  position:absolute; inset:0;
+  pointer-events:none;
+  z-index:2;
+  overflow:hidden;
+}
+#city-ticker .fly{
+  position:absolute;
+  font-size:14px; line-height:1;
+  color:rgba(255,255,255,0.55);
+  text-shadow:0 0 6px rgba(0,0,0,0.6), 0 0 2px rgba(255,255,255,0.3);
+  white-space:nowrap;
+  user-select:none;
+  font-weight:500;
+  letter-spacing:0.02em;
+}
+/* 三条路线 */
+
+@keyframes flyLine{
+  0%   { transform:translate(-10vw,    0) ; opacity:0   ; }
+  10%  { opacity:1; }
+  90%  { opacity:1; }
+  100% { transform:translate(110vw,   20px); opacity:0   ; }
+}
+.fly-line   { animation:flyLine   8s  linear forwards; }
+
+@keyframes flyArc{
+  0%   { transform:translate(-10vw, 30px); opacity:0; }
+  10%  { opacity:1; }
+  50%  { transform:translate( 50vw, -20px); }
+  90%  { opacity:1; }
+  100% { transform:translate(110vw, 10px); opacity:0; }
+}
+.fly-arc    { animation:flyArc  10s linear forwards; }
+
+@keyframes flyCircle{
+  0%   { transform:translate(-50%,-50%) rotate(  0deg) translateX(80px) rotate(  0deg); opacity:0; }
+  10%  { opacity:1; }
+  50%  { transform:translate(-50%,-50%) rotate(180deg) translateX(80px) rotate(-180deg); }
+  90%  { opacity:1; }
+  100% { transform:translate(-50%,-50%) rotate(360deg) translateX(80px) rotate(-360deg); opacity:0; }
+}
+.fly-circle {
+  left:50% !important; top:50% !important;
+  animation:flyCircle 14s linear forwards;
+}

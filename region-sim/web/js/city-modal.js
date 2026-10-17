@@ -63,6 +63,8 @@ window.APP = window.APP || {};
     _ensureRenderer();
     _renderCity();
     _startLoop();
+    /* 数据飞字层：只读 STATE、零侵入 */
+    if (window.APP && APP.cityTicker && APP.cityTicker.start) APP.cityTicker.start();
   }
 
   function _close(){
@@ -70,6 +72,7 @@ window.APP = window.APP || {};
     if (m) m.classList.add('hidden');
     _isOpen = false;
     _stopLoop();
+    if (window.APP && APP.cityTicker && APP.cityTicker.stop) APP.cityTicker.stop();
     /* 不 destroy gltf cache——下次打开还能复用；不清 _plotGroup，让
        下次打开瞬间可以一次性把旧场面替换掉而不是空白闪烁。 */
   }
