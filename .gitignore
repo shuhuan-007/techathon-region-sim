@@ -19,3 +19,6 @@ saves/
 
 # Office 临时锁文件（~$xxx.docx）
 ~$*
+
+# 3D 建模原始文件（326MB+，用户拍板不入仓；运行用的 glb 在 web/assets/plots/，已单独忽略）
+建模/

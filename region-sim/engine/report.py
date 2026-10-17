@@ -1,5 +1,9 @@
 """状态报告 —— 给前端的 `/state` JSON（**引擎算好，前端零计算**）。
 
+契约变化 2026-10-17：glB 地块资产从旧的 ``<type>_l<level>`` 15 键契约
+切换为 ``engine/assets.py:asset_key()`` 返回的**中文目录名** 20 键契约。
+见下方「glB 地块资产契约」段。
+
 依据：
   · 《规则基线》§0（程序决定事实）、§11.4（AI 只解释）
   · 《界面要显示的变量清单》附录「数据从哪来」（`/state` 的形状）
@@ -55,52 +59,47 @@ from __future__ import annotations
 
 from typing import Optional
 
+from engine import assets as _assets
 from engine import finance, news, production, validate
 from engine.loader import Config
-from engine.models import GameState, Plan, PlotType
+from engine.models import GameState, Plan, Plot, PlotStatus, PlotType
 from engine.pipeline import QuarterReport, SettlementError, preview
 
 
 # ══════════════════════════════════════════════════════════════════
-# glB 地块资产契约（占位接口 —— 现在不出 3D，只把"键"定死）
+# glB 地块资产契约（2026-10-17 改为中文目录名 20 键）
 # ══════════════════════════════════════════════════════════════════
 #
-# ★ 这是给"以后接 glB 模型"预留的契约，完整约定见
-#   docs/03-架构/glB地块资产接口.md。三条要点：
+# 完整约定见 docs/03-架构/glB地块资产接口.md 与 engine/assets.py。
+# 三条要点：
 #
 #   ① 每块地有一个**资产键（asset key）**，唯一决定该用哪个模型文件；
-#   ② 模型文件固定放 `web/assets/plots/<key>.glb`，**文件名 = 键名**，
-#      把 .glb 丢进目录就生效，引擎不用改；
+#      键 = 建模目录名（中文），由 `engine/assets.py:asset_key()` 决定；
+#   ② 模型文件固定放 `web/assets/plots/<key>.glb`，**文件名 = 键名**；
 #   ③ 键缺失 / 文件缺失时前端**回退到现有 2D 渲染**（asset = null）。
 #
-# 键的命名规则（稳定、小写、可预测）：
+# ⚠️ 与旧的 15 键英文契约（``agri_l1`` 等）**不兼容** —— 前端按
+#    `cell.asset` 拼 URL 加载，所以 ``cell.asset`` 是**未编码的中文目录名**，
+#    前端会自行 ``encodeURIComponent``。
 #
-#       <类型短码>_l<等级>[ _<产出短码> ]
-#
-#   · 类型短码：agri / resource / industry / service / research
-#   · 等级：1 / 2 / 3（研究当前只有 1 级，仍占 l1 一键）
-#   · 产出短码：**只在该类型同级需要区分模型时才进键** ——
-#     眼下 15 张美术图是"5 类型 × 3 级"各一张，同级产出**共用一张图**
-#     （农业 A/B/C/D 同图、工业同级各路线同图），所以**产出当前不进键**，
-#     15 键覆盖全部 29 个"类型×等级×产出"组合。
-#   · 将来若某类型同级要按产出拆模型（例：industry_l2_machine），
-#     只须在该类型的 `_PRODUCT_IN_KEY` 登记产出 → 短码映射，键自动变长，
-#     旧键废弃。这是**有计划的扩展点**，不是临时补丁。
+# 当前生效的 20 键（= ``web/assets/plots/`` 下实际的 .glb 文件名）：
 
-#: 类型 → 键里的短码（顺序固定 = PlotType 声明顺序，保证 manifest 确定性）
-_TYPE_CODE: dict[PlotType, str] = {
-    PlotType.AGRICULTURE: "agri",
-    PlotType.RESOURCE: "resource",
-    PlotType.INDUSTRY: "industry",
-    PlotType.SERVICE: "service",
-    PlotType.RESEARCH: "research",
-}
-
-#: 哪些类型的"同级不同产出"需要不同的模型 → 产出进键。
-#: 当前为空：15 张图里同级产出共用一张（见上）。要拆分时在这里登记
-#: `{PlotType.INDUSTRY: {"H-A": "machine_agri", ...}}`，键即变为
-#: `industry_l2_machine_agri`。**没登记的类型产出永远不进键。**
-_PRODUCT_IN_KEY: dict[PlotType, dict[str, str]] = {}
+#: 当前生效的全部 20 个资产键（= 实际交付的中文目录名）。
+#: 这是美术要交付 / 已交付的模型清单，也是测试"键集合恰好 20 个"的基准。
+EXPECTED_ASSET_KEYS: list[str] = [
+    # 简单三类型（<前缀><level>，各 3 级）
+    "农业1", "农业2", "农业3",
+    "资源1", "资源2", "资源3",
+    "服务1", "服务2", "服务3",
+    # 工业一级（研究线/机械线共用）
+    "工业1",
+    # 工业二级（四条机械路线）
+    "工业农业2", "工业工业2", "工业资源2", "工业服务2",
+    # 工业三级（四条机械路线升级版 + 研究线 I）
+    "工业农业3", "工业工业3", "工业资源3", "工业服务业3", "工业高技术3",
+    # 研究只有一级
+    "研究",
+]
 
 #: 模型文件目录（相对 web 根；manifest 里给的就是这个相对路径前缀）
 ASSETS_DIR = "assets/plots"
@@ -108,36 +107,35 @@ ASSETS_DIR = "assets/plots"
 ASSETS_EXT = ".glb"
 
 
-def asset_key(plot_type: PlotType, level: int, product: Optional[str] = None) -> str:
-    """一块地的资产键。**契约的唯一实现，前端不许自己拼。**
+def asset_key(
+    plot_type: PlotType | str,
+    level: int,
+    product: Optional[str] = None,
+) -> Optional[str]:
+    """一块地的资产键（中文目录名），无对应建模时 ``None``。
 
-    参数与 `Plot` 的三个字段一一对应；`product` 只在
-    `_PRODUCT_IN_KEY` 登记过该类型时才影响键。
+    ★ 本函数是**适配器**：真正的查表逻辑在 ``engine/assets.py:asset_key()``
+    （纯函数，按 ``(plot_type, level, product)`` 查中文目录名）。这里只把
+    ``PlotType`` 枚举转成字符串，以便 ``report`` 既接受 ``Plot`` 的枚举字段、
+    也接受 ``plan.builds`` 里的字符串字段。
     """
-    try:
-        code = _TYPE_CODE[plot_type]
-    except KeyError:
-        raise ValueError(f"没有类型 {plot_type!r} 的资产键短码") from None
-    key = f"{code}_l{level}"
-    product_map = _PRODUCT_IN_KEY.get(plot_type)
-    if product_map is not None and product is not None:
-        suffix = product_map.get(product)
-        if suffix:
-            key += f"_{suffix}"
-    return key
+    pt = plot_type.value if isinstance(plot_type, PlotType) else str(plot_type)
+    return _assets.asset_key(pt, level, product)
 
 
 def all_asset_keys() -> list[str]:
     """**当前生效的全部资产键**（确定性排序）。
 
-    没有登记产出拆分时 = 5 类型 × 3 级 = **15 个键**。
-    这是美术要交付的模型清单，也是测试"键集合恰好 15 个"的基准。
+    返回 ``EXPECTED_ASSET_KEYS`` 的拷贝（20 个中文目录名）。
     """
-    keys: list[str] = []
-    for ptype in PlotType:  # Enum 声明顺序，确定性
-        for level in (1, 2, 3):
-            keys.append(asset_key(ptype, level))
-    return keys
+    return list(EXPECTED_ASSET_KEYS)
+
+
+def _web_root() -> "Path":  # noqa: F821
+    """``web/`` 目录的绝对路径（``engine/report.py`` 的兄弟目录）。"""
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[1] / "web"
 
 
 def asset_manifest() -> dict[str, dict]:
@@ -145,15 +143,29 @@ def asset_manifest() -> dict[str, dict]:
 
     形状::
 
-        { "<key>": { "file": "<key>.glb", "path": "assets/plots/<key>.glb" } }
+        {
+          "<中文目录名>": {
+            "file":   "<中文目录名>.glb",
+            "path":   "assets/plots/<中文目录名>.glb",
+            "exists": True | False,
+          },
+          ...
+        }
 
-    ⚠️ manifest 只**声明**路径约定，**不检查文件是否存在** ——
-       模型还没进来时 manifest 照样给全，前端拿不到文件就回退 2D。
+    键集合**恰好**是 ``EXPECTED_ASSET_KEYS`` 那 20 个中文目录名。
+    ``exists`` 在生成 manifest 时检查一次磁盘（``web/assets/plots/<key>.glb``）。
     """
-    return {
-        key: {"file": key + ASSETS_EXT, "path": f"{ASSETS_DIR}/{key}{ASSETS_EXT}"}
-        for key in all_asset_keys()
-    }
+    root = _web_root()
+    out: dict[str, dict] = {}
+    for key in EXPECTED_ASSET_KEYS:
+        filename = key + ASSETS_EXT
+        rel_path = f"{ASSETS_DIR}/{filename}"
+        out[key] = {
+            "file": filename,
+            "path": rel_path,
+            "exists": (root / ASSETS_DIR / filename).is_file(),
+        }
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -239,6 +251,9 @@ def build_state(
 
     u_map = _u_map(plan)
 
+    # ★ 顶栏「岗位 / 人口」：不依赖计划与试算（只看已建成地块）。
+    jobs_total, population_count = _jobs_and_population(state, player_id, cfg)
+
     out = {
         "quarter": state.world.quarter,
         "total_quarters": state.world.total_quarters,
@@ -250,7 +265,16 @@ def build_state(
         "happiness": player.last_happiness,
 
         # ── 人口与粮食（有计划就用计划算，没计划给 None）──
+        #    ⚠️ 「未提交计划 → None」的语义被既有断言钉死，**保留**。
+        #    顶栏要的"岗位 / 人口"是另一对字段：见下面 jobs / population_count。
         "population": _population_block(state, player_id, cfg, plan, trial),
+
+        # ── ★ 顶栏「岗位 / 人口」（2026-10-17，§3.3.1）──
+        #    与 u / 计划**无关**：只看已建成 RUNNING 地块的 d 之和。
+        #    未提交计划时也给得出来（这正是用户报障"一直显示 —"的修法）。
+        #    无 RUNNING 地块 → 0.0；**两个字段始终是标量，从不是 None**。
+        "jobs": jobs_total,
+        "population_count": population_count,
 
         # ── 效率速览 ──
         "efficiency": _average_efficiency(state, player_id, cfg, u_map),
@@ -337,6 +361,36 @@ def _population_block(
     from engine.population import compute_population
 
     return compute_population(state, player_id, _u_map(plan), cfg).to_dict()
+
+
+def _jobs_and_population(
+    state: GameState, player_id: str, cfg: Config
+) -> tuple[float, float]:
+    """顶栏「岗位 / 人口」用的**全域口径**（§3.3.1 / §4.3）。
+
+        jobs            = Σ d（仅已建成 RUNNING 地块；在建/空地不计）
+        population      = 2 × jobs          （r=2，§3.3.1；不取整）
+
+    ★ 这两条**与 u 无关**——岗位跟"已建成的地块"走，开不开工（u）不影响它
+       （2026-10-16 用户拍板："不申报开工不等于岗位不存在。人要吃饭。"）。
+       所以它们**在玩家尚未提交本季计划时也应该给出来**；
+       这也是新增本函数而不是复用 `_population_block` 的原因
+       —— 后者刻意保留 "plan=None → None" 的语义（既有断言锁死）。
+
+    ⚠️ 这里 `jobs` 口径与 `population.compute_population().labor_total`
+       **一致**（含服务/研究地块的 d，§3.3.2 "这些地块也有岗位"）；
+       与 `labor_food`（剔服务）**不是一回事**。顶栏只看"岗位数"，
+       不区分吃不吃粮，故取含服务的那个口径。
+    """
+    player = state.player(player_id)
+    jobs = 0.0
+    for pid in sorted(player.plots):
+        plot = player.plots[pid]
+        if plot.status is not PlotStatus.RUNNING:
+            continue
+        recipe = cfg.recipe(plot.plot_type, plot.level, plot.product)
+        jobs += recipe.d
+    return jobs, jobs * cfg.population.r
 
 
 def _average_efficiency(
@@ -762,10 +816,13 @@ def build_map(
     前端画地图需要"这一格是谁的"，所以这里给全集，
     而不是只给 `player.plots`。
 
-    ★ 每个 cell 带 `asset`（glB 资产键，契约见模块头）：
-      · 有地块（无论是谁的）→ 键字符串，如 ``agri_l1``；
-      · 空地 → ``None``（前端的**回退信号**：画现有 2D 格子）。
-      响应另附 `assets` manifest（键 → glB 文件路径），
+    ★ 每个 cell 带 `asset`（glB 资产键，契约见模块头与
+      ``engine/assets.py``，2026-10-17 起是**中文目录名**）：
+      · 有地块（无论是谁的）→ 中文目录名，如 ``农业1``、``工业服务业3``；
+        在建（``CONSTRUCTING``）与"前影"虚地块按**目标等级/产出**计算；
+      · 空地或"无对应建模"的组合（如 research level≥2、industry lv1 product≠G）
+        → ``None``（前端的**回退信号**：画现有 2D 格子）。
+      响应另附 `assets` manifest（键 → glB 文件信息，含 ``exists``），
       前端拿键查 manifest 得路径，**不自己拼**。
 
     ★ `pending`（可选）：本季该玩家**已递交的计划**。递交后、结算前
@@ -787,11 +844,22 @@ def build_map(
     for plot_id in state.world.all_plot_ids():
         entry = cell_plot.get(plot_id)
         vplot = v_by_pid.get(plot_id)
+
+        if vplot is not None:
+            # 前影（本季已递交的建设指令）的 asset 按**目标状态**（target_level/
+            # product/plot_type）从同一份契约 `asset_key()` 推。
+            v_asset = asset_key(
+                vplot["plot_type"], int(vplot["target_level"]), vplot.get("product"),
+            )
+        else:
+            v_asset = None
+
         if entry is None:
-            owner_id, plot, key = None, None, None
+            owner_id, plot, key = None, None, v_asset
         else:
             owner_id, plot = entry
             key = asset_key(plot.plot_type, plot.level, plot.product)
+
         cell = {
             "plot_id": plot_id,
             "owner": owner_id,
@@ -807,11 +875,17 @@ def build_map(
             cell["level"] = vplot["level"]
             cell["product"] = vplot["product"]
             cell["plot_type"] = vplot["plot_type"]
+            cell["asset"] = v_asset
         elif plot is not None:
             cell["status"] = plot.status.value
             cell["level"] = plot.level
             cell["product"] = plot.product
             cell["plot_type"] = plot.plot_type.value
+            # ★ 在建（CONSTRUCTING）中的地块：它的 ``level`` 是**当前等级**，
+            #   而 asset 按**目标等级**才合适（与"在建虚影"一致 ——
+            #   玩家看到的是它在建到的那个样子）。
+            if plot.status == PlotStatus.CONSTRUCTING and plot.target_level is not None:
+                cell["asset"] = asset_key(plot.plot_type, plot.target_level, plot.product)
         cells.append(cell)
     return {
         "rows": state.world.rows,

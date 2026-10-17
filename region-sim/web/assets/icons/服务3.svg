@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="64" viewBox="0 0 100 64" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="s3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E9A472"/><stop offset="1" stop-color="#C87FB0"/></linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8FD2F2"/><stop offset="1" stop-color="#B79CF0"/></linearGradient>
+  </defs>
+  <rect width="100" height="64" fill="url(#s3)"/>
+  <!-- 远景塔楼 -->
+  <g opacity=".55" fill="#B98DBE">
+    <rect x="0" y="26" width="12" height="30"/><rect x="88" y="20" width="12" height="36"/></g>
+  <!-- 主塔楼：玻璃幕墙 -->
+  <rect x="14" y="10" width="19" height="46" rx="1.6" fill="#6E86A8"/>
+  <rect x="15.4" y="11.5" width="16.2" height="43" fill="url(#g3)" opacity=".88"/>
+  <g stroke="#5D7396" stroke-width="1" opacity=".55">
+    <path d="M15.4 18h16.2M15.4 25h16.2M15.4 32h16.2M15.4 39h16.2M15.4 46h16.2"/>
+    <path d="M22 11.5v43M28 11.5v43"/></g>
+  <path d="M14 10h19l-2.4-4h-14z" fill="#8FA6C4"/>
+  <!-- 第二塔 -->
+  <rect x="36" y="20" width="15" height="36" rx="1.4" fill="#7A90AC"/>
+  <rect x="37.2" y="21.4" width="12.6" height="33" fill="#A8CBE8" opacity=".85"/>
+  <g stroke="#6A80A0" stroke-width="1" opacity=".5"><path d="M37.2 28h12.6M37.2 35h12.6M37.2 42h12.6M37.2 49h12.6"/><path d="M43.5 21.4v33"/></g>
+  <!-- 酒店 -->
+  <rect x="54" y="26" width="18" height="30" rx="1.4" fill="#F0DCC6"/>
+  <rect x="54" y="26" width="18" height="3.6" fill="#D98F5A"/>
+  <g fill="#F6C77E" opacity=".92">
+    <rect x="57" y="33" width="3.4" height="4"/><rect x="63" y="33" width="3.4" height="4"/><rect x="69" y="33" width="2.4" height="4"/>
+    <rect x="57" y="40" width="3.4" height="4"/><rect x="63" y="40" width="3.4" height="4"/><rect x="69" y="40" width="2.4" height="4"/>
+    <rect x="57" y="47" width="3.4" height="4"/><rect x="63" y="47" width="3.4" height="4"/></g>
+  <path d="M63 26v-6h5v6z" fill="#E0A876"/>
+  <!-- 霓虹发光线 -->
+  <g fill="none" stroke-linecap="round" opacity=".95">
+    <path d="M14 15h19" stroke="#7FE6FF" stroke-width="1.6"/>
+    <path d="M36 58h15" stroke="#FF9AE8" stroke-width="1.6"/>
+    <path d="M54 30h18" stroke="#FFD27F" stroke-width="1.4"/>
+    <path d="M74 34h22" stroke="#8FE7FF" stroke-width="1.4"/></g>
+  <!-- 道路枢纽 -->
+  <rect x="0" y="56" width="100" height="8" fill="#5B6172"/>
+  <path d="M0 60h100" stroke="#E8EDF2" stroke-width="1.2" stroke-dasharray="7 7" opacity=".6"/>
+  <path d="M74 40v20" stroke="#5B6172" stroke-width="8"/>
+  <path d="M74 42v18" stroke="#E8EDF2" stroke-width="1.1" stroke-dasharray="5 6" opacity=".55"/>
+  <!-- 小车 -->
+  <g fill="#F2F6FA" opacity=".92">
+    <rect x="18" y="58.4" width="8" height="3.4" rx="1.4"/><rect x="44" y="58.4" width="7" height="3.2" rx="1.4"/>
+    <rect x="86" y="58.4" width="8" height="3.4" rx="1.4"/></g>
+</svg>

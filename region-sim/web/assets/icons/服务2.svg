@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="64" viewBox="0 0 100 64" preserveAspectRatio="xMidYMid slice">
+  <defs><linearGradient id="s2" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#F0B27A"/><stop offset="1" stop-color="#DE9457"/></linearGradient></defs>
+  <rect width="100" height="64" fill="url(#s2)"/>
+  <rect x="0" y="52" width="100" height="12" fill="#CE8A56"/>
+  <path d="M0 58h100" stroke="#E0A874" stroke-width="1.4" opacity=".7"/>
+  <!-- 多层楼宇 -->
+  <rect x="5" y="22" width="21" height="31" fill="#F6E3D1"/>
+  <rect x="5" y="22" width="21" height="3.4" fill="#FFEFE0"/>
+  <g fill="#8FBEDC" opacity=".9">
+    <rect x="9" y="29" width="4.6" height="4.6"/><rect x="17" y="29" width="4.6" height="4.6"/>
+    <rect x="9" y="37" width="4.6" height="4.6"/><rect x="17" y="37" width="4.6" height="4.6"/>
+    <rect x="9" y="45" width="4.6" height="4.2"/><rect x="17" y="45" width="4.6" height="4.2"/></g>
+  <rect x="28" y="14" width="15" height="39" fill="#EED7C1"/>
+  <g fill="#9CC6E0" opacity=".85">
+    <rect x="31" y="19" width="4" height="5"/><rect x="37" y="19" width="4" height="5"/>
+    <rect x="31" y="28" width="4" height="5"/><rect x="37" y="28" width="4" height="5"/>
+    <rect x="31" y="37" width="4" height="5"/><rect x="37" y="37" width="4" height="5"/></g>
+  <!-- 购物中心 -->
+  <rect x="45" y="34" width="51" height="19" fill="#F2DCC6"/>
+  <path d="M45 34h51v4.6H45z" fill="#D98F5A"/>
+  <g fill="#CFE4EF">
+    <rect x="49" y="42" width="9" height="8"/><rect x="61" y="42" width="9" height="8"/>
+    <rect x="73" y="42" width="9" height="8"/><rect x="85" y="42" width="8" height="8"/></g>
+  <rect x="58" y="24" width="26" height="10" fill="#FFF0E0"/>
+  <rect x="61" y="27" width="20" height="4" rx="1.6" fill="#E2703F"/>
+  <rect x="64" y="28.2" width="14" height="1.6" fill="#FFE6D2"/>
+  <!-- 街区雨棚 -->
+  <path d="M92 34l8-5v6z" fill="#C97F4E"/>
+</svg>

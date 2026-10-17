@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# 存档：每局跑完的快照不入库（顶层 .gitignore 已有 saves/，本地再冗余一份）
+saves/
+*.save.json
+
+# 密钥与本地配置
+.env
+
+# 编辑器
+.vscode/
+.idea/
+
+# Office 临时锁文件
+~$*
+
+# 2026-10-17 3D 模型入库排除（用户拍板：体积太大不入 git，本地拷用）
+# 说明：
+#   · 建模原稿在建模/ 下（美术侧管理，**不入** region-sim 仓）
+#   · 运行时从这里加载：web/assets/plots/<中文名>.glb（共 20 个，约 326 MB）
+#   · ⚠️ plots/README.md 保留入 git（只排 .glb，不写 web/assets/plots/* 那么宽）
+web/assets/plots/*.glb

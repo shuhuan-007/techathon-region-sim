@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="64" viewBox="0 0 100 64" preserveAspectRatio="xMidYMid slice">
+  <defs><linearGradient id="s1" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#F0C79E"/><stop offset="1" stop-color="#E0A876"/></linearGradient></defs>
+  <rect width="100" height="64" fill="url(#s1)"/>
+  <rect x="0" y="48" width="100" height="16" fill="#D69C6E"/>
+  <rect x="28" y="30" width="40" height="19" fill="#F6E2CE"/>
+  <path d="M25 30h46l-4.5-8H29.5z" fill="#C97F4E"/>
+  <rect x="33" y="35" width="15" height="11" fill="#B7D8E4"/>
+  <rect x="33" y="35" width="15" height="11" fill="none" stroke="#FFF4E6" stroke-width="1.4"/>
+  <path d="M40.5 35v11" stroke="#FFF4E6" stroke-width="1.2"/>
+  <rect x="54" y="35" width="9" height="14" fill="#C08A5C"/>
+  <circle cx="61" cy="42" r="1.2" fill="#F6E2CE"/>
+  <rect x="31" y="26" width="9" height="3.4" rx="1" fill="#E2A05A"/>
+  <circle cx="35" cy="25" r="1.6" fill="#F2C078"/>
+  <!-- 公交站牌 -->
+  <path d="M79 48V28" stroke="#8B6E52" stroke-width="2"/>
+  <rect x="72" y="17" width="15" height="11" rx="2" fill="#F5E7D6"/>
+  <rect x="74" y="20" width="11" height="2.2" fill="#4A9EE8" opacity=".8"/>
+  <rect x="74" y="24" width="7" height="1.8" fill="#B79A7C"/>
+</svg>

@@ -1,0 +1,195 @@
+/* ══════════════════════════════════════════════════════════════
+   tiles.css —— 地图网格 / .cell / .mine / .planned / .constructing /
+   .running / .sel / .cell-农 等 cell 相关样式。
+   依赖 app.css 里的 :root 变量（--line/--accent/--ink/--dim/--warn 等）。
+   2026-10-17 视觉打磨版：emoji 锚 + 渐变 + 状态动效。
+   ══════════════════════════════════════════════════════════════ */
+  /* ── 地图 ─────────────────────────────────────────────── */
+  /* ★ S5 3D 叠加层：#map 要作为 <canvas id="map3d"> 的定位父，
+        原 display:grid 行为不变；新增 position:relative。 */
+  #map{display:grid; gap:3px; margin-top:8px; position:relative;}
+  /* ★ S5 3D 叠加层：覆盖整个 #map 的 WebGL 画布。 */
+  #map3d{
+    position:absolute; top:0; left:0; z-index:5;
+    pointer-events:none; display:block;
+  }
+
+  /* ── cell 基础 ────────────────────────────────────────── */
+  .cell{
+    aspect-ratio:1; border:1px solid var(--line); border-radius:6px;
+    background:linear-gradient(160deg, #131a22 0%, #0d1116 100%);
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center; cursor:pointer;
+    font-size:9px; color:var(--dim); position:relative;
+    padding:2px; text-align:center; line-height:1.15;
+    transition:transform .12s ease, border-color .12s ease, box-shadow .12s ease;
+    overflow:hidden;
+  }
+  /* 图标主锚点（emoji 由 JS 写在 cell 的 .icon 节点里；无 .icon 节点时退化为仅文字） */
+  .cell .icon{
+    font-size:22px; line-height:1; margin-bottom:1px;
+    filter:drop-shadow(0 1px 2px rgba(0,0,0,.5));
+    pointer-events:none;
+  }
+  .cell:hover{
+    border-color:var(--accent);
+    transform:translateY(-1px);
+    box-shadow:0 3px 10px rgba(77,163,255,.18);
+  }
+  .cell.mine{color:var(--ink);}
+
+  /* 地块类型渐变（保留氛围色，提鲜亮度＋inner glow） */
+  .agri{
+    background:
+      radial-gradient(120% 100% at 30% 20%, rgba(62,207,142,.16), transparent 60%),
+      linear-gradient(160deg, #1c3524 0%, #14231a 100%);
+    border-color:#2d4a38;
+  }
+  .resource{
+    background:
+      radial-gradient(120% 100% at 30% 20%, rgba(255,180,84,.14), transparent 60%),
+      linear-gradient(160deg, #3a3122 0%, #261f14 100%);
+    border-color:#4d3f28;
+  }
+  .industry{
+    background:
+      radial-gradient(120% 100% at 30% 20%, rgba(77,163,255,.16), transparent 60%),
+      linear-gradient(160deg, #223046 0%, #161f2c 100%);
+    border-color:#34496b;
+  }
+  .service{
+    background:
+      radial-gradient(120% 100% at 30% 20%, rgba(216,120,255,.14), transparent 60%),
+      linear-gradient(160deg, #36203a 0%, #221624 100%);
+    border-color:#54395c;
+  }
+  .research{
+    background:
+      radial-gradient(120% 100% at 30% 20%, rgba(150,120,255,.18), transparent 60%),
+      linear-gradient(160deg, #2a2344 0%, #1c182e 100%);
+    border-color:#493c76;
+  }
+
+  /* 空地("+")：dashed border + 半透明灰底，hover 提示 ➕ */
+  .cell:not(.mine):not(.planned):not(.constructing):not(.running){
+    border-style:dashed; border-color:#2b3542;
+    background:linear-gradient(160deg, rgba(27,33,41,.5), rgba(18,22,28,.7));
+  }
+  .cell:not(.mine):not(.planned):not(.constructing):not(.running):hover{
+    border-color:var(--accent); border-style:dashed;
+    background:linear-gradient(160deg, rgba(77,163,255,.10), rgba(27,33,41,.6));
+  }
+  .cell:not(.mine):not(.planned):not(.constructing):not(.running):hover::after{
+    content:"➕"; position:absolute; inset:0; display:flex;
+    align-items:center; justify-content:center;
+    font-size:18px; opacity:.9; pointer-events:none;
+    text-shadow:0 2px 6px rgba(0,0,0,.6);
+  }
+  /* 空地原本显示的"+"字稍微暗示而不是主角 */
+  .cell:not(.mine):not(.planned):not(.constructing):not(.running) > .lt{
+    color:#4d5d70; font-weight:400;
+  }
+
+  /* 文字层级 */
+  .cell .lt{
+    font-size:11px; font-weight:600; letter-spacing:.2px;
+    color:var(--ink); text-shadow:0 1px 2px rgba(0,0,0,.5);
+  }
+  .cell .sub{
+    font-size:9px; color:var(--dim); opacity:.95;
+    font-variant-numeric:tabular-nums;
+  }
+
+  /* 状态：running（微弱呼吸 + 顶部 accent 线） */
+  .cell.running{
+    border-color:#3ecf8e66;
+    box-shadow:inset 0 0 0 1px rgba(62,207,142,.15);
+    animation:cell-breathe 3.2s ease-in-out infinite;
+  }
+  .cell.running::before{
+    content:""; position:absolute; top:0; left:0; right:0; height:2px;
+    background:linear-gradient(90deg, transparent, var(--good), transparent);
+    opacity:.85; pointer-events:none;
+  }
+  @keyframes cell-breathe{
+    0%,100%{ box-shadow:inset 0 0 0 1px rgba(62,207,142,.12), 0 0 0 rgba(62,207,142,0); }
+    50%    { box-shadow:inset 0 0 0 1px rgba(62,207,142,.28), 0 0 8px rgba(62,207,142,.18); }
+  }
+
+  /* 状态：constructing（进度斜纹 + 🚧） */
+  .cell.constructing{
+    border-style:dashed; border-color:var(--warn);
+    background:
+      repeating-linear-gradient(
+        45deg,
+        rgba(255,180,84,.07) 0px, rgba(255,180,84,.07) 6px,
+        transparent 6px, transparent 12px
+      ),
+      linear-gradient(160deg, #2c2517, #1c1610);
+    background-size:200% 200%, 100% 100%;
+    animation:cell-stripes 1.6s linear infinite;
+  }
+  @keyframes cell-stripes{
+    from{ background-position:0 0, 0 0; }
+    to  { background-position:24px 24px, 0 0; }
+  }
+  .cell.constructing::after{
+    content:"🚧"; position:absolute; top:1px; right:2px;
+    font-size:10px; opacity:.9; pointer-events:none;
+    filter:drop-shadow(0 1px 1px rgba(0,0,0,.6));
+  }
+
+  /* 状态：planned（青虚线 + neon 光） */
+  .cell.planned{
+    border-style:dashed; border-width:2px; border-color:var(--accent);
+    background:linear-gradient(160deg, #14233552, #101c28);
+    color:var(--accent);
+    box-shadow:
+      0 0 0 1px rgba(77,163,255,.18),
+      0 0 10px rgba(77,163,255,.35),
+      inset 0 0 12px rgba(77,163,255,.10);
+  }
+  .cell.planned .lt{color:var(--accent);}
+  .cell.planned .sub{color:var(--accent); opacity:.85;}
+
+  /* 选中：渐变外发光 */
+  .cell.sel{
+    outline:2px solid var(--accent); outline-offset:-1px;
+    box-shadow:
+      0 0 0 2px #0a1017,
+      0 0 14px 1px var(--accent),
+      0 0 28px 2px rgba(77,163,255,.45);
+    z-index:2;
+  }
+
+  /* ★ S6 效率四分量悬停 tooltip（保留原结构不改） */
+  .cell .cell-tooltip{
+    display:none;
+    position:absolute;
+    bottom:105%;
+    left:50%;
+    transform:translateX(-50%);
+    background:rgba(15, 23, 42, 0.96);
+    border:1px solid #334155;
+    border-radius:6px;
+    padding:6px 10px;
+    font-size:11px;
+    line-height:1.5;
+    color:#e2e8f0;
+    white-space:nowrap;
+    z-index:50;
+    pointer-events:none;
+    text-align:left;
+    box-shadow:0 6px 18px rgba(0,0,0,.5);
+  }
+  .cell:hover .cell-tooltip{display:block;}
+  .cell-tooltip .tooltip-title{
+    font-size:10px; color:var(--dim); margin-bottom:2px; letter-spacing:.5px;
+  }
+  .cell-tooltip .kv{display:flex; justify-content:space-between; gap:12px;}
+  .cell-tooltip .k{color:#94a3b8;}
+  .cell-tooltip .v{color:#f1f5f9; font-weight:500;}
+  .cell-tooltip .kv.total{
+    border-top:1px solid #334155; margin-top:4px; padding-top:4px;
+  }
+  .cell-tooltip .kv.total .v{color:var(--accent); font-weight:600;}

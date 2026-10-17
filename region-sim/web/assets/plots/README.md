@@ -1,29 +1,34 @@
-# web/assets/plots/ —— glB 地块模型该放的地方
+# web/assets/plots/ —— glB 地块模型放置目录（中文 20 键契约）
 
-> 契约见 [`docs/03-架构/glB地块资产接口.md`](../../../docs/03-架构/glB地块资产接口.md)。
-> 引擎侧唯一实现：`engine/report.py`（`ASSETS_DIR = "assets/plots"`、`ASSETS_EXT = ".glb"`）；测试锚点：`tests/test_assets.py`。
+> 契约变化 2026-10-17：旧 15 键英文小写契约（`agri_l1` 等）**作废**。
+> 现行契约直接用建模目录的**中文目录名**作键 —— 文件名 = 键名 + `.glb`。
+> 引擎侧唯一实现：`engine/report.py`（`ASSETS_DIR = "assets/plots"`、`ASSETS_EXT = ".glb"`）；
+> 查表：`engine/assets.py:asset_key()`；测试锚点：`tests/test_assets.py`。
 
 ## 这里放什么
+20 个 `.glb` 文件，已交付（约 326 MB，不入 git，见 `.gitignore` 例外）：
 
-**glB 地块模型文件**（`<key>.glb`）。把 `.glb` 文件丢进这个目录就生效，引擎与前端都不用再改——manifest 声明的是路径约定，不是目录清单。
+- 简单三类（`<前缀><level>`，3 类×3 级 = 9 个）：
+  `农业1.glb` `农业2.glb` `农业3.glb`
+  `资源1.glb` `资源2.glb` `资源3.glb`
+  `服务1.glb` `服务2.glb` `服务3.glb`
+- 工业 1 级：`工业1.glb`
+- 工业 2 级（四条机械路线）：`工业农业2.glb` `工业工业2.glb` `工业资源2.glb` `工业服务2.glb`
+- 工业 3 级（四条机械路线 + 研究线 I）：
+  `工业农业3.glb` `工业工业3.glb` `工业资源3.glb` `工业服务业3.glb` `工业高技术3.glb`
+- 研究只有 1 级：`研究.glb`
 
-## 命名规则
+合计 20 个。⚠️ 美术笔误要保留：`工业服务2`（二级少"业"）与 `工业服务业3`（三级多"业"）**不"修正"**。
 
-```
-<类型短码>_l<等级>.glb
-```
+## 引擎怎么查
+`engine/assets.py:asset_key(plot_type, level, product)` 返回中文目录名（即本目录里的文件名主干）；
+`engine/report.py` 把它挂到 `/api/map` 响应的 `cell.asset` 与 `assets` manifest（`{file, path, exists}`）。
+research level 2/3 与非法组合返回 `null` → 前端回退 2D 渲染，不留死路。
 
-- **类型短码**：`agri` / `resource` / `industry` / `service` / `research`
-- **等级**：`1` / `2` / `3`
-- 全部小写；**文件名 = 键名 + `.glb`**。
+## 前端怎么用
+1. 从 `/api/map` 拿 `cell.asset`（中文键）。
+2. 拼 URL：`/static/assets/plots/${encodeURIComponent(key)}.glb`。
+3. three.js GLTFLoader 加载；失败（404 等）静默保持 2D cell 渲染（见 `web/js/map.js` 的 S5 3D 层）。
 
-## 共 15 个键
-
-`agri_l1/l2/l3` · `resource_l1/l2/l3` · `industry_l1/l2/l3` · `service_l1/l2/l3` · `research_l1/l2/l3`
-（同级不同产出共用一张模型；`research_l2/l3` 是预留键。）
-
-## 文件不存在时怎么办
-
-**前端回退到现有 2D 格子**：模型文件缺失（fetch 404 等）时，保持该格 2D 渲染不动——不弹错、不阻塞其它格、不留死路。当前前端只挂 `data-asset` 属性、不加载任何模型（未引 three.js）。
-
-> ⚠️ 目录名**已统一为 `plots`**（以引擎 `ASSETS_DIR` 为准）；旧的 `web/assets/tiles/` 已移除。
+## 文件不存在时
+保持 2D 渲染不弹错；不阻塞其它格。

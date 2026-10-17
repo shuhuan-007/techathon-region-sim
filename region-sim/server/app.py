@@ -64,7 +64,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 # ══════════════════════════════════════════════════════════════════
 # ★ 让 `python server/app.py` 也能跑
@@ -565,7 +565,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle(self, method: str) -> None:
         parsed = urlparse(self.path)
-        path = parsed.path
+        # ★ unquote 必须先于防穿越 resolve —— 否则百分号编码的".."能绕开前缀校验
+        # (中文 .glb 文件名也靠这一行从 %E5%86%9C%E4%B8%9A1 还原成"农业1")
+        path = unquote(parsed.path)
 
         # 静态资源（前端）
         if method == "GET" and not path.startswith("/api/"):

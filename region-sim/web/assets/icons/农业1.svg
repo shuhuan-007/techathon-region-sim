@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="64" viewBox="0 0 100 64" preserveAspectRatio="xMidYMid slice">
+  <defs><linearGradient id="f1" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#A8CE84"/><stop offset="1" stop-color="#88B667"/></linearGradient></defs>
+  <rect width="100" height="64" fill="url(#f1)"/>
+  <path d="M-4 20C18 15 40 25 62 19 78 15 92 22 104 18" fill="none" stroke="#CDAE7A" stroke-width="3.6" opacity=".9"/>
+  <path d="M-4 40C20 36 42 45 66 39 82 35 94 42 104 38" fill="none" stroke="#CDAE7A" stroke-width="3.6" opacity=".9"/>
+  <g stroke="#5C8F45" stroke-width="1.5" stroke-linecap="round">
+    <path d="M14 50v-7M19 52v-7M84 24v-7M89 26v-7"/></g>
+  <g stroke="#6FA554" stroke-width="1.4" stroke-linecap="round">
+    <path d="M14 45l-3-3M14 45l3-3M19 47l-3-3M19 47l3-3M84 19l-3-3M84 19l3-3M89 21l-3-3M89 21l3-3"/></g>
+  <g stroke="#9A7B45" stroke-width="1.6" stroke-linecap="round">
+    <path d="M76 54V36"/><path d="M68 40h16"/></g>
+  <circle cx="76" cy="31" r="3.6" fill="#C7A468"/>
+  <path d="M69 36h14l-2.5 5h-9z" fill="#B08C54"/>
+</svg>
