@@ -346,14 +346,47 @@ def test_build_agriculture_requires_product():
 
 
 def test_build_industry_requires_product():
-    """★ 工业建造同样**必须选路线**。"""
+    """★ 工业升级同样**必须选路线**。
+
+    ⚠️ 2026-10-17 改：原来用「**空地**建 2 级工业、不给 product」来测，
+       但空地直接建 2 级本身已非法（工程表只有 0→1/1→2/2→3），
+       校验会先报 `cannot_build_level_directly`，测不到「缺路线」。
+       改用**已建成的 1 级工业升 2 级** —— 这是真实会缺路线的场景。
+    """
     cfg = load_config()
     plan = plan_for(builds=[
         BuildOrder(plot_id="0,0", plot_type=PlotType.INDUSTRY,
                    target_level=2, product=None),
     ])
-    issues = validate.validate_plan(plan, make_player(), cfg)
+    player = make_player(**{"0,0": mature("0,0", PlotType.INDUSTRY, 1, product="G")})
+    issues = validate.validate_plan(plan, player, cfg)
     assert codes(issues) == {"build_product_required"}, f"实得：{codes(issues)}"
+
+
+def test_empty_plot_cannot_build_level_above_1():
+    """★ 空地**新建只能建 1 级**（2026-10-17 新增校验）。
+
+    依据：工程表 `construction.works` 只有 0→1 / 1→2 / 2→3 三种。
+    原来校验没拦这条：玩家（或 AI 起草的计划）在空地上写 target_level=2 时会
+    **一路放行到结算**，然后抛 `ConfigError: 没有这条工程：agriculture 0→2`
+    —— 那一季直接结算失败（而且结算失败后 phase 曾卡在 resolving，变成僵尸局）。
+    """
+    cfg = load_config()
+    for lv in (2, 3):
+        plan = plan_for(builds=[
+            BuildOrder(plot_id="0,0", plot_type=PlotType.AGRICULTURE,
+                       target_level=lv, product="A"),
+        ])
+        issues = validate.validate_plan(plan, make_player(), cfg)
+        assert "cannot_build_level_directly" in codes(issues), (
+            f"空地建 {lv} 级应被拦，实得 {codes(issues)}"
+        )
+    # 1 级必须放行（唯一合法的"新建"等级）
+    ok = plan_for(builds=[
+        BuildOrder(plot_id="0,0", plot_type=PlotType.AGRICULTURE,
+                   target_level=1, product="A"),
+    ])
+    assert codes(validate.validate_plan(ok, make_player(), cfg)) == set(), "空地建 1 级应合法"
 
 
 def test_build_agriculture_with_product_passes():

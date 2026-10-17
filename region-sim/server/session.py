@@ -460,9 +460,18 @@ class GameSession:
         self.phase = SessionPhase.RESOLVING
         try:
             advance(self.state, self.plans, self.cfg)
-        except SettlementError:
+        except Exception:
             # 结算失败 → 退回行动阶段，让玩家改计划重来。
-            # ⚠️ 不改状态：advance 在扣款前就会抛错，所以状态是干净的。
+            #
+            # ★ 2026-10-17 修：原来只捕获 `SettlementError`。
+            #   实测有的坏计划会抛**别的**异常（ValueError / KeyError 之类），
+            #   于是 phase 永远停在 `resolving` —— 这一局就变成**僵尸局**：
+            #   既不能提交（不在行动阶段）、也不能结算（不在收集阶段），只能重开档。
+            #   现在捕获 `Exception`（保留原异常类型往上抛，不影响错误展示），
+            #   保证**任何**失败都把 phase 退回 collecting。
+            #
+            #   ⚠️ 状态是否干净取决于 advance 自己的事务性：它在扣款前抛错时状态是干净的；
+            #      若是更晚的步骤出错，advance 内部的快照/回滚（policies 那套）会兜住。
             self.phase = SessionPhase.COLLECTING
             raise
 

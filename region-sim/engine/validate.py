@@ -411,6 +411,28 @@ def _check_builds(
         bid = order.plot_id
         plot = player.plots.get(bid)
 
+        # ── ⓪ 空地新建：**只能从 1 级起**（工程表只有 0→1 / 1→2 / 2→3）──
+        # ⚠️ 2026-10-17 修：原来没有这条。玩家（或 AI 起草的计划）在空地上直接写
+        #    target_level=2 时，校验**放行**，到**结算**才抛 ConfigError
+        #    「没有这条工程：agriculture 0→2」—— 那一季直接结算失败。
+        #    校验阶段就该拦住，并告诉玩家正确做法。
+        if plot is None and 1 < order.target_level <= 3:
+            issues.append(
+                PlanIssue(
+                    code="cannot_build_level_directly",
+                    target=bid,
+                    message=(
+                        f"地块 {bid!r} 目前是空地，**新建只能建 1 级**"
+                        f"（工程表只有 0→1、1→2、2→3），"
+                        f"但这条指令写的是 {order.target_level} 级。\n"
+                        f"    ⚠️ 想建 2/3 级：先建 1 级，建成后再下升级工程。"
+                    ),
+                    requested=float(order.target_level),
+                    available=1.0,
+                )
+            )
+            continue
+
         # ── ① 空地新建：plot_id 可以不在 plots 里（还没建）──
         # 但一旦存在，就必须满足状态约束。
         if plot is not None:
