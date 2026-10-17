@@ -114,6 +114,10 @@ class QuarterReport:
     #   两者相加才是工程表那一行的"按参考价合计"（§5.2）。
     construction_cash: float = 0.0
     construction: dict[str, float] = field(default_factory=dict)   # 本季投入的物资
+    # ★ 2026-10-18：本季工程事件（开工/完工），供结算流水逐条显示。
+    #   每条形如 {"event":"started"|"completed", "plot_id", "plot_type",
+    #            "from_level", "to_level", "product"}。
+    construction_events: list[dict] = field(default_factory=list)
     total_deduction: float = 0.0          # ★ 第 5 步一次性扣款
     wage_tax_refund: float = 0.0
 
@@ -154,6 +158,7 @@ class QuarterReport:
             "operating": self.operating,
             "construction_cash": self.construction_cash,
             "construction": dict(self.construction),
+            "construction_events": [dict(e) for e in self.construction_events],
             "total_deduction": self.total_deduction,
             "wage_tax_refund": self.wage_tax_refund,
             "sales_revenue": self.sales_revenue,
@@ -254,8 +259,10 @@ def _run_body(
        `_run` 之外的调用方也能看到）。
     """
     # ══ 第 1 步：期初更新与公告 ═════════════════════════════
+    # ★ 2026-10-18：收集“本季完工”事件，进报告给结算流水（工程情况）。
+    completed_events: dict[str, list[dict]] = {}
     for player_id in sorted(plans):
-        _advance_construction(state, player_id, cfg)
+        completed_events[player_id] = _advance_construction(state, player_id, cfg)
 
     # ══ 第 3 步：算效率 E（服务走独立分支） ═══════════════
     # ⚠️ 必须在生产之前算，且用**上一季**的 H。
@@ -529,9 +536,16 @@ def _run_body(
     #   ★ 这是"没有仓库 + 不重复扰动市场"两条基线同时约束下的落点，注释已标记。
     _deliver_contracted_goods(state, pending_contract_goods)
 
+    # ★ 本季期初完工的工程事件（第 1 步就发生了；报告已建好，补挂上去）
+    for player_id, events in completed_events.items():
+        if events:
+            reports[player_id].construction_events.extend(events)
+
     # ══ 第 6 步：产品分配与工程投入 ════════════════════════
     for player_id, plan in plans.items():
-        _invest_construction(state, player_id, plan, cfg)
+        started = _invest_construction(state, player_id, plan, cfg)
+        if started:
+            reports[player_id].construction_events.extend(started)
 
     # ══ 第 7 步：市场结算（产出按 P_t 全部卖出） ══════════
     #
@@ -1073,24 +1087,39 @@ def _construction_materials(plan: Plan, player, cfg: Config) -> dict[str, float]
     return total
 
 
-def _advance_construction(state: GameState, player_id: str, cfg: Config) -> None:
-    """第 1 步：推进工期，到期的地块本季可用（§6）。"""
+def _advance_construction(state: GameState, player_id: str, cfg: Config) -> list[dict]:
+    """第 1 步：推进工期，到期的地块本季可用（§6）。
+
+    返回本季**完工**事件列表（给报告/结算流水用）：
+        {"event":"completed","plot_id","plot_type","from_level","to_level","product"}
+    """
     player = state.players[player_id]
+    events: list[dict] = []
     for pid in sorted(player.plots):
         plot = player.plots[pid]
         if plot.status is not PlotStatus.CONSTRUCTING:
             continue
+        from_level = plot.level
         if plot.construction_left > 0:
             plot.construction_left -= 1
         if plot.construction_left <= 0:
             plot.status = PlotStatus.RUNNING
             plot.level = plot.target_level
             plot.running_quarters = 0     # 磨合从本季起算
+            events.append({
+                "event": "completed",
+                "plot_id": pid,
+                "plot_type": plot.plot_type.value,
+                "from_level": from_level,
+                "to_level": plot.level,
+                "product": plot.product,
+            })
         else:
             plot.running_quarters += 0
+    return events
 
 
-def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Config) -> None:
+def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Config) -> list[dict]:
     """第 6 步：把材料投进工程、**启动**工期（§11.2 工程材料分账）。
 
     ✅ 2026-10-16：不再是空桩。
@@ -1100,6 +1129,10 @@ def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Conf
          （材料一旦投入就**离开普通库存**，不会被当成存货）
       ② 启动：把地块切成 `CONSTRUCTING`，写入工期与目标等级
 
+    ★ 2026-10-18：返回本季**工程事件**（给结算流水显示“工程情况”）：
+        {"event":"started", "plot_id","plot_type","from_level","to_level","product"}
+      若这条工程当季就完工（1 季工程），再追加一条 "completed"。
+
     ⚠️ **新建**（地上还没这块地）时在这里**创建** `Plot`，
        所以"玩家的地"是在下完建设指令那一季才出现的。
        地图上开局就是可建的空地（§5.3，不引入"零级地块"）。
@@ -1107,12 +1140,14 @@ def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Conf
     ⚠️ 钱的扣除在第 5 步已经做完（`买物资 + 工程现金费`），这里只管实物与状态。
     """
     if not plan.builds:
-        return
+        return []
 
+    events: list[dict] = []
     player = state.players[player_id]
     for order in plan.builds:
         existing = player.plots.get(order.plot_id)
         work, materials = C.build_steps(cfg, existing, order)
+        from_level = 0 if existing is None else existing.level
 
         if existing is None:
             # ── 新建：造出这块地 ──────────────────────────────
@@ -1132,6 +1167,14 @@ def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Conf
 
         # ② 启动工期 + 定下产出/路线（建后不可更换，§5.1）
         C.start_work(plot, work, order.product)
+        events.append({
+            "event": "started",
+            "plot_id": order.plot_id,
+            "plot_type": order.plot_type.value,
+            "from_level": from_level,
+            "to_level": work.to_level,
+            "product": plot.product,
+        })
 
         # ══════════════════════════════════════════════════════════
         # ★ 2026-10-17 用户拍板：本季投钱投料也算一季工期
@@ -1157,6 +1200,15 @@ def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Conf
             plot.status = PlotStatus.RUNNING
             plot.level = plot.target_level
             plot.running_quarters = 0     # 磨合从完工本季起算
+            events.append({
+                "event": "completed",
+                "plot_id": order.plot_id,
+                "plot_type": order.plot_type.value,
+                "from_level": from_level,
+                "to_level": plot.level,
+                "product": plot.product,
+            })
+    return events
 
 
 def _value_added(rep: QuarterReport, cfg: Config) -> float:

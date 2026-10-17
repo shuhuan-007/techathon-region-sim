@@ -8,7 +8,11 @@ venv/
 
 # 存档（每次跑出来的局面，不进版本库）
 saves/
+saves-live/
 *.save.json
+region-sim/diag_*/
+region-sim/tools/_diag_*.py
+region-sim/tools/_gen_*.log
 
 # 密钥与本地配置
 .env

@@ -160,6 +160,31 @@ def test_startup_loop_exception_uses_plain_hg():
         )
 
 
+def test_construction_events_report_started_and_completed():
+    """★ 2026-10-18：报告要带工程事件，供结算流水显示“工程情况”。
+
+    1 季工程（农业新建）当季既 started 又 completed；
+    前端据此在结算时弹出两条，而不是只能看到一笔“工程现金费”。
+    """
+    st = fresh_state()
+    rep = run(st, Plan("p1", builds=[
+        BuildOrder("0,0", PlotType.AGRICULTURE, 1, "A"),
+    ]))
+    events = rep.construction_events
+    assert any(
+        e["event"] == "started" and e["plot_id"] == "0,0"
+        and e["from_level"] == 0 and e["to_level"] == 1
+        for e in events
+    ), f"缺开工事件：{events}"
+    assert any(
+        e["event"] == "completed" and e["plot_id"] == "0,0"
+        and e["to_level"] == 1
+        for e in events
+    ), f"1 季工程当季应完工，缺 completed 事件：{events}"
+    # 报告序列化后也要在（前端读的是 to_dict）
+    assert rep.to_dict()["construction_events"], "to_dict 丢了工程事件"
+
+
 # ══════════════════════════════════════════════════════════════════
 # 二、★ 工业双路线
 # ══════════════════════════════════════════════════════════════════

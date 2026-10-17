@@ -28,7 +28,8 @@
     GET  /static/<路径>            → web/ 下的静态文件
     GET  /api/games                → 存档列表
     POST /api/new_game             → 开一局新的
-    GET  /api/state?game=&player=  → /state（引擎算好的数字）
+    GET  /api/state?game=&player=  → /state（引擎算好的数字；默认不生成叙事）
+    GET  /api/narratives?game=&player= → 新闻 + 财报解读（单独后台生成）
     GET  /api/map?game=&player=    → 整张 10×10
     POST /api/submit               → 提交计划
     POST /api/simulate             → ★ 试算（只读，AI/玩家共用）
@@ -321,6 +322,13 @@ class App:
                 f"当前不在行动阶段（{session.phase.value}），不能试算"
             )
         issues = session.validate_only(plan, player_id)
+        # ★ 2026-10-18：`insufficient_cash_estimate` 是**按 P0 的粗估**，
+        #   可能把一份 preview 其实能跑通的计划误判成“钱不够”（例如自产
+        #   口粮能顶掉一部分、或上季价低于 P0）。`/api/simulate` 的权威
+        #   判据是紧接着的**真引擎试算**，所以这里把这条“预警”放过去，
+        #   让 preview 自己回答；真不够会返回 blocker（见下）。
+        #   `/api/submit` / `/api/validate` 仍保留这条早停（它们没有试算兜底）。
+        issues = [i for i in issues if i.code != "insufficient_cash_estimate"]
         if issues:
             from engine.validate import PlanRejected
             raise PlanRejected(issues)

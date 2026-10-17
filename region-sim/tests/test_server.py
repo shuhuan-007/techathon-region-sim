@@ -418,6 +418,61 @@ def test_registry_reuses_same_session_and_lock():
     assert s1.lock is s2.lock, "锁必须是同一把"
 
 
+def test_state_default_skips_narratives_and_query_can_opt_in():
+    """★ 2026-10-18：`/api/state` 默认**不生成叙事**，数字先回来。
+
+    真调模型时两路叙事 1–3 分钟；挂在 /state 上会让结算看起来要两分钟。
+    这里用 spy 钉住 `with_narratives` 的默认值与 `?narratives=1` 的显式行为。
+    """
+    c = Client()
+    c.new_game("g1")
+    s = c.registry.get("g1")
+
+    calls: list[bool] = []
+    orig = s.state_for
+
+    def spy(player_id, *, with_narratives=False):
+        calls.append(bool(with_narratives))
+        # 不真的生成叙事：只验证参数
+        return orig(player_id, with_narratives=False)
+
+    s.state_for = spy
+    try:
+        code, body = c.get("/api/state", game="g1", player="p1")
+        assert code == 200 and body["ok"] is True
+        assert calls[-1] is False, "默认 /api/state 不许生成叙事"
+
+        code, body = c.get("/api/state", game="g1", player="p1", narratives="1")
+        assert code == 200 and body["ok"] is True
+        assert calls[-1] is True, "?narratives=1 应显式生成叙事"
+    finally:
+        s.state_for = orig
+
+
+def test_narratives_route_is_separate_and_shaped():
+    """`GET /api/narratives` 是叙事的独立入口，不与 /state 绑在一起。"""
+    c = Client()
+    c.new_game("g1")
+    s = c.registry.get("g1")
+
+    orig = s.narratives_for
+    s.narratives_for = lambda player_id: {
+        "news": {"ok": True, "kind": "news", "quarter": 2, "headline": "标题", "body": "正文"},
+        "report": {"ok": True, "kind": "report", "quarter": 2, "text": "解读"},
+    }
+    try:
+        code, body = c.get("/api/narratives", game="g1", player="p1")
+        assert code == 200 and body["ok"] is True
+        assert body["narratives"]["news"]["headline"] == "标题"
+        assert body["narratives"]["report"]["text"] == "解读"
+    finally:
+        s.narratives_for = orig
+
+    # 方法错了 → 405（与其它 GET 端点同规矩）
+    code, body = dispatch(c.app, "POST", "/api/narratives", {}, {})
+    assert code == 405 and body["kind"] == "method_not_allowed"
+
+
 # ══════════════════════════════════════════════════════════════════
 # 命令行汇总
 # ══════════════════════════════════════════════════════════════════

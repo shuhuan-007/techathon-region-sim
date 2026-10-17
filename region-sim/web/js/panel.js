@@ -301,38 +301,46 @@ function renderReport(){
 
 /* ── 新闻 + 财报渲染(esc/mdInline/miniMD/factsTable 在 api.js)── */
 let NARR_INFLIGHT = false;
+let NARR_PENDING = false;
 
 /* ★ 2026-10-18：叙事生成从 /api/state 拆出来，单独在后台跑。
    · 前端**不 await** 它来渲染数字：结算/刷新先出数字；
    · 同一时刻只打一发（NARR_INFLIGHT），避免多入口重复烧模型；
-   · 失败只影响新闻/财报两个面板，不影响任何数字。 */
+   · 失败只影响新闻/财报两个面板，不影响任何数字；
+   · 跨季度时旧请求的结果不写进新季度（用 quarter/news 对象身份校验）。 */
 async function loadNarratives(){
-  if (NARR_INFLIGHT) return;
+  if (NARR_INFLIGHT){ NARR_PENDING = true; return; }
   const news = STATE && STATE.news;
-  if (!news || news.facts == null) return;          // 还没结算过 → 不生成
+  const hasReport = !!(STATE && (STATE.report || (STATE.quarter || 0) > 1));
+  if (!news || !hasReport) return;                   // 还没结算过 → 不生成
   if (news.narrative && news.report_narrative) return; // 已有缓存
+  const myQuarter = STATE.quarter;
   NARR_INFLIGHT = true;
   news.generating = true;
   renderNarr();
   try{
     const r = await api("GET", "/api/narratives", null,
                         {game:GAME, player:PLAYER});
-    if (r && r.narratives){
+    /* 期间换季了 → 这份结果属于上一季，丢弃；finally 会补发新季度。 */
+    if (STATE && STATE.quarter === myQuarter && STATE.news === news && r && r.narratives){
       news.narrative = r.narratives.news || null;
       news.report_narrative = r.narratives.report || null;
     }
   }catch(e){
-    const fail = {
-      ok: false,
-      error: "narratives_failed",
-      detail: (e && e.message) || "新闻/财报生成失败（不影响本季数字）。",
-    };
-    if (!news.narrative) news.narrative = fail;
-    if (!news.report_narrative) news.report_narrative = fail;
+    if (STATE && STATE.quarter === myQuarter && STATE.news === news){
+      const fail = {
+        ok: false,
+        error: "narratives_failed",
+        detail: (e && e.message) || "新闻/财报生成失败（不影响本季数字）。",
+      };
+      if (!news.narrative) news.narrative = fail;
+      if (!news.report_narrative) news.report_narrative = fail;
+    }
   }finally{
     NARR_INFLIGHT = false;
     news.generating = false;
     renderNarr();
+    if (NARR_PENDING){ NARR_PENDING = false; loadNarratives(); }
   }
 }
 
@@ -353,8 +361,8 @@ function renderNarr(){
   const pendingReport = news.generating
     ? "正在生成本季财报解读…（约 1–2 分钟；不影响结算，数字已经出来了）"
     : "本季财报解读还没生成。";
-  oneNarr("news-body", news.narrative, pendingNews, factsNull);
-  oneNarr("report-narr-body", news.report_narrative, pendingReport, factsNull);
+  oneNarr("news-body", news.narrative, pendingNews, factsNull && !news.generating);
+  oneNarr("report-narr-body", news.report_narrative, pendingReport, false);
 }
 
 /* 单个面板： narr 是 dict 或 null/undefined。 factsNull → "第 1 季"口径。 */
@@ -582,8 +590,14 @@ async function runPreview(){
     if (mySeq !== SIM.seq) return;
     SIM.last = null;
     SIM.fail = true;                                 // 静默失败，只改标识
-    SIM.reason = (e && e.payload && (e.payload.detail || e.payload.error))
-              || (e && e.message) || "试算没跑通";
+    const p = e && e.payload;
+    if (p && Array.isArray(p.issues) && p.issues.length){
+      /* 校验不过（如超预算/路线错）：把第一条问题原样给顶栏，title 放全部。 */
+      SIM.reason = p.issues.map(i => (i && i.message) || String(i)).join("\n");
+    } else {
+      SIM.reason = (p && (p.detail || p.error))
+                || (e && e.message) || "试算没跑通";
+    }
   }finally{
     SIM.inflight = false;
   }
@@ -605,7 +619,8 @@ function renderPreviewLine(){
     /* ★ 2026-10-18：不再只显示“预览暂不可用”。资金不足是业务结果，
        第一行就写清“需扣多少 / 手上多少”，完整原因放 title。 */
     const first = String(SIM.reason || "试算没跑通").split("\n")[0].trim();
-    el.textContent = "｜预览：" + (first || "暂不可用");
+    const short = first.length > 56 ? first.slice(0, 56) + "…" : first;
+    el.textContent = "｜预览：" + (short || "暂不可用");
     el.title = SIM.reason || "";
     el.style.color = "var(--warn)";
     return;
@@ -654,7 +669,7 @@ $("btn-settle").onclick = async () => {
     const reportForStream = (eq && eq.report) || null;
     const lines = settlementLinesFromReport(reportForStream);
     /* 头一行已 push 过（上面那行），这里跳过 lines[0]（它就是"结算第 N 季…"）。 */
-    await streamSettlementLines(lines.slice(1), 320);
+    await streamSettlementLines(lines.slice(1), 140);
 
     /* 流完 → **立刻刷新数字**（/api/state 默认不再生成叙事），
        新闻/财报交给 loadNarratives() 在后台单独打 /api/narratives。

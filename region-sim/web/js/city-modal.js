@@ -1,7 +1,27 @@
-﻿/* APP.cityModal —— 全屏 3D 城市预览 modal（多角度 + 阴影 + 蓝黑背景）
+/* APP.cityModal —— 全屏 3D 城市预览 modal（多角度 + 阴影 + 蓝黑背景）
    ─────────────────────────────────────────────────────────────
    与 APP.map3d 完全独立的第二份 three.js 实例：自己的 canvas /
    scene / camera / renderer，互不共享,避免互相污染。
+
+   v7（2026-10-18，拍板 A）稀疏行列压缩
+   ─────────────────────────────────────────────────────────────
+   用户原话："如果三块分得很开，就把中间空了很多格的剪掉。不能完全
+   打乱排序（主排序不变）。例如 PIZZA 中分成了三大块，那么就是要让
+   这三大块间的空隙少一点，但是这三大块本身的排序不变。"
+   落点：
+   · _compactAxisCoords(usedIdxList) → {map, size}
+     扫 sorted 去重 used 列表，相邻 gap>1 视为"分段"，段间在 newIdx
+     中留 1 空缝（让视觉上"这是被压缩的地方"），段内连续。原始顺序
+     保留（主排序不变，只剪中间空格）。
+   · _renderCity 每次重算 rowMap/colMap（不缓存，防竞态）；用
+     新 (newX,newZ) 摆模型、用新 (newRow,newCol) 算 bbox 与视野。
+   · 荒地：原始地图上"跳过行/列（空缝）"整行/列留白；原始
+     "存在该行/列但该 (row,col) 没人占"才堆 0x4a4036 荒地。LOD
+     side ≤ 6 按**压缩后 side** 评估。
+   · 点击/数据保护：plot 的 plot_id 与 STATE.plots/MAP.cells 映射
+     完全不动；压缩只是显示层。
+   · city-modal-sky.js: rotation.x 从 -30° 改 +30°（屏正面朝相机
+     那一侧往上倾 30°，进入视锥）。
 
    v2 改造（2026-10-17，用户原话）
    ─────────────────────────────────────────────────────────────
@@ -76,6 +96,29 @@ window.APP = window.APP || {};
     const cz = (minR + maxR + 1) / 2;
     /* 方形中心不动 */
     return { cx, cz, side };
+  }
+
+  /* v7 拍板 A：稀疏行列压缩 helper。
+     usedIdxList 是 sorted 去重的 index 数组（原 row 或 col）。
+     返回 { map, size }：
+       · map[oldIdx] = newIdx — 原始 idx → 压缩后 idx 的映射
+       · size = 压缩后总长度（含段间 1 空缝）
+     规则：扫 usedIdxList，prev 与当前 idx 相差 > 1 视为"分段"，
+     段间在 newIdx 中多空 1 格（视觉上"这是被剪掉的空格"）；
+     段内连续编号，顺序完全保留。
+     空数组返回 { map:{}, size:0 }。 */
+  function _compactAxisCoords(usedIdxList){
+    if (!usedIdxList || !usedIdxList.length) return { map: {}, size: 0 };
+    const map = {};
+    let next = 0;
+    let prev = null;
+    usedIdxList.forEach(idx => {
+      if (prev !== null && idx - prev > 1) next += 1;  /* 段间留 1 空缝 */
+      map[idx] = next;
+      next += 1;
+      prev = idx;
+    });
+    return { map, size: next };
   }
 
   function _open(){
@@ -366,8 +409,47 @@ window.APP = window.APP || {};
     const tasks = [];
     /* 2026-10-18 反馈 2：跟踪"已有地块的 bbox 中心"代替全局 GRID_CENTER=5。
        收集所有 plot 的 (row,col)，结束后把 controls.target / camera 跟过去。 */
-    const placedCenters = [];  // [{x, z}] 每个 plot 中心
-    const placedCells   = [];  // [{row, col}] 每个 plot 网格坐标（_cityViewBBox 用）
+    const placedCenters = [];  // [{x, z}] 每个 plot 中心（世界坐标）
+    const placedCells   = [];  // [{row, col}] 每个 plot 的"压缩后"网格坐标（_cityViewBBox 用）
+
+    /* ── v7 拍板 A：稀疏行列压缩（每次都重算,不缓存）────────────
+       1. 从 STATE.plots ∪ MAP.cells(c.asset 非空) 收集已占 (row,col)；
+       2. rowsUsed / colsUsed 排序去重;
+       3. _compactAxisCoords → {map, size};段间留 1 空缝,段内连续,主排序不变;
+       4. 摆模型 / bbox / 荒地 全部用 newRow/newCol（显示层）;
+       5. STATE.plots 与 MAP.cells 的 plot_id / 键一毫不改（数据层）。*/
+    const occupiedRowsSet = new Set();
+    const occupiedColsSet = new Set();
+    (STATE.plots || []).forEach(p => {
+      if (!p || !p.plot_id) return;
+      const parts = String(p.plot_id).split(',');
+      const r = parseInt(parts[0], 10);
+      const c = parseInt(parts[1], 10);
+      if (isNaN(r) || isNaN(c)) return;
+      occupiedRowsSet.add(r);
+      occupiedColsSet.add(c);
+    });
+    (MAP.cells || []).forEach(c => {
+      if (!c || !c.plot_id || !c.asset) return;
+      const parts = String(c.plot_id).split(',');
+      const r = parseInt(parts[0], 10);
+      const cc = parseInt(parts[1], 10);
+      if (isNaN(r) || isNaN(cc)) return;
+      occupiedRowsSet.add(r);
+      occupiedColsSet.add(cc);
+    });
+    const rowsUsedList = Array.from(occupiedRowsSet).sort((a,b)=>a-b);
+    const colsUsedList = Array.from(occupiedColsSet).sort((a,b)=>a-b);
+    const rc = _compactAxisCoords(rowsUsedList);   /* row 方向压缩 */
+    const cc = _compactAxisCoords(colsUsedList);   /* col 方向压缩 */
+    const rowMap = rc.map, rowSize = rc.size;
+    const colMap = cc.map, colSize = cc.size;
+    /* 反向:压缩后 newIdx → 原 idx。"段间空缝"指 newIdx 不在 reverse 表里。 */
+    const rowReverse = {};   /* newR → oldR(存在),不存在即空缝 */
+    const colReverse = {};   /* newC → oldC(存在),不存在即空缝 */
+    rowsUsedList.forEach(oldR => { rowReverse[rowMap[oldR]] = oldR; });
+    colsUsedList.forEach(oldC => { colReverse[colMap[oldC]] = oldC; });
+
     (STATE.plots || []).forEach(p => {
       const pid = p.plot_id;
       const cell = cellById[pid];
@@ -380,10 +462,15 @@ window.APP = window.APP || {};
       const row = parseInt(parts[0], 10);
       const col = parseInt(parts[1], 10);
       if (isNaN(row) || isNaN(col)) return;
-      const x = col * CELL_SPACING + CELL_SPACING / 2;
-      const z = row * CELL_SPACING + CELL_SPACING / 2;
+      /* v7 显示层:走 rowMap / colMap 拿压缩后坐标。原 plot_id 不动。 */
+      const newR = rowMap[row];
+      const newC = colMap[col];
+      if (newR === undefined || newC === undefined) return;
+      const x = newC * CELL_SPACING + CELL_SPACING / 2;
+      const z = newR * CELL_SPACING + CELL_SPACING / 2;
       placedCenters.push({ x, z });
-      placedCells.push({ row, col });
+      /* bbox 用压缩后坐标 → 视野方形才会"压缩",贴合 v7 拍板 */
+      placedCells.push({ row: newR, col: newC });
       tasks.push(
         _loadGlb(key).then(gltf => {
           _placeGlb(gltf, x, z);
@@ -395,11 +482,13 @@ window.APP = window.APP || {};
       await Promise.allSettled(tasks);
     }
 
-    /* ── 视野方形 + 荒地填充（2026-10-18 v6 拍板）──────────────
-       1. 用 _cityViewBBox 拿 {cx, cz, side}；
+    /* ── 视野方形 + 荒地填充（2026-10-18 v6 拍板;v7 跟进压缩后坐标）───
+       1. 用 _cityViewBBox 拿压缩后 {cx, cz, side}；
        2. OrbitControls target 跟到 (cx, 0, cz)，camera 平行平移；
-       3. side ≤ 6 时，对 bbox 方形内"既不是 STATE.plots 也不是 MAP.cells 任一 asset"
-          的 (row,col)，生成简陋荒地（深棕薄片 box）。
+       3. side ≤ 6（压缩后评估）时,对 bbox 方形内:
+            · newR/newC 落在"段间空缝"（reverse 表里不存在）→ 整行/列留白,不堆；
+            · newR/newC 对应原始 (row,col) 但该格既不在 STATE.plots 也无 asset
+              → 堆简陋荒地（0x4a4036,0.95×0.04×0.95 薄 Box）。
        底盘已删（v6 拍板），不再对底面做缩放/平移。 */
     const view = _cityViewBBox(placedCells);
     if (view){
@@ -414,26 +503,27 @@ window.APP = window.APP || {};
         _camera.lookAt(cx, 0, cz);
         _controls.update();
       }
-      /* 3) 荒地：side ≤ 6 才堆；更大索密度反成噪音 */
+      /* 3) 荒地：side ≤ 6 才堆（压缩后评估） */
       if (side <= 6 && _wasteGroup){
-        /* 造一份"已占用格子"字典：STATE.plots ∪（MAP.cells 里 c.asset 非空） */
+        /* 原始"被占用"字典:STATE.plots ∪（MAP.cells 里 c.asset 非空） */
         const occupied = {};
         (STATE.plots || []).forEach(p => { if (p && p.plot_id) occupied[p.plot_id] = true; });
         (MAP.cells || []).forEach(c => {
           if (c && c.plot_id && c.asset) occupied[c.plot_id] = true;
         });
-        /* 方形在 row/col 上的覆盖范围：
-           center=(minC+maxC+1)/2, side=…；左下角
-             colStart = round(cx - side/2), rowStart = round(cz - side/2)。
-           只生成完全落在 [0, 9] 内的格子。 */
+        /* 压缩后方形的左下角（压缩后 coord 空间）*/
         const colStart = Math.round(cx - side / 2);
         const rowStart = Math.round(cz - side / 2);
-        for (let r = rowStart; r < rowStart + side; r++){
-          for (let c = colStart; c < colStart + side; c++){
-            if (r < 0 || c < 0 || r > 9 || c > 9) continue;
-            const id = r + ',' + c;
+        for (let newR = rowStart; newR < rowStart + side; newR++){
+          for (let newC = colStart; newC < colStart + side; newC++){
+            /* 段间空缝:newR/newC 不在 reverse 表 → 整行/列留白 */
+            if (rowReverse[newR] === undefined) continue;
+            if (colReverse[newC] === undefined) continue;
+            const oldR = rowReverse[newR];
+            const oldC = colReverse[newC];
+            const id = oldR + ',' + oldC;
             if (occupied[id]) continue;
-            /* 简陋荒地：薄 Box，无贴图无 glb */
+            /* 原始"空地"（地图上有这行/列,但该格没人占）→ 堆简陋荒地 */
             const w = CELL_SPACING * 0.95;
             const h = 0.04;
             const geo = new THREE.BoxGeometry(w, h, w);
@@ -441,7 +531,7 @@ window.APP = window.APP || {};
               color: 0x4a4036, roughness: 1.0, metalness: 0.0,
             });
             const m = new THREE.Mesh(geo, mat);
-            m.position.set(c * CELL_SPACING + CELL_SPACING / 2, 0.02, r * CELL_SPACING + CELL_SPACING / 2);
+            m.position.set(newC * CELL_SPACING + CELL_SPACING / 2, 0.02, newR * CELL_SPACING + CELL_SPACING / 2);
             m.receiveShadow = true;
             m.castShadow = false;
             _wasteGroup.add(m);

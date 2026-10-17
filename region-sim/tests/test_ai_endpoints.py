@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.loader import load_config
+from engine.pipeline import SettlementError
 from server import app as server_app
 from server.app import App, dispatch
 from server.registry import GameRegistry
@@ -296,6 +297,69 @@ def test_wrong_method_is_405_on_new_routes():
     # rules 是 GET 路由 → POST 应 405
     code, body = c.post("/api/rules", {})
     assert code == 405 and body["kind"] == "method_not_allowed", body
+
+
+def test_simulate_business_blocker_is_200_not_500():
+    """★ 资金不足是**试算结果**，不是服务端 500。
+
+    2026-10-18 真跑：玩家攒了一份超预算计划，`/api/simulate` 抛
+    `SettlementError` → 旧 `_ERROR_MAP` 没有它 → 500 → 前端只能显示
+    “预览暂不可用”。现在返回 200 + `report:null` + `blocker`，前端可显示
+    “资金不足：需扣 X / 手上有 Y”。
+    """
+    c = Client()
+    c.new_game("g1")
+    s = c.registry.get("g1")
+    orig = s.simulate
+
+    def boom(plan):
+        raise SettlementError(
+            "资金不足：p1 本季需扣 472.21，手上只有 416.00。"
+        )
+
+    s.simulate = boom
+    try:
+        code, body = c.post("/api/simulate", {
+            "game": "g1", "player": "p1",
+            "plan": {"player_id": "p1"},
+        })
+    finally:
+        s.simulate = orig
+
+    assert code == 200, f"业务失败不该是 5xx，实得 {code}：{body}"
+    assert body["ok"] is True
+    assert body["report"] is None, "算不出来时不许编一份报告"
+    assert body["kind"] == "settlement_failed"
+    assert "资金不足" in body["blocker"]
+    assert "472.21" in body["blocker"] and "416.00" in body["blocker"]
+
+
+def test_simulate_overbudget_uses_real_preview_not_p0_estimate():
+    """★ 超预算计划：不能让 P0 粗估抢先判 `plan_rejected`。
+
+    `/api/simulate` 的权威是**真引擎试算**；`validate` 里的
+    `insufficient_cash_estimate` 只是“按 P0 的预警”，可能误判。
+    放它过去后，preview 会给出**真实**资金缺口（10 条工业 ≈ 2990）。
+    """
+    c = Client()
+    c.new_game("g1")
+    plan = {
+        "player_id": "p1",
+        "builds": [
+            {"plot_id": f"0,{i}", "plot_type": "industry",
+             "target_level": 1, "product": "G"}
+            for i in range(10)
+        ],
+    }
+    code, body = c.post("/api/simulate", {
+        "game": "g1", "player": "p1", "plan": plan,
+    })
+    assert code == 200, f"超预算应走真实试算 blocker，不该 400：{body}"
+    assert body["ok"] is True
+    assert body["report"] is None
+    assert body["kind"] == "settlement_failed"
+    assert "资金不足" in body["blocker"]
+    assert "2990" in body["blocker"] or "实际" in body["blocker"]
 
 
 # ══════════════════════════════════════════════════════════════════

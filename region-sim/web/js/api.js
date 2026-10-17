@@ -167,6 +167,21 @@ function settlementLinesFromReport(r){
     lines.push({text:"· 本季无生产（没开工/没地块）", kind:"dim"});
   }
 
+  /* 工程事件：本季开工 / 完工（引擎 `construction_events`，2026-10-18 新增）。
+     有就逐条上；没有就跳过 —— 不替引擎补“应该建成了”这种话。 */
+  const events = Array.isArray(r.construction_events) ? r.construction_events : [];
+  events.forEach(e => {
+    if (!e || !e.plot_id) return;
+    const t = TYPE_CN[e.plot_type] || e.plot_type || "?";
+    const route = e.product ? `·${e.product}` : "";
+    const lv = `${t}${e.from_level != null ? e.from_level : "?"}→${e.to_level != null ? e.to_level : "?"}${route}`;
+    if (e.event === "completed"){
+      lines.push({text:`✓ 工程完工：${e.plot_id}（${lv}）`, kind:"good"});
+    } else if (e.event === "started"){
+      lines.push({text:`✓ 工程开工：${e.plot_id}（${lv}）`, kind:""});
+    }
+  });
+
   /* 工程：本季工程现金费 + 实际投入物资（r.construction 是 {商品:数量}）。
      ★ 2026-10-18 补：玩家要求结算时能看到“工程情况”。 */
   const cons = (r.construction && typeof r.construction === "object") ? r.construction : {};
