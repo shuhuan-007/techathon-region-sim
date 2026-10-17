@@ -85,6 +85,7 @@ window.APP = window.APP || {};
     m.classList.remove('hidden');
     _isOpen = true;
     _ensureRenderer();
+    window.__cityScene = _scene;  /* 供 citySky 挂屏 */
     _renderCity();
     _startLoop();
     /* 数据飞字层：只读 STATE、零侵入 */
