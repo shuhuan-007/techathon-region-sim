@@ -151,7 +151,9 @@ window.APP = window.APP || {};
     _controls.target.set(GRID_CENTER, 0, GRID_CENTER);
     _controls.enableDamping = true;
     _controls.dampingFactor = 0.06;
-    _controls.minDistance = 4;
+    /* 2026-10-18 反馈 1：minDistance 4 → 2（用户想"再多放大一点"）。
+       pbr 模型单件 span≈1.87，min 2.0 时单件贴脸但仍不穿透 (near=0.1)。 */
+    _controls.minDistance = 2;
     _controls.maxDistance = 40;
     _controls.maxPolarAngle = Math.PI / 2.1;
     _controls.update();
@@ -336,6 +338,9 @@ window.APP = window.APP || {};
     }
 
     const tasks = [];
+    /* 2026-10-18 反馈 2：跟踪"已有地块的 bbox 中心"代替全局 GRID_CENTER=5。
+       收集所有 plot 的 (row,col)，结束后把 controls.target / camera 跟过去。 */
+    const placedCenters = [];  // [{x, z}] 每个 plot 中心
     (STATE.plots || []).forEach(p => {
       const pid = p.plot_id;
       const cell = cellById[pid];
@@ -350,6 +355,7 @@ window.APP = window.APP || {};
       if (isNaN(row) || isNaN(col)) return;
       const x = col * CELL_SPACING + CELL_SPACING / 2;
       const z = row * CELL_SPACING + CELL_SPACING / 2;
+      placedCenters.push({ x, z });
       tasks.push(
         _loadGlb(key).then(gltf => {
           _placeGlb(gltf, x, z);
@@ -359,6 +365,24 @@ window.APP = window.APP || {};
 
     if (tasks.length){
       await Promise.allSettled(tasks);
+    }
+
+    /* 把 OrbitControls target / camera 跟到已有地块 bbox 中心。
+       只有 1 块时 target 就是该地块中心；多块时取均值（≈bbox 中点）。
+       无 plot 时回退 GRID_CENTER。 */
+    if (placedCenters.length && _controls){
+      let cx = 0, cz = 0;
+      placedCenters.forEach(c => { cx += c.x; cz += c.z; });
+      cx /= placedCenters.length;
+      cz /= placedCenters.length;
+      /* 把 camera 平移等价量，保持"控制视角不变"手感 */
+      const dx = cx - _controls.target.x;
+      const dz = cz - _controls.target.z;
+      _controls.target.set(cx, 0, cz);
+      _camera.position.x += dx;
+      _camera.position.z += dz;
+      _camera.lookAt(cx, 0, cz);
+      _controls.update();
     }
   }
 
