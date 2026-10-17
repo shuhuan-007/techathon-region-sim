@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -25,6 +26,24 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 #: kind → 提示词文件名。
 _PROMPT_FILES = {"news": "news.md", "report": "report.md"}
+
+#: ⚠️ **默认离线**。要真调模型必须显式设 `NARRATE_OFFLINE=0`。
+#:
+#: 为什么默认是关的（2026-10-17 实测教训）：
+#:   `server/session.py` 的接线会在**已结算的局**上打 `/api/state` 时
+#:   自动生成叙事 —— 于是 `tests/test_server.py` 这类**本该离线**的测试
+#:   会真的去连网关（实测卡了 14 分钟，`Established 127.0.0.1:8787`）。
+#:   测试联网既慢又烧配额，还可能因为网关抖动而变成不确定结果。
+#:   所以默认关掉真调用：想让它真跑，运行进程时带上环境变量。
+_OFFLINE_DEFAULT = True
+
+
+def is_offline() -> bool:
+    """当前是否处于"离线模式"（不真调模型）。"""
+    raw = os.environ.get("NARRATE_OFFLINE")
+    if raw is None:
+        return _OFFLINE_DEFAULT
+    return str(raw).strip() not in ("0", "false", "False", "no")
 
 
 class NarrateError(RuntimeError):
@@ -177,6 +196,14 @@ def _generate(
     client: Optional[Callable] = None,
 ) -> dict:
     """共用核心：装提示词 → 调模型 → 解析 → 收敛成统一叙事形状。"""
+    # ⚠️ 离线闸：默认不真调模型（见 is_offline 的说明）。
+    #    注入了 client（测试用的假客户端，不联网）时不受影响。
+    if client is None and is_offline():
+        return _failure(
+            kind, quarter, "offline",
+            "离线模式（默认）：这次没有真调模型。要真跑请在启动进程时设 "
+            "NARRATE_OFFLINE=0。",
+        )
     if client is None:
         try:
             client = _default_client()
