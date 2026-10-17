@@ -396,6 +396,63 @@ def test_route_advise_wrong_method_is_405():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 五、★ 回答口径（2026-10-17 用户拍板：「放开：可推算但须标依据」）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_system_preamble_allows_derived_numbers_with_basis():
+    """★ 口径已放开：system message 必须给「自行推算」开口，并要求标依据。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()
+    out = ai_host.advise(session, "p1", "建 3 块要多少钱？", client=fake)
+    assert out["ok"] is True
+    assert fake.calls, "假客户端应被调过一次"
+    system = fake.calls[0][0]["content"]
+    # 推算的口子必须打开（否则 AI 答「建 3 块要多少钱」只会说「给不出」）
+    assert "推算" in system, (
+        f"system message 缺『推算』口径——用户已拍板放开：可推算但须标依据：{system}"
+    )
+    # 推算必须带依据——放开的不是「随便算」，是「算了要写清怎么算的」
+    assert "依据" in system, (
+        f"system message 缺『依据』要求——推算必须写清依据/口径/假设：{system}"
+    )
+    # 无依据仍不许编
+    assert "拿不到" in system, (
+        f"system message 缺『拿不到』分支——无任何依据时仍须明说：{system}"
+    )
+
+
+def test_system_preamble_keeps_permission_boundary():
+    """★ 边界没被放宽掉：提交仍永远由玩家走 /api/submit，AI 无 commit。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()
+    out = ai_host.advise(session, "p1", client=fake)
+    assert out["ok"] is True
+    system = fake.calls[0][0]["content"]
+    assert "/api/submit" in system, (
+        f"system message 必须守住『提交永远由玩家走 /api/submit』：{system}"
+    )
+    assert "commit" in system, (
+        f"system message 必须明确 AI 无 commit：{system}"
+    )
+
+
+def test_system_preamble_stays_compact():
+    """★ 这段会进每次请求的 system role，太长会挤占上下文——长度有硬上限。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()
+    out = ai_host.advise(session, "p1", client=fake)
+    assert out["ok"] is True
+    system = fake.calls[0][0]["content"]
+    assert len(system) < 1200, (
+        f"system message 过长（{len(system)} 字，上限 1200）会挤占上下文"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
 # runner（与 tests/test_ai_layer.py 同写法）
 # ══════════════════════════════════════════════════════════════════
 
