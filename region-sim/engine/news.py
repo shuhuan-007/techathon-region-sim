@@ -80,7 +80,10 @@ def news_facts(
           "sales_revenue": float,
           "wage_tax_refund": float,
           "value_added": float,         # 增加值（GDP）
-          "policy": {"name": str, "policy_type": str} | None,
+          "policy": dict | None,        # `_policy_report()` 整块原样搬
+                                        # （含 announcement/乘数/
+                                        #  multipliers_applied；policy_type
+                                        #  恒 null 是废案，随块走）
           "unfulfilled": {"has_unfulfilled": bool,
                           "contracts": [{"contract_id": str, "goods": str,
                                          "shortfall": float}, ...]},
@@ -113,12 +116,10 @@ def news_facts(
         for o in report.production
     ]
 
-    policy = None
-    if report.policy is not None:
-        policy = {
-            "name": report.policy.get("name"),
-            "policy_type": report.policy.get("policy_type"),
-        }
+    # 政策**整块原样搬**（提示词要求 policy.announcement / 乘数 /
+    # multipliers_applied 都在场）。⚠️ `policy_type` 恒为 null 是既有
+    # 废案（用户裁定不修、提示词不依赖），属块内一员，随块搬运。
+    policy = dict(report.policy) if report.policy is not None else None
 
     # 未履约义务：合同账本在 `state.contracts`（§7.2/§7.3 记录位），
     # 调用方从状态层原样递来；只挑 **shortfall > 0** 的（没交齐的）。

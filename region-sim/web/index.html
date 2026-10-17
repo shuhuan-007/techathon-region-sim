@@ -94,6 +94,23 @@
   .bar{height:5px; border-radius:3px; background:var(--panel2); overflow:hidden; margin-top:3px;}
   .bar > i{display:block; height:100%; background:var(--accent);}
   .hidden{display:none !important;}
+
+  /* ── 叙事（新闻 + 财报解读）────────────────────────────── */
+  #news-body p, #report-narr-body p{margin:6px 0;}
+  #news-body ul, #report-narr-body ul{margin:6px 0; padding-left:1.1em;}
+  #news-body li, #report-narr-body li{margin:3px 0;}
+  #news-body h1,#news-body h2,#news-body h3,
+  #report-narr-body h1,#report-narr-body h2,#report-narr-body h3,
+  #report-narr-body h4,#report-narr-body h5,#report-narr-body h6{
+    margin:10px 0 6px; color:var(--ink);
+  }
+  #report-narr-body h1{font-size:16px;} #report-narr-body h2{font-size:14px;}
+  #report-narr-body h3{font-size:13px;} #report-narr-body h4,
+  #report-narr-body h5,#report-narr-body h6{font-size:12px;}
+  .narr-empty{margin:4px 0;}
+  details.facts-src{margin-top:8px;}
+  details.facts-src > summary{cursor:pointer;}
+  details.facts-src table{margin-top:4px;}
 </style>
 </head>
 <body>
@@ -204,6 +221,19 @@
           <h2>本季收支预览</h2>
           <table><tbody id="proj-body"></tbody></table>
           <p class="muted" style="margin:8px 0 0" id="proj-note">—</p>
+        </div>
+
+        <!-- ★ AI 建议 —— 只起草；确认后由玩家走 /api/submit（§11.4，AI 无 commit）。 -->
+        <!-- ★ 区域新闻（Q 结算后由 ai.narrate 生成；前端**只显示**，不算一个数） -->
+        <div class="panel" id="news-panel">
+          <h2>📰 区域新闻</h2>
+          <div id="news-body" class="muted">本季新闻还没生成。</div>
+        </div>
+
+        <!-- ★ 财报解读（Markdown；前端只渲染，不算一个数） -->
+        <div class="panel" id="report-narr-panel">
+          <h2>📊 财报解读</h2>
+          <div id="report-narr-body" class="muted">本季财报解读还没生成。</div>
         </div>
 
         <!-- ★ AI 建议 —— 只起草；确认后由玩家走 /api/submit（§11.4，AI 无 commit）。 -->
@@ -352,6 +382,7 @@ function renderAll(){
   renderTop(); renderMap(); renderPlots(); renderMarket();
   renderFood(); renderProj(); renderReport(); renderBuildPanel();
   renderQuota(); renderQuote();
+  renderNarr();          // ★ 新闻 + 财报解读（引擎/服务层给什么就显示什么）
 }
 
 /* ── 顶栏 ─────────────────────────────────────────────── */
@@ -622,6 +653,141 @@ function renderReport(){
       <tr><td class="muted">增加值</td><td class="num">${fmt(r.value_added)}</td></tr>
       <tr><td class="muted">幸福度</td><td class="num">${r.food ? fmt(r.food.happiness) : "—"}</td></tr>
     </tbody></table>`;
+}
+
+/* ══════════════════════════════════════════════════════════
+   ★ 新闻 + 财报解读（ai.narrate 的产出；前端**零计算**、零第三方库）
+   ══════════════════════════════════════════════════════════
+   形状（服务层给什么就画什么，绝不自己算/拼）：
+     新闻：{kind:"news",   quarter:N, headline, body,        facts_used, model}
+     财报：{kind:"report", quarter:N, text(Markdown),        facts_used, model}
+     失败：{kind, quarter, ok:false, error(机器), detail(人话)}
+     未生成 / facts 为 null（第 1 季结算前）→ 面板给空态，**不**留白/不显示 0。
+   ───────────────────────────────────────────────────────────── */
+
+/* 极简转义（本文件里插叙事的**唯一**净化点；其余字段照旧信任服务端形状） */
+function esc(s){
+  return String(s == null ? "" : s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+
+/* 段落级内联：仅 **粗体**（转义后跑，正则不跨 &lt; &gt; &amp;）+ `code` */
+function mdInline(s){
+  return s
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+/* 极简 Markdown：**只**渲染 段落 / `-`（含 `*` `+`、`1.`）列表 / `**粗体**` /
+   `#`–`####` 标题。十几行，够用；不引任何第三方库（红线）。
+   ⚠️ 数字一个都不碰：文本原样过 esc，只给结构。 */
+function miniMD(text){
+  if (!text) return "";
+  const lines = esc(text).split(/\r?\n/);
+  const out = []; let i = 0, n = lines.length;
+  const isHs = l => { const m = l.match(/^(#{1,4})\s+(.*)$/); return m; };
+  const isUl = l => /^\s*[-*+]\s+/.test(l);
+  const isOl = l => /^\s*\d+\.\s+/.test(l);
+  while (i < n){
+    const l = lines[i];
+    if (l.trim() === ""){ i++; continue; }
+    let m;
+    if ((m = isHs(l))){
+      const lv = m[1].length;
+      out.push(`<h${lv}>${mdInline(m[2].trim())}</h${lv}>`);
+      i++; continue;
+    }
+    if (isUl(l) || isOl(l)){
+      const tag = isUl(l) ? "ul" : "ol";
+      const items = [];
+      while (i < n && (isUl(lines[i]) || isOl(lines[i]))){
+        const t = lines[i].replace(/^\s*(?:[-*+]|\d+\.)\s+/, "");
+        items.push(`<li>${mdInline(t.trim())}</li>`);
+        i++;
+      }
+      out.push(`<${tag}>${items.join("")}</${tag}>`);
+      continue;
+    }
+    const para = [];
+    while (i < n && lines[i].trim() !== "" &&
+           !isHs(lines[i]) && !isUl(lines[i]) && !isOl(lines[i])){
+      para.push(lines[i].trim()); i++;
+    }
+    out.push(`<p>${mdInline(para.join(" "))}</p>`);
+  }
+  return out.join("");
+}
+
+/* 溯源表（facts_used：路径 → 原值）。值原样显示 —— 是长 dict 就截断，不算。 */
+function factsTable(fu){
+  const ks = Object.keys(fu || {});
+  if (!ks.length) return "";
+  const rows = ks.sort().map(k => {
+    const v = fu[k];
+    const s = (v && typeof v === "object") ? JSON.stringify(v) : String(v);
+    const show = s.length > 140 ? s.slice(0, 140) + "…" : s;
+    return `<tr><td style="font-size:11px">${esc(k)}</td>
+             <td style="font-size:11px">${esc(show)}</td></tr>`;
+  }).join("");
+  return `<details class="facts-src"><summary class="muted">数字来源（facts_used，${ks.length} 条）</summary>` +
+    `<table><tbody>${rows}</tbody></table></details>`;
+}
+
+/* 主入口：news 与 report 两个面板同源渲染（**只展示**）。 */
+function renderNarr(){
+  const news = (STATE && STATE.news) || null;
+
+  /* ① 第 1 季结算前：news 为 null（facts 为 null、不许生成）→ 空态 */
+  if (!news){
+    $("news-body").innerHTML = `<p class="narr-empty muted">还没有结算过（第 1 季结算后，这里出现本季新闻）。</p>`;
+    $("report-narr-body").innerHTML = `<p class="narr-empty muted">还没有结算过（第 1 季结算后，这里出现财报解读）。</p>`;
+    return;
+  }
+
+  const factsNull = news.facts == null;    // 诚实空态的第二层（一般同上到不了这）
+  oneNarr("news-body", news.narrative, "本季新闻（headline＋正文）还没生成。", factsNull);
+  oneNarr("report-narr-body", news.report_narrative, "本季财报解读还没生成。", factsNull);
+}
+
+/* 单个面板： narr 是 dict 或 null/undefined。 factsNull → "第 1 季"口径。 */
+function oneNarr(id, narr, emptyText, factsNull){
+  const el = $(id);
+
+  /* ② 未生成（null/undefined）→ 空态，**不**留白 */
+  if (!narr){
+    el.innerHTML = `<p class="narr-empty muted">${
+      factsNull ? "还没有结算过（第 1 季结算后出现）。" : esc(emptyText)
+    }</p>`;
+    return;
+  }
+
+  /* ③ 失败（ok:false）→ 人话原因（复用 toast 的措辞风格） */
+  if (narr.ok === false){
+    el.innerHTML =
+      `<p style="color:var(--warn);margin:4px 0">⚠️ ${
+        esc(narr.detail || "这次没能生成本季解读。")}</p>` +
+      (narr.error ? `<p class="muted" style="margin:0"><span class="tag">${esc(narr.error)}</span>` +
+       ` <span class="muted">（机器可读分类，排查用）</span></p>` : "") +
+      `<p class="muted" style="margin:6px 0 0">可以刷新一次 /state 让它再试（同季只生成一次）。</p>`;
+    return;
+  }
+
+  /* ④ 成功：新闻 = headline ＋ body按段；财报 = miniMD */
+  const tag = narr.model ? `<div class="muted" style="margin:0 0 6px">模型：${esc(narr.model)} · 第 ${narr.quarter} 季</div>` : "";
+  let html = tag;
+  if (narr.kind === "news"){
+    if (narr.headline) html += `<p style="font-weight:600;font-size:15px;margin:4px 0 8px">${esc(narr.headline)}</p>`;
+    const paras = String(narr.body == null ? "" : narr.body).split(/\n{2,}/);
+    html += paras.map(p => p.trim()).filter(p => p).map(p =>
+      `<p>${mdInline(esc(p)).replace(/\n/g,"<br>")}</p>`).join("");
+    if (!narr.headline && !narr.body) html += `<p class="narr-empty muted">（内容为空）</p>`;
+  } else {  // report
+    html += `<div>${miniMD(narr.text)}</div>`;
+    if (!narr.text) html += `<p class="narr-empty muted">（内容为空）</p>`;
+  }
+  html += factsTable(narr.facts_used);
+  el.innerHTML = html;
 }
 
 /* ══════════════════════════════════════════════════════════

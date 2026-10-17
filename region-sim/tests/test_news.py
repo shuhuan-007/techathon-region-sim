@@ -135,14 +135,22 @@ def test_facts_happiness_match_report():
 
 
 def test_facts_policy_match_report():
-    """政策块原样（单人局基本是无政策 → None；形状仍是 dict-or-None）。"""
+    """2026-10-17：政策**整块原样搬**（提示词要 policy.announcement/乘数都在场）。
+
+    （旧口径只搬 name+policy_type 是漏搬：本轮 engine/news.py 已改为整块。
+    `policy_type` 恒 null 属既有废案、提示词不依赖 → 只核"块内键与报告全等"。）"""
     _, rep, cfg = run_one_quarter()
     f = news.news_facts(rep, cfg)
     if rep.policy is None:
         assert f["policy"] is None
     else:
-        assert f["policy"]["name"] == rep.policy.get("name")
-        assert f["policy"]["policy_type"] == rep.policy.get("policy_type")
+        # 整块原样 = 键集合相等、每个键同值（不许漏 announcement/乘数/…）
+        assert isinstance(f["policy"], dict)
+        assert set(f["policy"].keys()) == set(rep.policy.keys()), (
+            f"政策块漏搬键：report 有 {sorted(rep.policy)}，facts 只有 {sorted(f['policy'])}"
+        )
+        for k in rep.policy:
+            assert f["policy"][k] == rep.policy[k], f"政策块键 {k} 原值不等"
 
 
 def test_facts_unfulfilled_from_contracts():
@@ -187,37 +195,43 @@ def test_facts_previous_happiness_pass_through():
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_narrate_raises_not_implemented():
-    """红线（§11.4）：没提示词就**没**正文 —— 绝不编造。"""
+def test_narrate_does_not_fabricate_text():
+    """红线（§11.4）2026-10-17 改写：叙事未生成时是**明确的未生成**，不是编造文本。
+
+    旧版钉的是「`news.narrate()` 未实现、必抛 NotImplementedError」——
+    但叙事已改由 `ai/narrate.py`（另一路）实现，`news.narrate` 不再**承诺**抛错。
+    照旧钉死同一条红线：**没真实现 / 网关不可用 → 显式"未生成"，绝不编造正文**。
+    """
     _, rep, cfg = run_one_quarter()
     facts = news.news_facts(rep, cfg)
     try:
-        news.narrate(facts)
-    except NotImplementedError as e:
-        # 报文自己要点名"这是留位、哪天接、接哪条通道"，
-        # 避免有人把它当成 bug 瞒过去。
-        msg = str(e)
-        assert "2026-10-18" in msg, "报文要写明'提示词哪天到位'"
-    else:
-        raise AssertionError(
-            "narrate() 在没有提示词时**必须**抛 NotImplementedError，"
-            "许它偷偷返回编造文本就是 §11.4 红线。"
-        )
+        out = news.narrate(facts)
+    except NotImplementedError:
+        return                         # 老占位仍显式未实现 —— ✅ 不算编造
+    # 万一有人给它写了实现：返回必须**诚实**——要么明确标"没成"（ok=False），
+    # 要么带 facts_used 溯源；凭空冒一段没出处的新闻 = 编造 = 红线。
+    assert isinstance(out, dict), f"返回应为 dict，实得 {type(out).__name__}"
+    assert out.get("ok") is False or out.get("facts_used"), (
+        f"叙事返回缺 ok:False 标记也缺 facts_used 溯源，疑似编造：{out!r}"
+    )
 
 
 def test_narrate_not_silently_faked():
-    """返回值形状已写死在 docstring 里；今天 callable 只能抛，不能回字符串。"""
+    """2026-10-17 改写：`facts=None` 时**绝不**返回编造文本（统一形状铁律）。
+
+    `facts` 为 null（第 1 季结算前）时没有真相可讲——允许显式"未生成"
+    （抛 / 返回 ok:False / 返回 None），**返回一段正文就是红线**。"""
     _, rep, cfg = run_one_quarter()
     facts = news.news_facts(rep, cfg)
     for args in ({"facts": facts}, {}, {"facts": None}, ):
         try:
             out = news.narrate(args.get("facts"))
         except NotImplementedError:
-            pass
-        else:
-            raise AssertionError(
-                f"narrate 在 facts={args.get('facts')!r} 下居然返回了 "
-                f"{type(out).__name__}：{out!r} —— 编造文本，红线"
+            continue                     # 显式未实现 = 诚实未生成
+        if args.get("facts") is None:
+            assert (out is None
+                    or (isinstance(out, dict) and out.get("ok") is False)), (
+                f"facts=None 下 narrate 居然返回了可用文本：{out!r} —— 编造，红线"
             )
 
 
@@ -230,11 +244,11 @@ CASES = [
     ("2 facts 价格与 report 对齐", test_facts_prices_match_report),
     ("3 facts 产量与 report 对齐", test_facts_production_match_report),
     ("4 facts 幸福度与 report 对齐", test_facts_happiness_match_report),
-    ("5 facts 政策块与 report 对齐", test_facts_policy_match_report),
+    ("5 facts 政策块整块原样搬（2026-10-17 改口径）", test_facts_policy_match_report),
     ("6 facts 未履约只认合同账本", test_facts_unfulfilled_from_contracts),
     ("7 facts 上季幸福度诚实缺席", test_facts_previous_happiness_pass_through),
-    ("8 narrate 明确未实现", test_narrate_raises_not_implemented),
-    ("9 narrate 不偷偷编造文本", test_narrate_not_silently_faked),
+    ("8 narrate 不编造（未生成即显式标记）", test_narrate_does_not_fabricate_text),
+    ("9 facts=None 绝不编造文本", test_narrate_not_silently_faked),
 ]
 
 

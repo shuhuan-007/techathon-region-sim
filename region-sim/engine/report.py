@@ -167,18 +167,23 @@ def build_state(
     cfg: Config,
     plan: Optional[Plan] = None,
     phase: Optional[str] = None,
+    narratives: Optional[dict] = None,
 ) -> dict:
     """造 `/state` 的完整 JSON。**只读，不改状态。**
 
     参数
     ----
-    state     : 当前游戏状态
-    player_id : 要看谁的（红线 1：永远用 player_id 索引）
-    cfg       : 静态配置
-    plan      : 该玩家**本季已提交的计划**。`None` = 还没提交 →
-                仍然给出地图/市场/上季报告，但**不给本季预览数**。
-    phase     : 会话阶段（`collecting` / `resolving` / `report`），
-                由服务层传；不传则不输出该字段。
+    state      : 当前游戏状态
+    player_id  : 要看谁的（红线 1：永远用 player_id 索引）
+    cfg        : 静态配置
+    plan       : 该玩家**本季已提交的计划**。`None` = 还没提交 →
+                 仍然给出地图/市场/上季报告，但**不给本季预览数**。
+    phase      : 会话阶段（`collecting` / `resolving` / `report`），
+                 由服务层传；不传则不输出该字段。
+    narratives : ★ 2026-10-17 新增 —— 服务层**已生成**的 AI 叙事
+                 （`{"news": …, "report": …}`，形状见 server/session.py）。
+                 引擎只**转发**它，绝不生成/调用 AI ——
+                 引擎不涉 AI（红线①），会调模型的生成动作在服务层。
 
     ⚠️ `plan=None` 时**不要**伪造"本季产量 0"之类的数 ——
        那会被读成"本季确实不产"。本季预览一律给 `None`，
@@ -259,9 +264,10 @@ def build_state(
         # ── 上季报告（原样给，前端零计算）──
         "report": last_report,
 
-        # ── ★ 新闻/财报**留位**（2026-10-17，engine/news.py）。
-        #    今天 = 纯事实搬运（news_facts）；明天接 AI 叙事（narrate）。
-        "news": _news(state, player_id, cfg),
+        # ── ★ 新闻/财报（2026-10-17）—— facts 来自引擎 news_facts；
+        #    narrative / report_narrative 由服务层生成后经 `narratives` 传入，
+        #    本层**只展示**，绝不调 AI。
+        "news": _news(state, player_id, cfg, narratives),
 
         # ── ★ 开局减免名额速览（2026-10-17，§5.3）—— 已用/总数/剩余
         #    都是引擎给的，前端零计算。
@@ -499,30 +505,42 @@ def _projection(
     return out
 
 
-def _news(state: GameState, player_id: str, cfg: Config) -> Optional[dict]:
-    """新闻/财报事实包（引擎口 `news_facts`）+ AI 叙事**空位**。
+def _news(
+    state: GameState,
+    player_id: str,
+    cfg: Config,
+    narratives: Optional[dict] = None,
+) -> Optional[dict]:
+    """新闻/财报块 —— facts（引擎口 `news_facts`）+ **服务层递来的** AI 叙事。
 
-    返回::
+    返回（**只加不改**既有键）::
 
         {
           "facts":  news_facts(...)  | None,   # 还没结算过 = None（不编造）
-          "narrative": None,                    # ★ 留位：接 narrate()，
-                                                #   今天**恒 None**，明天给正文
+          "narrative": dict | None,            # 新闻叙事（ai.narrate 的结果，或未生成 None）
+          "report_narrative": dict | None,     # 财报解读（同上，kind 不同）
         }
 
-    ⚠️ 这里**不调 narrate()**——它尚未实现且**绝不**偷偷返回编造文本
-       （§11.4）。今天 `narrative` 恒为 `None`，前端 `#ai-panel` 显示
-       「AI 建议（待接）」即可；明天只在 `_news()` 这一处换成
-       `narrate(facts, cfg)`，调用方与前端**一行不改**。
+    ⚠️ 这里**不调 AI**。`narratives` 由调用方（`server/session.py`）
+       在**锁外**生成后原样递进来；本层只拆键转发，引擎不涉 AI（红线①）。
+       `narratives=None`（或缺键）→ 老老实实 None，绝不编造（§11.4）。
 
     状态层两个数（上季 H、合同账本）在这一层递，理由见 news.py docstring：
     财报只记本季，缺这两个就**诚实缺席**。
     """
+    # ★ 叙事只**转发**：服务层若已生成就给进来；没给 = 未生成 = None。
+    narrative: Optional[dict] = None
+    report_narrative: Optional[dict] = None
+    if narratives:
+        narrative = narratives.get("news")
+        report_narrative = narratives.get("report")
+
     report = None
     if state.raw_reports and player_id in state.raw_reports:
         report = state.raw_reports[player_id]
     if report is None:
-        return {"facts": None, "narrative": None}
+        return {"facts": None, "narrative": narrative,
+                "report_narrative": report_narrative}
 
     # 上季 H：状态层 `player.last_happiness` 在**结算后**就是本季 H，
     # 没有独立的"上季"位 → 诚实给 None（不臆造）。
@@ -534,7 +552,8 @@ def _news(state: GameState, player_id: str, cfg: Config) -> Optional[dict]:
         contracts=list(state.contracts.values()) if state.contracts else None,
         previous_happiness=previous_happiness,
     )
-    return {"facts": facts, "narrative": None}
+    return {"facts": facts, "narrative": narrative,
+            "report_narrative": report_narrative}
 
 
 def _quota_types(player, cfg: Config, this_plan_used: dict[str, int] | None = None) -> dict:

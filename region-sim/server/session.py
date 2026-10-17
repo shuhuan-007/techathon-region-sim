@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import Any, TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:                       # 只为类型标注，运行时不 import
     from storage.base import Storage
@@ -82,6 +82,22 @@ class GameSession:
     storage: Optional["Storage"] = field(default=None, repr=False)
     game_id: str = ""
 
+    # ── ★ AI 叙事（新闻 + 财报解读）按季缓存 ─────────────────
+    # (quarter, kind) → 结果 dict（kind ∈ {"news", "report"}）。
+    #
+    # 三条承诺（用户 2026-10-17 拍板：生成时机＝**结算后**进下一季、
+    # 玩家行动**前**生成；不是结算当中）：
+    #   ① 同一季**只调一次**模型——生成过就缓存住，刷新不重复烧配额；
+    #   ② **不在结算锁里**调模型——生成发生在 `/state` 的**锁外**路径
+    #      （见 `state_for` / `_narratives_for`），结算永不被对话模型卡；
+    #   ③ 失败**如实标出**——dict 里带 ok:false + error + detail，前端显示。
+    #
+    # ⚠️ 这是**易失缓存**：只在内存里，**不进存档**（正文是生成物不是事实，
+    #    读档后由 `/state` 按既有 facts 重新按需生成）。
+    narrative_cache: dict = field(default_factory=dict, repr=False)
+    # 单独一把小锁**只**守上面那张缓存表（与结算锁互不嵌套、不会死锁）。
+    narrative_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
     def __post_init__(self) -> None:
         if not self.player_ids:
             self.player_ids = self.state.player_ids
@@ -101,7 +117,14 @@ class GameSession:
         现在服务层只做一件事：把**已提交的计划**递进去。
 
         ⚠️ 读也要拿锁：否则可能读到"结算到一半"的状态。
+
+        ★ 2026-10-17：叙事（新闻/财报解读）在这层**锁外**准备——
+           调 `ai.narrate` 要碰模型（几十秒），**绝不在 `self.lock` 里做**；
+           先 `_narratives_for()`（锁外、按季缓存），再把结果递给引擎只转发。
         """
+        # ── 锁外：要不要生成本季叙事（一次拿公平快照，决定后调模型）──
+        narratives = self._narratives_for(player_id)
+
         with self.lock:
             return report.build_state(
                 self.state,
@@ -109,7 +132,170 @@ class GameSession:
                 self.cfg,
                 plan=self.plans.get(player_id),      # 没提交 → None（不编数字）
                 phase=self.phase.value,
+                narratives=narratives,               # 引擎只转发，不调 AI
             )
+
+    # ── ★ AI 叙事：按季缓存 + 缺失即生成（全部**锁外**） ────────
+
+    def _narratives_for(self, player_id: str) -> Optional[dict]:
+        """本季"新闻 + 财报解读"两份叙事。**锁外。**（也许生成，也许只取缓存）
+
+        做法（用户拍板，二选一里选了**A 同步生成**）：
+
+            A. `/state` 发现本季叙事**还没有**且**已结算过** → **当场调一次模型**，
+               直到出结果（或失败）才返回。选它的理由见 `_try_generate_narrative`。
+
+        返回::
+
+            None                       —— 本季还没结算（models.quarter 从 1 起：
+                                           `quarter <= 1` = 第 1 季、一次都没结过），
+                                           **不许生成**（用户红线：facts 为 null 不生成）；
+            {"news": dict|None, "report": dict|None}
+                                         —— 每键是 ai.narrate 的结果 dict；键为 None =
+                                           该路生成器尚未落盘（见下）。
+
+        ⚠️ `ai.narrate` 是**另一路并行在写**的模块，此刻**可能还没落盘**。
+           靠 `getattr` 探测：函数不在 → 该键老老实实 None + 一行日志（不编造）。
+        """
+        # 公平快照（`self.lock` 拿的，判断"该不该生成"要用一致的状态）。
+        with self.lock:
+            quarter = self.state.world.quarter
+            rep_obj = self.state.raw_reports.get(player_id) \
+                if self.state.raw_reports else None
+            rep_dict = self.state.report.get(player_id) \
+                if self.state.report else None
+
+        if quarter <= 1 or (rep_obj is None and rep_dict is None):
+            return None
+
+        out: dict[str, Any] = {}
+        for kind in ("news", "report"):
+            out[kind] = self._get_or_generate(
+                quarter, kind, player_id, rep_obj, rep_dict)
+        return out
+
+    def _get_or_generate(
+        self,
+        quarter: int,
+        kind: str,
+        player_id: str,
+        rep_obj,
+        rep_dict,
+    ):
+        """一个 `kind` 的"缓存取 / 缺失生成"。**锁外调模型、小锁写缓存。**
+
+        · 缓存命中 → 直接返回（**同一季只调一次**由此保证）。
+        · 生成器未落盘 → None（探测见 `_generator_for`）。
+        · 真调模型 → **不在任何锁里**（`narrative_lock` 只在"登记到缓存表"
+          那一瞬间拿一下）。
+        · 生成抛穿 → 包成 `{"kind","quarter",ok:False,error,"detail"}`（§11.4 不编造）。
+        """
+        key = (quarter, kind)
+        with self.narrative_lock:
+            if key in self.narrative_cache:
+                return self.narrative_cache[key]
+
+        gen = self._generator_for(kind)
+        if gen is None:
+            return None          # 另一路的 ai/narrate.py 还没落盘 —— 诚实未生成
+
+        # ── 准备参数（**锁外**纯搬运，无判定）────────────────
+        if kind == "news":
+            facts = self._facts_for(player_id, rep_obj)
+        else:
+            facts = None
+        try:
+            if kind == "news":
+                # 统一形状铁律：facts 为 null 时不许生成（这里 quarter>1 必非空，
+                # 但仍兜底）。
+                if facts is None:
+                    return None
+                result = gen(facts, cfg=self.cfg)
+            else:
+                # 财报解读吃 **report_dict**：优先 `state.report`（dict，读档也在），
+                # 内存里刚结算的则 `rep_obj.to_dict()`。
+                rd = rep_dict if rep_dict is not None else (
+                    rep_obj.to_dict() if rep_obj is not None else None)
+                if rd is None:
+                    return None
+                result = gen(rd, cfg=self.cfg)
+        except Exception as e:  # noqa: BLE001
+            result = {
+                "kind": kind,
+                "quarter": quarter,
+                "ok": False,
+                "error": "generator_crashed",
+                "detail": f"叙事生成器抛了没接住的异常（{type(e).__name__}：{e}）。"
+                          "这是 bug，但绝不能用编造文本顶替（§11.4）。",
+            }
+
+        with self.narrative_lock:
+            # 另一线程可能刚好也生成完 → 已存在就用现成的（generate-once）。
+            existing = self.narrative_cache.get(key)
+            if existing is not None:
+                return existing
+            self.narrative_cache[key] = result
+            return result
+
+    def _generator_for(self, kind: str):
+        """按 kind 取 `ai.narrate` 里的生成函数。**它可能还没落盘。**
+
+        ⚠️ 本项目"一套接缝 + 两份提示词"——news 与 report **共用**
+        `ai.narrate` 里同一个「装提示词→调模型→校验 JSON」的核心，
+        只是提示词文件不同。入口签名（另一路承诺）：
+
+            ai.narrate.narrate_news(facts, cfg=...)
+            ai.narrate.narrate_report(report_dict, cfg=...)
+
+        未就绪 → None + 一行 stderr（**不**当作失败缓存——等它落盘后自然接上）。
+        """
+        import sys
+
+        try:
+            from ai import narrate as _narrate  # type: ignore
+        except Exception:
+            print(f"[narrate] ai/narrate.py 尚未就绪（{kind} 路这次跳过）",
+                  file=sys.stderr)
+            return None
+        fn = getattr(_narrate, f"narrate_{kind}", None)
+        if not callable(fn):
+            print(f"[narrate] ai.narrate.narrate_{kind} 不存在（跳过）",
+                  file=sys.stderr)
+            return None
+        return fn
+
+    def _facts_for(self, player_id: str, rep_obj):
+        """新闻事实包（直接走引擎 `news_facts`；`rep_obj` 为 None → None）。
+
+        ⚠️ 若 `news_facts` 自己抛错（比如另一路正改 `engine/news.py`
+        改到一半），**不**让 `/state` 崩——如实 None，空态交给前端。
+        """
+        if rep_obj is None:
+            return None
+        from engine import news as _news_mod
+
+        try:
+            return _news_mod.news_facts(
+                rep_obj,
+                self.cfg,
+                contracts=list(self.state.contracts.values())
+                if self.state.contracts else None,
+                previous_happiness=None,   # 状态层无"上季 H"号位（engine/report.py 同口径）
+            )
+        except Exception as e:  # noqa: BLE001
+            import sys
+            print(f"[narrate] news_facts 抛错（{type(e).__name__}: {e}），"
+                  "这次按未生成处理", file=sys.stderr)
+            return None
+
+    # 设计说明（为什么不另开线程"先返 null 再补"——即做法 B）：
+    #   ① /state 是"刷新即拿全量"的只读端，前端只显示一次到位的东西，
+    #      不必做"null → 轮询 → 补一次"的两段渲染；
+    #   ② 生成全在锁外，几十秒里这个 /state 请求挂着，但结算锁不被占，
+    #      提交/结算照常串行（红线②不阻塞结算满足）；
+    #   ③ 失败就地写进缓存（ok:false）——同季不再重烧配额（红线①满足）。
+    #   做法 B（后台线程）省去首刷等待，却要把"生成中/失败"中间态引入前端，
+    #   且 http.server 线程模型下后台线程生命周期没有保证——更稳的是 A。
 
     def map_for(self, player_id: str) -> dict:
         """整张地图（含别人的格子）—— 前端画地图用。**只读。**
