@@ -66,16 +66,25 @@ window.APP = window.APP || {};
      v9：「地块远处」。
        屏宽 SKY_W 8→10，屏高 SKY_H 4.5→5.5，SKY_Y 随动 2.75。
        位置不再用常数 -3，而是 cz - _skyDistance()
-       = cz - max(6, bbox_side + 3)。 */
+       = cz - max(6, bbox_side + 3)。
+
+     v12（2026-10-18 用户醒来反馈，四条调参一次到位）：
+       ① 屏宽 = bbox cols 跨度 → SKY_W = _skyWidth()（函数，动态）；
+       ② 稍远一点 → _skyDistance() 回 v9 的 max(6, side+3)；
+       ③ 多倾一点 → rotation.x +π/9(+20°) → +π/6(+30°)；
+       ④ 底部低于地面 → SKY_Y = SKY_H/2 (3.5) → SKY_H*0.1 (0.7)，
+          屏幕底部穿透地面 ≈ SKY_H*0.4 在地底下 2.8。 */
   /* 屏幕物理尺寸(场景单位,1 = 1 cell)
-     v10 拍板（2026-10-18 用户）：继续放大 + 倾斜方向倒过来。
-     SKY_W 10→13、SKY_H 5.5→7。SKY_Y 自动 = 3.5（下边缘贴地规矩保持）。
-     rotation.x 从 -π/9 → +π/9：反向 20°（v9 是上缘向你倾朝天，
-     v10 是下缘向你倾朝地，"差了 20°" 的方向校正）。 */
-  const SKY_W = 13.0;
+     v12 拍板（2026-10-18 用户，醒来反馈）：
+       · 屏宽 = bbox cols 跨度 → 动态 _skyWidth()（函数，不再常数）
+       · 稍远一点 → _skyDistance() 回 v9 的 max(6, side+3)
+       · 多倾一点 → rotation.x 从 +π/9(+20°) 回 +π/6(+30°)
+       · 屏底低于地面 → SKY_Y = SKY_H*0.1 (0.7)
+         SKY_H/2 (3.5) → 0.7 → 底部穿透地面 ≈ SKY_H*0.4 = 2.8 cell 在地底。
+   */
   const SKY_H = 7.0;
-  /* 屏幕中心高度：下边缘贴地 */
-  const SKY_Y = SKY_H / 2;
+  /* 屏幕中心高度：底部低于地面 */
+  const SKY_Y = SKY_H * 0.1;
   /* canvas 像素尺寸(固定;微糊效果是有意的,呼应"掛在天上"的氛围) */
   const CVS_W = 1280;
   const CVS_H = 720;
@@ -193,14 +202,34 @@ window.APP = window.APP || {};
       if (isNaN(r) || isNaN(c)) return;
       rows.push(r); cols.push(c);
     });
-    if (!rows.length) return 5;
+    if (!rows.length) return 9;
     const h = Math.max(...rows) - Math.min(...rows) + 1;
     const w = Math.max(...cols) - Math.min(...cols) + 1;
     const side = Math.max(h, w);
-    /* v11 拍板（2026-10-18 用户）：「屏更近一点」。
-       v9 是 max(6, side + 3)（pizzademo side 10 → -13 远）；v11 是 max(3, side * 0.6)
-       → side 10 → 6，距离近一半。side 越大，近端越近；side 小（少于 5 块）也保底 3。 */
-    return Math.max(3, Math.round(side * 0.6));
+    /* v12 拍板（2026-10-18 用户醒来反馈）：「稍远一点」——回 v9 的 max(6, side+3)。
+       v11 的 max(3, round(side*0.6)) = 6 屏贴在场景后面（用户嫌近）；
+       v9 的 max(6, side+3) = side 10 → 13，屏退到 bbox 之外（现在用户想要的远度）。 */
+    return Math.max(6, side + 3);
+  }
+
+  /* v12 拍板（2026-10-18 用户醒来反馈）：屏宽 = bbox cols 跨度。
+     例 pizzademo cols 0..6 = 7 → SKY_W = 7（视野方形 w = 行压缩后跳的侧跨）。 */
+  function _skyWidth(){
+    if (typeof STATE === 'undefined' || !STATE) return 7;
+    const plots = (STATE.plots || []);
+    if (!plots.length) return 7;
+    const cols = [];
+    plots.forEach(p => {
+      if (!p || !p.plot_id) return;
+      const parts = String(p.plot_id).split(',');
+      const c = parseInt(parts[1], 10);
+      if (isNaN(c)) return;
+      cols.push(c);
+    });
+    if (!cols.length) return 7;
+    const w = Math.max(...cols) - Math.min(...cols) + 1;
+    /* 最小 3 格（信息仍可读）、最大 10 格（不超过完整地图）。 */
+    return Math.max(3, Math.min(10, w));
   }
 
   /* ── 数字格式化(沿用 v4)── */
@@ -487,7 +516,9 @@ window.APP = window.APP || {};
     } else if ('encoding' in _tex && THREE.sRGBEncoding){
       _tex.encoding = THREE.sRGBEncoding;
     }
-    _geo = new THREE.PlaneGeometry(SKY_W, SKY_H);
+    /* v12 拍板：屏宽 = bbox cols 跨度（视野方形纵向跨度）。 */
+    const skyW = _skyWidth();
+    _geo = new THREE.PlaneGeometry(skyW, SKY_H);
     _mat = new THREE.MeshBasicMaterial({
       map: _tex,
       transparent: true,
@@ -502,10 +533,11 @@ window.APP = window.APP || {};
        _skyDistance() = max(6, side + 3)，退出 bbox 之外。
        y 由 SKY_Y = SKY_H/2 = 2.75 决定（下边缘贴地）。 */
     mesh.position.set(cx, SKY_Y, cz - _skyDistance());
-    /* rotation.x +π/9 ≈ +20°：屏面向下倾朝地面一侧（v10 拍板「差了 20°」方向校正）。
-       v9 的 -π/9（上缘向你倾朝天）用户看到 "倾向天上"。
-       +20° 反过来：下缘向你倾朝地 → 玩家看到的是"面向自己的招牌" 的场景感。 */
-    mesh.rotation.x = Math.PI / 9;  /* = +π/9 ≈ +20° */
+    /* rotation.x +π/6 ≈ +30°：多倾一点（v12 拍板）。
+       v7 曾用过 +30°（"斜 30°"）→ v10 改 +20° 多角度效果不明显。
+       v12 回到 +30°，屏面向下倾更斜，视觉「广告牌角度」更正经朝用户。
+       方向保持 v10 反转的 "+"（下缘向你倾朝地面）。 */
+    mesh.rotation.x = Math.PI / 6;  /* = +π/6 ≈ +30° */
     mesh.renderOrder = 1000;    /* depthTest=false 时压底渲染,确保最后画 */
     /* 不调 lookAt —— 静止的天上屏 */
     scene.add(mesh);
