@@ -32,11 +32,20 @@
 window.APP = window.APP || {};
 (function (APP) {
 
+  /* v8（2026-10-18 用户拍板）：下边缘贴地、远一点、大一点。
+     几何推理：
+       - 下边缘贴地 → SKY_Y ≈ SKY_H/2
+       - 大一点     → SKY_W 5→8，SKY_H 2.8→4.5，中心 y=2.25
+       - 远一点     → open()/refresh() 里把 cz 往 bbox 中心 -z 方向推 6
+                     （这是「在场景里挪远一点」，不是 y 抬升）
+       - 相机 pos y=7.5 俯视 y=0/向 cz+ 方向 → 屏正面向相机 →
+         rotation.x 也改为 -π/9（≈ -20°，屏面向上微仰接相机俯角，
+         不再是 v7 的 +30° "看扁条" 也不是"水平"）。 */
   /* 屏幕物理尺寸(场景单位,1 = 1 cell) */
-  const SKY_W = 5.0;
-  const SKY_H = 2.8;
-  /* 屏幕中心高度 */
-  const SKY_Y = 8.5;
+  const SKY_W = 8.0;
+  const SKY_H = 4.5;
+  /* 屏幕中心高度：下边缘贴地 */
+  const SKY_Y = SKY_H / 2;
   /* canvas 像素尺寸(固定;微糊效果是有意的,呼应"掛在天上"的氛围) */
   const CVS_W = 1280;
   const CVS_H = 720;
@@ -282,11 +291,15 @@ window.APP = window.APP || {};
     });
     const mesh = new THREE.Mesh(_geo, _mat);
     const { cx, cz } = _viewCenter();
-    mesh.position.set(cx, SKY_Y, cz);
-    /* v7 拍板 B 修:rotation.x 从 -30° 改 +30°。
-       v6 -30° 与相机俯角 -35° 几乎平行,用户看到的是"边"——"斜 30 度并没有看到"。
-       +30° 让屏正面朝相机那一侧往上倾 30°,两边总价 ≈ 30°,进入视锥。 */
-    mesh.rotation.x = Math.PI / 6;  /* = +π/6 ≈ +30° */
+    /* v8 拍板：远一点、大一点、下边缘贴地。
+       把屏往 -z 方向推 3（玩家看 bbox 中心的话，屏在"场景后面"，
+       不是从头顶压下来）。y 由 SKY_Y = SKY_H/2 = 2.25 决定（贴地）。 */
+    mesh.position.set(cx, SKY_Y, cz - 3);
+    /* rotation.x -π/9 ≈ -20°：屏面向上微仰迎向相机俯角（相机位置
+       (10.5, 7.5, 10.5) 看向 y=0/向+z 方向 → 视线俯角 ≈35°；
+       屏面与 y 轴正交 70°（20° + 90°垂）后两边咬合 ≈ 55°，
+       屏幕上能看到屏的主体而非"边"也不是"躺倒"。 */
+    mesh.rotation.x = -Math.PI / 9;  /* = -π/9 ≈ -20° */
     mesh.renderOrder = 1000;    /* depthTest=false 时压底渲染,确保最后画 */
     /* 不调 lookAt —— 静止的天上屏 */
     scene.add(mesh);
@@ -307,7 +320,7 @@ window.APP = window.APP || {};
     } else {
       /* 旧的还存在(理论上不应发生) → 复用,重定位 + 重画 */
       const { cx, cz } = _viewCenter();
-      _mesh.position.set(cx, SKY_Y, cz);
+      _mesh.position.set(cx, SKY_Y, cz - 3);  /* v8 同步 -z 偏移 */
       if (!_mesh.parent) scene.add(_mesh);
       _repaint();
     }
