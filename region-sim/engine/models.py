@@ -210,8 +210,8 @@ class MarketCurve:
     goods: str
     P0: float                 # 参考价
     Q0: float                 # 基准量
-    Es: Optional[float] = None   # 供给弹性（待填）
-    Ed: Optional[float] = None   # 需求弹性（待填）
+    Es: Optional[float] = None   # 供给弹性（15 商品已全值，见《规则基线》§8.5；**不许再用默认值**）
+    Ed: Optional[float] = None   # 需求弹性（15 商品已全值；停用同左）
     P_min_ratio: float = 0.1     # 价格下限 = P_min_ratio × P0
 
     # 外部固定收购量（§8.5 的 30/15/10）。

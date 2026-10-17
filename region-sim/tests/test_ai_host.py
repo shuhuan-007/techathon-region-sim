@@ -453,6 +453,162 @@ def test_system_preamble_stays_compact():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 六、★ 局面**拓宽**（2026-10-17：AI 之前太瞎了 —— 只给 7 个局面键，
+#    没有价格表 / 地块清单 / 建造选项，于是面对「建什么划算」只能拒答）
+# ══════════════════════════════════════════════════════════════════
+#
+# 真跑实录里 AI 自己说的：「我手里的规则摘要只有 §11.4，**没有地块建造成本
+# 和农业 A 的产出参数**，所以「再建几块、花多少、回本多少」我给不出数」。
+# 而这些 `/api/state` 里**全都有** —— 是没递过去，不是拿不到。
+#
+# 下面五条钉死「拓宽了，但没拓崩」：价格地块进来了 / 体积受控 / 老七键还在 /
+# 不许为了拓宽凭空造数 / 体积闸真到极限会砍次要项。
+# ══════════════════════════════════════════════════════════════════
+
+
+def _grab_user_message(app=None, question="建什么划算？"):
+    """ advis 一次，抓发给模型的 user message 正文（离线假客户端）。"""
+    app = app or _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()
+    out = ai_host.advise(session, "p1", question, client=fake)
+    assert out["ok"] is True, f"advise 应成功：{out}"
+    assert fake.calls, "假客户端应被调过一次"
+    return fake.calls[0][1]["content"], session
+
+
+def test_state_context_now_includes_market_prices():
+    """★ 拓宽点 ①：user message 里**出现了价格信息**。
+
+    光断言"含 market 这个键"不够 —— 要断言**具体商品的具体数字**，
+    才能证明"真把价格表递进去了"，而不是递了一个空壳/键名。
+    """
+    user, _ = _grab_user_message()
+    assert "[市场]" in user, f"局面缺市场价格块：{user}"
+    # 主粮 A 是 15 个商品的第一个，上季价 10 是 config 里定死的
+    assert "A|主粮|上季10" in user, (
+        f"局面里要能看到主粮 A 的上季价 10（否则 AI 还是瞎的）：{user}"
+    )
+    # 触底/正常的判定也要在（AI 要拿它说"这个价已经压到底了"）
+    assert "触底" in user or "正常" in user, f"价格块缺触底标记：{user}"
+
+
+def test_state_context_now_includes_plots_section():
+    """★ 拓宽点 ②：user message 里**出现了地块区块**。
+
+    开局还没地 —— 但**地块区块本身**必须在，并且要明说"没有地块"，
+    不许整块缺席让 AI 猜。
+    """
+    user, _ = _grab_user_message()
+    assert "[地块" in user, f"局面缺地块区块：{user}"
+    assert "还没有任何地块" in user, (
+        f"开局没有地块时要明说，不许整块缺席：{user}"
+    )
+
+
+def test_state_context_includes_build_options_with_cash():
+    """★ 拓宽点 ③：user message 里有"可建类型 + 现金费" —— 这是 AI 答
+    「建什么划算、要花多少」最需要的一手数据。"""
+    user, _ = _grab_user_message()
+    assert "[可建" in user, f"局面缺建造选项块：{user}"
+    # 农业一级 80 现金是 config 里的原价 —— 这个数必须在
+    assert "agriculture" in user and "80" in user, (
+        f"建造选项里要能看到新建农业的现金费 80：{user}"
+    )
+
+
+def test_state_context_size_is_capped():
+    """★ 体积闸：拼出来的 user message **不超过硬上限**。
+
+    这段进**每一次**请求，无限增长 = 烧 token + 淹没重点。
+    上限放 user message 整条（核心+价格+地块+建造+规则摘要+问题），
+    而不是只放市场块 —— 整条受控才是真受控。
+    """
+    user, _ = _grab_user_message()
+    # 整条含规则摘要（§11.4 本身就 600+ 字），所以上限给整条 4000 有余量
+    assert len(user) <= 6000, (
+        f"发给模型的 user message 过长（{len(user)} 字符），会烧 token 淹没重点"
+    )
+    # 局面块本身（不含规则摘要/问题）应更紧 —— 它就是 _compact_state 的产物
+    state_body = user.split("[规则摘要")[0]
+    assert len(state_body) <= ai_host._STATE_BODY_LIMIT, (
+        f"局面文本 {len(state_body)} 字符超过硬上限 {ai_host._STATE_BODY_LIMIT}；"
+        f"体积闸没拦住"
+    )
+
+
+def test_state_context_keeps_original_seven_keys():
+    """★ 不许倒退：原来那 7 个局面键**一个都不能丢**。
+
+    拓宽是**加**东西，不是把这七项换成别的 —— 否则会出现
+    "加了价格表反而把现金丢了"的倒退。逐个键点名断言。
+    """
+    user, _ = _grab_user_message()
+    for token in (
+        "quarter=1/20",      # quarter + total_quarters 一起
+        "cash=1200",         # cash
+        "happiness=0.6",     # happiness
+        "population=null",   # population（开局未提交 → null + 说明）
+        "phase=collecting",  # phase
+        "can_settle=False",  # can_settle
+    ):
+        assert token in user, f"★ 原有局面键丢了：缺 {token!r}：{user}"
+    # population=null 必须带"为什么"—— 不许让 AI 以为"这局没有人口"
+    assert "没提交计划" in user, (
+        f"population=null 必须点破是『没提交计划』，不许让 AI 误读：{user}"
+    )
+
+
+def test_state_context_does_not_fabricate_missing_fields():
+    """★ 不编数：局面里**没有的**字段不许凭空出现在 user message 里。
+
+    开局没提交计划 → `current_price`/`population` 都是 None。
+    AI 必须读到 null，而不是一个编出来的数字；同时地块区块不许
+    塞一块"幽灵地"进去。
+    """
+    user, _ = _grab_user_message()
+    # 本季求价没试算 → 必须给 null / 未试算，而不是编一个价
+    assert "本季null" in user, (
+        f"没试算时本季求价必须给 null（不编数字），实得：{user}"
+    )
+    # 开局没有地块 —— 不许凭空地塞一行像真地的东西（如 "0,0|agriculture"）
+    state_body = user.split("[规则摘要")[0]
+    assert "0,0|" not in state_body, (
+        f"开局没有地块，局面里不许凭空出现地块行：{state_body}"
+    )
+
+
+def test_state_body_limit_enforced_even_with_many_goods():
+    """★ 体积闸真到极限时会**砍次要项**，不会无限增长。
+
+    构造一个 market 里塞了非常多条目的局面 → 压缩结果仍 < 上限，
+    且核心七键还在（砍的是价格/建造这些次要项，不是核心）。
+    直接调 `_compact_state`，起一个超大的假 market。
+    """
+    huge_market = {
+        f"G{i:03d}": {
+            "name": f"商品{i}", "P0": 10.0, "last_price": float(i),
+            "current_price": float(i) + 0.5, "P_min": 1.0, "at_floor": False,
+        }
+        for i in range(500)  # 500 种商品，远超真局的 15
+    }
+    fake_state = {
+        "quarter": 1, "total_quarters": 20, "phase": "collecting",
+        "can_settle": False, "cash": 1200.0, "happiness": 0.6,
+        "population": None, "market": huge_market, "plots": [],
+    }
+    body = ai_host._compact_state("p1", fake_state, None)
+    assert len(body) <= ai_host._STATE_BODY_LIMIT, (
+        f"★ 500 种商品时局面压缩后 {len(body)} 字符超上限 "
+        f"{ai_host._STATE_BODY_LIMIT} —— 体积闸失效了"
+    )
+    # 砍完核心七键必须还在（它们永远满额，体积再紧也不砍）
+    assert "cash=1200" in body and "quarter=1/20" in body, (
+        f"砍次要项时不许把核心键砍了：{body[:300]}..."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
 # runner（与 tests/test_ai_layer.py 同写法）
 # ══════════════════════════════════════════════════════════════════
 

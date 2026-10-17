@@ -173,6 +173,7 @@ def advise(
         rule=rule,
         question=question,
         preview_report=preview_report,
+        cfg=getattr(session, "cfg", None),
     )
 
     result = client.chat_completions(messages)
@@ -227,6 +228,17 @@ def advise(
 # ══════════════════════════════════════════════════════════════════
 
 
+# ══════════════════════════════════════════════════════════════════
+# 局面体积闸 —— 拼出来的 user 局面文本不许超过这个数（字符）。
+#
+# ⚠️ 为什么钉死：这段会进**每一次**请求。上下文一涨，① 烧 token、
+#    ② 把重点（玩家的真问题、规则摘要、试算数字）淹掉。
+#    超了就砍**次要项**（先砍"没变化的价格"，绝不砍核心键），
+#    绝不允许随商品数/地块数无限增长。
+# ══════════════════════════════════════════════════════════════════
+_STATE_BODY_LIMIT = 4000
+
+
 def _build_messages(
     *,
     player_id: str,
@@ -234,11 +246,12 @@ def _build_messages(
     rule: dict,
     question: Optional[str],
     preview_report: Optional[dict],
+    cfg=None,
 ) -> list[dict]:
     """把局面 / 规则摘要 / 试算数字 / 玩家问题拼成 OpenAI messages。"""
     lines = [
         f"[当前局面 · 玩家 {player_id}]",
-        _compact_state(state),
+        _compact_state(player_id, state, cfg),
         "",
         f"[规则摘要 · 基线 §{rule.get('key')}]",
         rule.get("summary", ""),
@@ -270,16 +283,185 @@ def _build_messages(
     ]
 
 
-def _compact_state(state: dict) -> str:
-    """局面压缩成模型读得动的几行（**只挑已算好的数字**，不整包倒给它）。"""
-    keys = (
-        "quarter", "total_quarters", "cash", "happiness",
-        "population", "phase", "can_settle",
-    )
-    picked = {k: state.get(k) for k in keys if k in state}
+def _fmt(v) -> str:
+    """一个数字 → 字符串，**原样转发**（不四舍五入、不换算单位、不凑整）。
+
+    ⚠️ 这是「压缩要信息保真」的落点：引擎给的什么数，AI 读到什么数。
+       唯一允许的处理是「去掉 float 的尾巴 .0」（1200.0 → "1200"），
+       那**不是改值**，只是把整数的 float 显示成整数，值一字不差。
+    """
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _core_lines(state: dict) -> list[str]:
+    """★ 七个核心键 —— **一个都不能丢**，而且**永远满额给**，体积再紧也不砍。
+
+    （这就是拓宽前 AI 手里仅有的全部信息。拓宽是**加**东西，不是把这七项
+       换成别的 —— 否则会出现"加了价格表反而把现金丢了"的倒退。）
+    """
     import json
 
-    return json.dumps(picked, ensure_ascii=False, default=str)
+    out = [
+        f"quarter={state.get('quarter')}/{state.get('total_quarters')}"
+        f" phase={state.get('phase')} can_settle={state.get('can_settle')}",
+        f"cash={_fmt(state.get('cash'))} happiness={_fmt(state.get('happiness'))}",
+    ]
+    pop = state.get("population")
+    if pop is None:
+        # ⚠️ population=null 的真相是「**玩家还没提交计划**，所以拿不到」，
+        #    不是「没有人口」。不点破这句，AI 会推断成"这局没人/不需要人"。
+        out.append("population=null（没提交计划所以拿不到，不是没有人口）")
+    else:
+        out.append("population=" + json.dumps(pop, ensure_ascii=False, default=str))
+    return out
+
+
+#: 价格块**行数兜底**：再怎么会变，一次对话最多带这么多行商品价格。
+#: （正常局 15 种全带；这个只在商品数失控时才嘎住，是终极兜底。）
+_MARKET_MAX_ROWS = 25
+
+
+def _market_lines(
+    state: dict, *, only_changed: bool = False, max_rows: int = _MARKET_MAX_ROWS
+) -> list[str]:
+    """市场/价格块：每商品一行 `goods|中文名|上季价|本季求价|触没触底`。
+
+    ★ 只给 AI 答得动的四样：中文名 / 上季结算价（=本季买入记账价）/
+       本季求价 `P_t` / 是否触底。P0、P_min 都是**从这几样推出来的**,
+       不重复给（省地方），AI 需要时可用试算。
+
+    ``only_changed=True`` 是体积闸的**降级档**：超限时只留"本季求价跟上季比
+    变了"或"触底"的商品。``max_rows`` 是**终极兜底**：不该发生，但商品数
+    一旦失控（配置被改怪），只留前 N 行 + 明说略，**绝不让这一个块掀翻
+    字数上限**。
+    """
+    market = state.get("market")
+    if not isinstance(market, dict) or not market:
+        return []
+    rows: list[str] = []
+    for goods in sorted(market):
+        blk = market.get(goods)
+        if not isinstance(blk, dict):
+            continue
+        cur = blk.get("current_price")
+        last = blk.get("last_price")
+        floor = blk.get("at_floor")
+        if only_changed and cur is not None and cur == last and not floor:
+            continue  # 没变化也没触底 = 次要项，体积紧时先砍它
+        rows.append(
+            f"{goods}|{blk.get('name')}|上季{_fmt(last)}|"
+            f"本季{_fmt(cur) if cur is not None else 'null(未试算)'}|"
+            f"{'触底' if floor else '正常'}"
+        )
+    if not rows:
+        return []
+    head = "[市场] goods|名|上季价|本季求价|触底"
+    if len(rows) > max_rows:  # 终极兜底：截断 + 明说，绝不让这快掀翻上限
+        kept = rows[:max_rows]
+        kept.append(
+            f"(价格行过多，只列前 {max_rows} 项，"
+            f"其余 {len(rows) - max_rows} 项略，需要细节请走试算)"
+        )
+        return [head, *kept]
+    omitted = len(market) - len(rows)
+    body = [head, *rows]
+    if omitted > 0:
+        body.append(f"(其余 {omitted} 种商品价格无变化且未触底，略)")
+    return body
+
+
+def _plot_lines(state: dict) -> list[str]:
+    """本地地块块：只画玩家**自己的**地（state['plots'] 本来就只有自己的）。
+
+    ★ 每块一行：plot_id / 类型 / 等级 / 状态 / 开工 u / 本季产出预览。
+       efficiency 的四分量拆解、running_quarters 那些给前端悬停看的，
+       不进对话 —— AI 要细节时用试算，不把整张表灌进来。
+    """
+    plots = state.get("plots")
+    if not isinstance(plots, list):
+        return []
+    rows: list[str] = []
+    for p in plots:
+        if not isinstance(p, dict):
+            continue
+        u = p.get("u")
+        prev = p.get("output_preview") or {}
+        qty = prev.get("qty")
+        produce = (
+            f"产{prev.get('goods')}×{_fmt(qty)}" if prev.get("goods") else "无产出"
+        )
+        rows.append(
+            f"{p.get('plot_id')}|{p.get('plot_type')}|L{p.get('level')}|"
+            f"{p.get('status')}|产出{p.get('product')}|"
+            f"u={_fmt(u) if u is not None else 'null'}|{produce}"
+        )
+    if not rows:
+        return ["[地块] （还没有任何地块）"]
+    return [f"[地块·{len(rows)}块] id|类型|级|状态|产出|u|本季预览", *rows]
+
+
+def _buildoption_lines(cfg) -> list[str]:
+    """建造选项块：只给"**能新建的**"类型与**现金费**（材料费全省）。
+
+    ★ 为什么只给新建的：`from_level=0` 是开局唯一走得通的入口（升级要
+       先有地）。为什么省材料费：材料走市场、按上季价折算，AI 真要比价
+       该走试算；把 15 种材料配方灌进对话是体积灾难。
+       ⚠️ 现金费是**原价**；开局减免几人一名额、半价这些，规则摘要有，
+          AI 会自己折算（口径：推算须标依据）—— 不在此预先打折。
+    """
+    if cfg is None:
+        return []
+    try:
+        from engine import construction as _C
+
+        works = _C.load_works(cfg)
+    except Exception:  # noqa: BLE001 —— 建造表拿不全，就诚实缺席
+        return []
+    rows = [
+        f"{w.plot_type.value}|{w.label}|现金{_fmt(w.cash)}"
+        for w in sorted(works.values(), key=lambda w: (w.plot_type.value, w.to_level))
+        if w.is_new
+    ]
+    if not rows:
+        return []
+    return [f"[可建·现金费·原价] {len(rows)}类（材料费另有，走试算）", *rows]
+
+
+def _compact_state(player_id: str, state: dict, cfg=None) -> str:
+    """局面压成模型读得动的几行 —— **核心七键 + 价格/地块/建造**。
+
+    结构（一次成型，不做多遍重排）：
+      ① 核心七键（永远满额）          ← 拓宽前就有的，一个不许丢
+      ② 市场 / 本地块 / 可建选项（拓宽的新内容）
+      ③ 末尾自觉体积：总字符超 `_STATE_BODY_LIMIT` 时，
+         价格从「全量」降为「只留有变化/触底的」，仍超再砍建造选项，
+         **核心七键与地块绝不砍**。
+    """
+    core = _core_lines(state)
+    plots = _plot_lines(state)
+    options = _buildoption_lines(cfg)
+    market_full = _market_lines(state, only_changed=False)
+
+    def _join(market_rows, opt_rows) -> str:
+        return "\n".join(core + market_rows + plots + opt_rows)
+
+    # ── 体积闸：三档降级，每档都是"砍次要项"而不是"砍上限" ──────────
+    body = _join(market_full, options)
+    if len(body) > _STATE_BODY_LIMIT:
+        # 一档：价格只留变化的 / 触底的
+        body = _join(_market_lines(state, only_changed=True), options)
+    if len(body) > _STATE_BODY_LIMIT:
+        # 二档：把建造选项整块拿掉（比价格次要 —— 价格影响当季买卖）
+        body = _join(_market_lines(state, only_changed=True), [])
+    # ★ 断言重付：到这里 **必须** < 上限。若连"核心+地块+精简价格"都超了，
+    #    说明某个分项失控了 —— 让它**当场显形**，不许带病放行。
+    assert len(body) <= _STATE_BODY_LIMIT, (
+        f"局面压缩后仍 {len(body)} 字符（上限 {_STATE_BODY_LIMIT}）："
+        f"某个分项失控，不许无限增长。"
+    )
+    return body
 
 
 def _compact_preview(report: dict) -> str:
