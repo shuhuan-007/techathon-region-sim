@@ -116,8 +116,11 @@ window.APP = window.APP || {};
      ok 且 narratives 非空 → _narrState='ok';
      其它（null / 缺键 / 4xx5xx / 异常）→ _narrState='fail'，_narratives=null。
      每次终态都会 _repaint() —— 公文区的字立刻被覆盖。 */
+  /* v11 拍板：fail 状态允许重试。如果上一次 fail，重置 _narrPromise
+     后重新拉（而非永远走 'fail' 份的 "上传文件不可用" fallback）。
+     解决"屏不显示内容"—— 上一次 fail 后用户每次打开都看不到真新闻。 */
   async function _fetchNarratives(){
-    if (_narrPromise) return _narrPromise;
+    if (_narrPromise && _narrState !== 'fail') return _narrPromise;
     _narrState = 'pending';
     const game = encodeURIComponent(_findGame());
     _narrPromise = fetch('/api/narratives?game=' + game + '&player=p1')
@@ -190,11 +193,14 @@ window.APP = window.APP || {};
       if (isNaN(r) || isNaN(c)) return;
       rows.push(r); cols.push(c);
     });
-    if (!rows.length) return 9;
+    if (!rows.length) return 5;
     const h = Math.max(...rows) - Math.min(...rows) + 1;
     const w = Math.max(...cols) - Math.min(...cols) + 1;
     const side = Math.max(h, w);
-    return Math.max(6, side + 3);
+    /* v11 拍板（2026-10-18 用户）：「屏更近一点」。
+       v9 是 max(6, side + 3)（pizzademo side 10 → -13 远）；v11 是 max(3, side * 0.6)
+       → side 10 → 6，距离近一半。side 越大，近端越近；side 小（少于 5 块）也保底 3。 */
+    return Math.max(3, Math.round(side * 0.6));
   }
 
   /* ── 数字格式化(沿用 v4)── */
@@ -217,10 +223,11 @@ window.APP = window.APP || {};
     rows = (rows || []).filter(r => r && r[1] != null && r[1] !== '');
     if (!rows.length) return y;
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.font = '600 14px ui-monospace, monospace';
+    /* v11 拍板：表格性字号 14→17（标题）、13→16（数据行）。 */
+    ctx.font = '600 17px ui-monospace, monospace';
     ctx.fillText(String(title).toUpperCase(), x, y);
-    y += 20;
-    ctx.font = '13px ui-monospace, monospace';
+    y += 24;
+    ctx.font = '16px ui-monospace, monospace';
     rows.forEach(([k, v]) => {
       ctx.fillStyle = 'rgba(255,255,255,0.65)';
       ctx.fillText(String(k), x, y);
@@ -275,37 +282,53 @@ window.APP = window.APP || {};
     _roundRect(ctx, XR, YT, XR2 - XR, YB - YT, 8);
     ctx.stroke();
 
-    /* 公文标题 */
+    /* 公文标题（v11 拍板字号 15→19）。 */
     ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    ctx.font = '600 15px system-ui, sans-serif';
-    ctx.fillText('本季经营新闻与财报解读', XR + 14, YT + 22);
+    ctx.font = '600 19px system-ui, sans-serif';
+    ctx.fillText('本季经营新闻与财报解读', XR + 14, YT + 26);
 
-    /* 数据源三档 */
+    /* 数据源：v11 拍板（2026-10-18 用户）：「本季已生成的财报新闻直接搬上去」。
+       兼容 narratives.news 形状 {kind,quarter,ok,model,headline,body,...}：
+       ok=false 时把 detail 写出；ok=true 时 headline + body。
+       另外 STATE.news 缓存（新闻/财报）也可作 fallback。 */
     let body;
     const n = _narratives;
-    if (n && n.news && n.news.headline){
+    /* ★ 优先中：真正从 /api/narratives 拿到的 narratives */
+    if (n && n.news && n.news.ok && n.news.headline){
       const head = String(n.news.headline);
       const text = (n.news.body != null) ? String(n.news.body) : '';
       body = head + '\n\n' + text;
-    } else if (n && n.news && typeof n.news === 'object' && n.news.headline == null && n.news.text){
-      /* 防守：narratives.news 形状可能是 {text:...}（如 report 那一路）。
-         新闻按理永远有 headline，但这里对"怪形状"也兜住。 */
+    } else if (n && n.news && n.news.text){
+      /* 防守：news 是 {text} 形状（可能是 report 那一路）。 */
       body = String(n.news.text);
+    } else if (n && n.news && n.news.detail){
+      /* AI 生成器返回了 ok=false 的 detail */
+      body = '— ' + n.news.detail + ' —';
     } else if (n && n.news && n.news.error){
-      /* AI 生成器返回的 error 包装（§11.4 诚实未生成）→ 显示 error detail */
-      body = '— ' + (n.news.detail || n.news.error || '生成失败') + ' —';
+      body = '— ' + (n.news.detail || n.news.error) + ' —';
     } else if (_narrState === 'pending'){
       body = '— 本季经营新闻与财报解读正在生成… —';
+    } else if (typeof STATE !== 'undefined' && STATE && STATE.news && STATE.news.narrative){
+      /* ★ fallback：STATE.news.narrative 已经是生成过的新闻（由主界面 panel.js 拉到） */
+      const sNews = STATE.news.narrative;
+      if (typeof sNews === 'string') body = sNews;
+      else if (sNews.headline) body = String(sNews.headline) + '\n\n' + (sNews.body || '');
+      else body = String(sNews);
+    } else if (typeof STATE !== 'undefined' && STATE && STATE.report_narrative){
+      const sRep = STATE.report_narrative;
+      if (typeof sRep === 'string') body = sRep;
+      else if (sRep.headline) body = String(sRep.headline) + '\n\n' + (sRep.body || '');
+      else body = String(sRep);
     } else {
       body = '— 结算后此处将显示经营新闻与财报解读 —';
     }
 
-    /* 多行 wrap on the fly；最多 8 行 */
+    /* 多行 wrap on the fly；v11 拍板字号 13→16、最多 8 行。 */
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.font = '13px ui-monospace, monospace';
+    ctx.font = '16px ui-monospace, monospace';
     const lines = _wrapText(ctx, body, XR2 - XR - 28);
     const maxLines = 8;
-    let y = YT + 42;
+    let y = YT + 50;
     lines.slice(0, maxLines).forEach(ln => {
       ctx.fillText(ln, XR + 14, y);
       y += 18;
@@ -337,8 +360,9 @@ window.APP = window.APP || {};
     if (r && r.quarter != null) q = r.quarter;
     else if (typeof STATE !== 'undefined' && STATE && STATE.quarter != null) q = STATE.quarter;
     ctx.fillStyle = 'rgba(255,255,255,0.98)';
-    ctx.font = '600 28px system-ui, sans-serif';
-    ctx.fillText('第 ' + (q != null ? q : '—') + ' 季 · 经营报表', 30, 48);
+    /* v11 拍板（2026-10-18 用户）：「字体更大一点」标题 28 → 36。 */
+    ctx.font = '600 36px system-ui, sans-serif';
+    ctx.fillText('第 ' + (q != null ? q : '—') + ' 季 · 经营报表', 30, 54);
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(20, 62); ctx.lineTo(W - 20, 62); ctx.stroke();
@@ -428,11 +452,12 @@ window.APP = window.APP || {};
         if (plots.length)               rows.push(['地块', plots.length + ' 块']);
         let y = _drawSection(ctx, '快照(实时 STATE)', rows, 30, 92, W - 60);
         ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        ctx.font = 'italic 12px ui-monospace, monospace';
+        /* v11 拍板 fallback 字号 12→15、14→17。 */
+        ctx.font = 'italic 15px ui-monospace, monospace';
         ctx.fillText('数据来自实时 STATE —— 完整报表需结算后由 /api/report 给出。', 30, y + 8);
       } else {
         ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        ctx.font = 'italic 14px ui-monospace, monospace';
+        ctx.font = 'italic 17px ui-monospace, monospace';
         ctx.fillText('STATE 未就绪。', 30, 100);
       }
     }
