@@ -85,6 +85,7 @@ def advise(
     *,
     rule_key: str = DEFAULT_RULE_KEY,
     preview_plan: Optional[dict] = None,
+    draft: bool = False,
     client=llm_client,
 ) -> dict:
     """组装输入 → 调模型 → 返回**建议**（结构化 dict）。
@@ -96,11 +97,22 @@ def advise(
       · `rule_key`      — 规则摘要节号（默认 '11.4' 权限阶梯）；
       · `preview_plan`  — AI 想先试算的 Plan 形状（**dict**，由服务层转成
                           `Plan`，**只读试算**，数字全部来自 `tool_preview`）；
+      · `draft`         — `True` 时请模型**自己起草一份 Plan 形状**
+                          （与 `/api/submit` 的 plan 同形）；
+                          `False`（默认）＝行为与旧版完全一致；
       · `client`        — LLM 客户端（**可注入假客户端做测试**，默认真网关）。
 
     返回 dict（形状见文件底部 `_ok_advice` / `_failure`）：
 
-        ok / summary / suggested_plan / evidence / model / error
+        ok / summary / suggested_plan / plan_source / plan_issues /
+        evidence / model / error
+
+      · `suggested_plan` — Plan 形状的 dict 或 None；
+      · `plan_source`    — `'model'`（模型起草）/ `'preview'`（玩家传入的
+                          那版）/ None；
+      · `plan_issues`    — 模型起草的计划过不了校验时的问题清单
+                          （此时 `suggested_plan` 置 None，**绝不把坏计划
+                          交给前端**）。
 
     **任何失败**（局面拿不到、规则节号不对、网关没起 / 超时 / 回了垃圾）
     都翻成 `ok=False` 的 dict —— **绝不抛穿到调用方 / 绝不编造建议**。
@@ -174,6 +186,7 @@ def advise(
         question=question,
         preview_report=preview_report,
         cfg=getattr(session, "cfg", None),
+        draft=draft,
     )
 
     result = client.chat_completions(messages)
@@ -200,7 +213,7 @@ def advise(
     #    模型回了 200 但正文为空（网关偶发 / 被截断 / 上游只回了思考块）时，
     #    原来的实现会一路走到 `_ok_advice(summary="")` → **报 ok=True 却没有建议**。
     #    那比报错更坏：前端要显示"AI 说：（空）"，玩家以为 AI 没想法，
-    #    而真相是"这次没拿到回答"。
+    #    而真相是"这次没拿到回答"。draft=True 同理（空 JSON 也等于没起草）。
     if not content:
         return _failure(
             "empty_response",
@@ -212,10 +225,63 @@ def advise(
             rule=rule,
         )
 
-    # ── 4. 把模型回的自由文本**收进建议形状**（不假装它必是 JSON）───
+    # ── 4. draft 开路：把回答当 **Plan 候选** 解析 → 校验 → 收建议 ──
+    #    ⚠️ AI 只起草数据，**绝不提交**（§11.4）：
+    #       · 校验过 → suggested_plan=该对象、plan_source='model'；
+    #       · 校验不过 → suggested_plan=None + plan_issues（**绝不把坏计划
+    #         交给前端**）；
+    #       · 取不出 JSON → 明确失败，**不编**。
+    #
+    #    ⚠️ 形状转换必须**在 advise 主体里做**，不能放进 _draft_advice：
+    #       `plan_from_dict` 会拉起 `server.app` → 连带 `server.session` /
+    #       `storage`；若在 _draft_advice 里首次拉起，ai/ 的边界自检
+    #       （`assert_import_boundary`，盯 sys.modules 里新出现的黑名单模块）
+    #       就会误判 ai/ 越界 —— 实测 AisImportBoundaryError 就是这么炸的。
+    #       放到这里做：① 与 preview_plan 分支的惰性 import 处于同一时点
+    #       （advise 主体），边界基线早已固定；② preview 分支 import 过
+    #       `server.app` 之后，本分支再拉一次也只是命中 sys.modules 缓存。
+    if draft:
+        plan_candidate = None
+        plan_candidate_error: Optional[str] = None
+
+        # 4a. 皮实解析（复用 narrate 的 parser：剥围栏 / 跳前言 / 数括号）
+        try:
+            from ai.narrate import parse_model_json
+            obj, problem = parse_model_json(content)
+        except Exception as e:  # noqa: BLE001 —— parser 自己都不能崩
+            obj, problem = None, f"parse_model_json 抛异常（{type(e).__name__}: {e}）"
+
+        # 4b. 形状转换（**只转换、不校验**；合法性由 tool_validate 说了算）
+        if obj is not None:
+            try:
+                from server.app import plan_from_dict
+
+                candidate = dict(obj)
+                candidate["player_id"] = player_id  # 钉死：这份起草是给谁的
+                plan_candidate = plan_from_dict(candidate)
+                plan_candidate.player_id = player_id
+            except Exception as e:  # noqa: BLE001
+                plan_candidate_error = f"{type(e).__name__}: {e}"
+
+        return _draft_advice(
+            session,
+            player_id,
+            plan_candidate,
+            parse_problem=problem,
+            shape_error=plan_candidate_error,
+            evidence=evidence,
+            model=mdl or llm_client.model_name(),
+            rule_key=rule.get("key"),
+            question=question,
+        )
+
+    # ── 5. 默认路径（**行为与旧版完全一致**）：把模型回的自由文本**收进
+    #    建议形状**（不假装它必是 JSON）──────────────────────────────
     return _ok_advice(
         summary=content,
         suggested_plan=preview_plan,   # 建议带的 plan＝AI 先试算过的那版（可为 None）
+        plan_source=("preview" if preview_plan is not None else None),
+        plan_issues=None,
         evidence=evidence,
         model=mdl or llm_client.model_name(),
         rule_key=rule.get("key"),
@@ -238,6 +304,42 @@ def advise(
 # ══════════════════════════════════════════════════════════════════
 _STATE_BODY_LIMIT = 4000
 
+# ══════════════════════════════════════════════════════════════════
+# ★ draft 开路时的额外要求（**只放在 user message 里，不动 _SYSTEM_PREAMBLE**）
+# ══════════════════════════════════════════════════════════════════
+#
+# 为什么单独钉一段：draft=True 时要模型**输出 JSON 而不是人话**。
+# 但 system preamble 是用户刚拍板的 207 字符三段式，一字不动 ——
+# 起草的额外要求（JSON 形状、只列必填字段、只输出 JSON）放 user message，
+# 模型照读，旧 system 一字不碰。
+_DRAFT_JSON_INSTRUCTION = (
+    "\n\n【起草一份计划（draft）】本次请**你自己起草**一份计划。"
+    "只输出一个 JSON 对象，不要解释，不要代码围栏，不要多余文字。\n"
+    "形状（与 /api/submit 的 plan 同形）：\n"
+    "{\n"
+    '  "player_id": "<玩家 ID>",\n'
+    '  "plot_plans": {"<plot_id>": {"plot_id": "<plot_id>", '
+    '"active": true, "u": 1.0}},\n'
+    '  "purchases": {"<商品>": <数量>},\n'
+    '  "food": {"<商品>": <数量>},\n'
+    '  "builds": [\n'
+    "    {\n"
+    '      "plot_id": "<坐标 r,c>",\n'
+    '      "plot_type": "<类型>",\n'
+    '      "target_level": <目标等级>,\n'
+    '      "product": "<产物/路线或 null>"\n'
+    "    }\n"
+    "  ]\n"
+    "}\n"
+    "要求：\n"
+    "· 只能从上面局面里 [可建] 选出能建的类型/产物，不要自己编；\n"
+    "· player_id 必须写「{player_id}」；\n"
+    "· 地块坐标用「r,c」格式（从 0 起算）；\n"
+    "· 每个 builds 都要给出 plot_type 与 target_level（新建为 1），"
+    "农业/工业还要给 product；\n"
+    "· 现金够不够不用你在文字里算 —— 校验由引擎做，你只管起草。"
+)
+
 
 def _build_messages(
     *,
@@ -247,6 +349,7 @@ def _build_messages(
     question: Optional[str],
     preview_report: Optional[dict],
     cfg=None,
+    draft: bool = False,
 ) -> list[dict]:
     """把局面 / 规则摘要 / 试算数字 / 玩家问题拼成 OpenAI messages。"""
     lines = [
@@ -276,6 +379,11 @@ def _build_messages(
             "\n\n请基于以上局面与规则，给玩家一版本季建议（人话，分点，"
             "引用的数字必须与上面给出的局面/试算一致）。"
         )
+
+    # draft 开路时追加"输出 JSON"的硬要求（只加在 user message，
+    # 不动 system preamble —— 用户拍板的 207 字三段式一字不改）。
+    if draft:
+        user_body += _DRAFT_JSON_INSTRUCTION.replace("{player_id}", player_id)
 
     return [
         {"role": "system", "content": _SYSTEM_PREAMBLE},
@@ -524,6 +632,8 @@ def _ok_advice(
     *,
     summary: str,
     suggested_plan: Optional[dict],
+    plan_source: Optional[str] = None,
+    plan_issues: Optional[list[dict]] = None,
     evidence: list[dict],
     model: str,
     rule_key: Optional[str],
@@ -539,6 +649,8 @@ def _ok_advice(
         "ok": True,
         "summary": summary,
         "suggested_plan": suggested_plan,
+        "plan_source": plan_source,
+        "plan_issues": plan_issues,
         "evidence": evidence,
         "model": model,
         "rule_key": rule_key,
@@ -547,6 +659,133 @@ def _ok_advice(
         # 权限阶梯的落点，前端照着这句话做按钮就行
         "next_step": "玩家确认后由前端走 /api/submit 提交（AI 无 commit）",
     }
+
+
+def _draft_advice(
+    session: "GameSession",
+    player_id: str,
+    plan_obj,
+    *,
+    parse_problem: Optional[str],
+    shape_error: Optional[str],
+    evidence: list[dict],
+    model: str,
+    rule_key: Optional[str],
+    question: Optional[str],
+) -> dict:
+    """draft=True 的收尾：把模型回的 JSON 解析成 Plan 候选 → 校验 → 收建议。
+
+    三条出口（对应任务 A 的铁律）：
+
+      ① 模型连 JSON 都没给出（一堆废话 / 全不是 JSON）→ **明确失败**（不编）；
+      ② 给了 JSON，但 **validate 不过** → `suggested_plan=None` + `plan_issues`
+         （**绝不把坏计划交给前端**）；
+      ③ 给了 JSON 且 **validate 通过** → `suggested_plan=该对象`、
+         `plan_source='model'`。
+    """
+    # ── ① 模型连 JSON 都没给（废话 / 全不是 JSON）→ 明确失败（不编）───
+    if plan_obj is None and parse_problem:
+        return _ok_advice(
+            summary=(
+                f"模型没给出一份能解析的计划 JSON（{parse_problem}）。"
+                "这次起草被放弃——玩家仍得自己填表，或再点一次重新起草。"
+            ),
+            suggested_plan=None,
+            plan_source=None,
+            plan_issues=None,
+            evidence=evidence,
+            model=model,
+            rule_key=rule_key,
+            question=question,
+        )
+
+    # ── ② 给了 JSON，但翻不成 Plan（乱给键名 / 非法枚举值 / 缺必填）───
+    if plan_obj is None:
+        return _ok_advice(
+            summary=(
+                f"模型给的 JSON 翻不成 Plan（{shape_error or '未知形状错误'}）。"
+                "这次起草被放弃——玩家仍得自己填表，或再点一次重新起草。"
+            ),
+            suggested_plan=None,
+            plan_source=None,
+            plan_issues=None,
+            evidence=evidence,
+            model=model,
+            rule_key=rule_key,
+            question=question,
+        )
+
+    # ── ③ 引擎校验：与 /api/submit 走同一条 validate（只读）─────────────
+    #    ⚠️ 为什么不能直接调 ai.tools.tool_validate：
+    #       tool_validate 自带**第一次自省** `assert_import_boundary()`，
+    #       用 sys.modules 倒推「ai/ 有没有把 server.session/storage 拉进来」。
+    #       生产链不会炸（server.app 先起，ai 后 import，基线认得 server.* 是
+    #       既成事实）；**测试链**先 import ai 再拉起 server.app（FakeClient
+    #       只能这么搭），`server.registry/session` 必然后于 ai 进驻
+    #       sys.modules，自检**必炸**。
+    #       —— 这条自检的任务是「ai/ 内部不许越界」，不是「主机层不许校验」；
+    #          ai_host 本来就是 server 层，它调 engine.validate 天经地义。
+    #       所以走 tool_draft_plan 里的**同一条** engine.validate.validate_plan
+    #       （任务书给的备选校验路径），与 /api/submit 一个入口、一份 issues。
+    from engine import validate as _engine_validate
+    try:
+        cfg = session.cfg
+        player = session.state.player(player_id)
+        issues = [i.to_dict() for i in
+                  _engine_validate.validate_plan(plan_obj, player, cfg, player_id)]
+    except Exception as e:  # noqa: BLE001
+        return _ok_advice(
+            summary=(
+                f"起草出来的计划跑校验时出了意外（{type(e).__name__}: {e}）。"
+                "这次起草被放弃——玩家仍得自己填表，或再点一次重新起草。"
+            ),
+            suggested_plan=None,
+            plan_source=None,
+            plan_issues=None,
+            evidence=evidence,
+            model=model,
+            rule_key=rule_key,
+            question=question,
+        )
+
+    # ── ④ 三种情况分出口 ──────────────────────────────────────────
+    if issues:
+        # 校验不过：suggested_plan=None + plan_issues（**绝不把坏计划交出去**）
+        plan_dict = plan_obj.to_dict()
+        return _ok_advice(
+            summary=(
+                f"模型起草的计划没过校验（{len(issues)} 条问题），"
+                "这次起草被放弃——玩家仍得自己填表，或再点一次重新起草。"
+            ),
+            suggested_plan=None,
+            plan_source="model",          # 它**确实**是模型起草的，只是不过
+            plan_issues=issues,
+            evidence=evidence,
+            model=model,
+            rule_key=rule_key,
+            question=question,
+        )
+
+    # 校验通过：suggested_plan=该对象、plan_source='model'
+    # 这里的 summary 不能是 JSON 原文（太长），给玩家一句能看懂的说明。
+    plan_dict = plan_obj.to_dict()
+    n_builds = len(plan_dict.get("builds") or [])
+    n_plots = len(plan_dict.get("plot_plans") or {})
+    summary = (
+        "模型起草了一份计划" +
+        (f"（含 {n_builds} 条建造、{n_plots} 块地的安排）" if (n_builds or n_plots) else "") +
+        "。下方 `suggested_plan` 就是它，玩家确认后可一键复制走 /api/submit。"
+    )
+    return _ok_advice(
+        summary=summary,
+        suggested_plan=plan_dict,
+        plan_source="model",
+        plan_issues=None,
+        evidence=evidence,
+        model=model,
+        rule_key=rule_key,
+        question=question,
+    )
 
 
 def _failure(

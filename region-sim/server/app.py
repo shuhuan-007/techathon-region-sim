@@ -364,6 +364,8 @@ class App:
             # **原样透传**给 ai_host（它内部会做形状转换 + 校验 + 只读试算）；
             # 不传时 ai_host 用它自己的默认 None，行为与旧版完全一致。
             preview_plan=body.get("preview_plan"),
+            # 可选「让模型自己起草一份 Plan」（默认 False，与旧行为一致）。
+            draft=bool(body.get("draft", False)),
         )
         return {"ok": bool(advice.get("ok")), "advice": advice}
 

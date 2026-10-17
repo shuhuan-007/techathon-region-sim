@@ -268,12 +268,18 @@
             <input id="ai-question"
                    placeholder="（可空）例：这季先建什么？口粮要不要多买？"
                    style="flex:1">
-            <button id="btn-ai-ask" class="primary">问 AI</button>
+            <button id="btn-ai-ask">问 AI</button>
+            <button id="btn-ai-draft" class="primary"
+                    title="让 AI 自己起草一份计划，填入左侧「本季安排 / 建造 / 口粮」表单，你可以再改">
+              ✍️ 让 AI 起草一份
+            </button>
           </div>
           <div id="ai-status" class="muted" style="margin:0 0 8px"></div>
           <div id="ai-result"></div>
           <p class="muted" style="margin:8px 0 0">
-            AI 只能<b>起草</b>，提交计划永远是你点「采纳」或「推进本季度」的动作（§11.4）。
+            「问 AI」＝只给建议，不动表单。<br>
+            「✍️ 让 AI 起草一份」＝AI 写一份计划<b>填入左边表单</b>，<b>绝不自动提交</b>——
+            你改完再自己点「下达建设指令 / ▶ 推进本季度」（§11.4，AI 无 commit）。
           </p>
         </div>
 
@@ -380,7 +386,7 @@ function hideStateLoading(){
 }
 
 /* 会重复触发"拉状态"或"上交计划"的按钮（建造按钮走自身 disabled 流，单独管）。 */
-const _SL_BTNS = ["btn-settle","btn-next","btn-runall","btn-stopall","btn-load","btn-new","btn-ai-ask"];
+const _SL_BTNS = ["btn-settle","btn-next","btn-runall","btn-stopall","btn-load","btn-new","btn-ai-ask","btn-ai-draft"];
 function setActionButtonsDisabled(off){
   _SL_BTNS.forEach(id => {
     const b = $(id);
@@ -1085,24 +1091,52 @@ $("btn-report").onclick = () => {
 
 /* ══════════════════════════════════════════════════════════
    五、AI 建议（§11.4：AI 只起草，提交永远是玩家的动作）
-   ══════════════════════════════════════════════════════════ */
-let AI_LAST_PLAN = null;   // 最近一份AI起草的suggested_plan（未采纳前只是草稿）
 
-$("btn-ai-ask").onclick = async () => {
+   两按钮共用一个内核：
+     · btn-ai-ask   → draft=false（不传），AI 只给建议，绝不动表单；
+     · btn-ai-draft → draft=true，AI 起草一份计划 —— 拿到后【填入】既有
+       plan 状态（左列的建造/本季安排/口粮立刻显形），玩家可以继续改；
+       提交仍只有玩家手动点「▶ 推进本季度」一条路。
+
+   填入的字段映射（与 /api/submit 的 plan 同形，suggested_plan 形状由后端保证）：
+     { player_id, plot_plans:{}, purchases:{}, food:{}, builds:[], contracts:[] }
+   前端**容错**：缺哪个键就空哪个键，绝不自己造默认值。
+   ══════════════════════════════════════════════════════════ */
+let AI_LAST_PLAN = null;   // 最近一次 AI 给出的 suggested_plan（仅为显示/溯源，不再是"采纳"按钮的载荷）
+
+/* 把 AI 起草的 suggested_plan 填入前端既有的待提交计划（plan）。
+   地图/建造面板/本季安排/口粮/预览 全靠既有 renderAll() 显示。 */
+function applySuggestedPlan(sp){
+  resetPlan();
+  // 只抄已知的五个键；其它键（player_id 之类）由 publicPlan() 自己补。
+  plan.plot_plans = (sp && typeof sp.plot_plans === "object" && sp.plot_plans) ? sp.plot_plans : {};
+  plan.purchases  = (sp && typeof sp.purchases  === "object" && sp.purchases)  ? sp.purchases  : {};
+  plan.food       = (sp && typeof sp.food       === "object" && sp.food)       ? sp.food       : {};
+  plan.builds     = Array.isArray(sp && sp.builds)    ? sp.builds    : [];
+  plan.contracts  = Array.isArray(sp && sp.contracts) ? sp.contracts : [];
+}
+
+async function askAI(draft){
   if (!GAME) return toast("先开局 / 读档，AI 要有局面才能出主意。", "warn");
   const q = $("ai-question").value.trim();
-  const btn = $("btn-ai-ask"), status = $("ai-status");
+  const askBtn = $("btn-ai-ask"), draftBtn = $("btn-ai-draft"), status = $("ai-status");
+  const busyBtn = draft ? draftBtn : askBtn;
 
-  btn.disabled = true;
-  status.textContent = "正在问 AI…（真调模型可能要几十秒，请稍候，页面没死）";
+  // 双按钮一起锁，防连点把两路请求都点出去
+  askBtn.disabled = true; draftBtn.disabled = true;
+  status.textContent = draft
+    ? "正在让 AI 起草计划…（真调模型可能要几十秒，请稍候，页面没死）"
+    : "正在问 AI…（真调模型可能要几十秒，请稍候，页面没死）";
   status.style.color = "var(--warn)";
   $("ai-result").innerHTML = "";
 
+  const body = { game: GAME, player: PLAYER };
+  if (q) body.question = q;
+  if (draft) body.draft = true;      // ⚠️ 不传 = false，与后端"默认 false 行为不变"对齐
+
   let resp;
   try{
-    resp = await api("POST", "/api/ai/advise", {
-      game: GAME, player: PLAYER, question: q || undefined,
-    });
+    resp = await api("POST", "/api/ai/advise", body);
   }catch(e){
     /* 分支①：网络层失败（fetch 抛错 / 非 JSON / HTTP 层错误）——人话，不崩 */
     status.textContent = "";
@@ -1110,70 +1144,134 @@ $("btn-ai-ask").onclick = async () => {
     $("ai-result").innerHTML =
       `<p style="color:var(--bad);margin:0">⚠️ 这次没能联系上 AI 服务：` +
       `${e.message || e}。</p>` +
-      `<p class="muted" style="margin:6px 0 0">可能是网关没在跑或网络抖动——可以再点一次「问 AI」。</p>`;
-    btn.disabled = false;
+      `<p class="muted" style="margin:6px 0 0">可能是网关没在跑或网络抖动——可以再点一次。</p>`;
+    askBtn.disabled = false; draftBtn.disabled = false;
     return;
   }
-  btn.disabled = false;
+  askBtn.disabled = false; draftBtn.disabled = false;
   status.style.color = "";
 
   const adv = (resp && resp.advice) || (resp && resp.ok === false ? resp : null);
   if (adv && adv.ok === true && (adv.summary || "").trim()){
-    /* 分支②：ok:true 且 summary 非空 → 显示建议；有计划只显示，不执行 */
-    AI_LAST_PLAN = adv.suggested_plan || null;
-    status.textContent =
-      `已拿到建议（模型：${adv.model || "—"}${adv.rule_key ? "　规则节：§" + adv.rule_key : ""}）`;
-    let html = `<div style="white-space:pre-wrap;word-break:break-word">${adv.summary}</div>`;
+    /* 分支②：ok:true 且 summary 非空 → 显示建议。
+       后端契约（任务 B 前置）：
+         adv.suggested_plan  → 计划 dict 或 null
+         adv.plan_source     → "model" | "preview" | null
+         adv.plan_issues     → 模型起草过不了校验时的 issues 清单（suggested_plan 此时为 null） */
+    const summary = String(adv.summary).replace(/</g,"&lt;");  // 不引 esc，防上方函数未到此作用域
+    AI_LAST_PLAN = (adv.suggested_plan && typeof adv.suggested_plan === "object")
+      ? adv.suggested_plan : null;
+    const planSource = adv.plan_source || null;                 // model / preview / null
+    const planIssues = Array.isArray(adv.plan_issues) ? adv.plan_issues : null;
 
-    if (AI_LAST_PLAN){
-      html += `<div class="msg" style="border-left-color:var(--accent);margin-top:10px">` +
-        `<b>AI 起草了一份计划</b>（<b>只是草稿，未执行</b>）：` +
+    status.textContent =
+      `已拿到${draft ? "起草" : "建议"}（模型：${adv.model || "—"}` +
+      `${adv.rule_key ? "　规则节：§" + adv.rule_key : ""}）`;
+
+    let html = `<div style="white-space:pre-wrap;word-break:break-word">${summary}</div>`;
+
+    /* —— 子分支 ②a：plan_issues 非空 → 起草失败，只显示问题，绝不填入 —— */
+    if (planIssues && planIssues.length){
+      html +=
+        `<div class="msg" style="border-left-color:var(--bad);margin-top:10px">` +
+        `<b>AI 起草的计划过不了校验</b>（已忽略，没填入表单）：` +
+        `<ul style="margin:6px 0 0;padding-left:1.2em">` +
+        planIssues.map(i => {
+          const code = (i && i.code) || "";
+          const msg  = (i && i.message) || String(i);
+          return `<li>${code ? `<span class="tag">${String(code).replace(/</g,"&lt;")}</span> ` : ""}` +
+                 `${String(msg).replace(/</g,"&lt;")}</li>`;
+        }).join("") +
+        `</ul><div class="muted" style="margin-top:6px">可以换一句话再让 AI 起草一次。</div></div>`;
+      AI_LAST_PLAN = null;
+    }
+    /* —— 子分支 ②b：有 suggested_plan —— 草稿（不管 draft 真不真）—— */
+    else if (AI_LAST_PLAN){
+      const srcTxt = planSource === "preview" ? "（来自你传入的预览计划）"
+                   : planSource === "model"   ? "（AI 自己起草的）"
+                   : "";
+      /* 草案 JSON 展示 + 仅在 draft=true 模式下给「填入」按钮 */
+      html +=
+        `<div class="msg" style="border-left-color:var(--accent);margin-top:10px">` +
+        `<b>AI 起草了一份计划</b>${srcTxt}（<b>只是数据，未执行</b>）：` +
         `<pre style="margin:6px 0;font-size:11px;white-space:pre-wrap;word-break:break-all">${
-          JSON.stringify(AI_LAST_PLAN, null, 1)}</pre>` +
-        `<div class="muted">${adv.next_step || ""}</div></div>` +
-        `<button id="btn-ai-accept" class="primary" style="margin-top:8px">` +
-        `采纳这份计划（走玩家提交）</button>`;
+          JSON.stringify(AI_LAST_PLAN, null, 1).replace(/</g,"&lt;")}</pre>` +
+        `<div class="muted">${(adv.next_step || "").replace(/</g,"&lt;")}</div></div>`;
+
+      if (draft){
+        /* ★ 起草模式：按钮语义 = 填入表单（可继续改），不是提交。 */
+        html += `<button id="btn-ai-apply" class="primary" style="margin-top:8px">` +
+                `⬇ 填入左边表单（我可以再改）</button>` +
+                `<p class="muted" style="margin:6px 0 0">` +
+                `填入后：建造/本季安排/口粮都会显出这份草案；` +
+                `<b>不会自动提交</b> —— 你必须改完再自己点「▶ 推进本季度」。</p>`;
+      } else {
+        /* 非起草却出现了 plan（preview 回显）：纯提示，不给填入按钮（与旧「采纳」按钮区别开） */
+        html += `<p class="muted" style="margin:8px 0 0">` +
+                `（这是回显 / 试算结果，不写入表单。要 AI 起草请点「✍️ 让 AI 起草一份」。）</p>`;
+      }
     } else {
+      /* —— 子分支 ②c：只有建议，没计划 —— */
       html += `<p class="muted" style="margin:8px 0 0">（这次 AI 没起草具体计划，只给了建议。）</p>`;
     }
+
     if (adv.evidence && adv.evidence.length){
       html += `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer">` +
         `数字来源（evidence，${adv.evidence.length} 条）</summary>` +
         `<table style="margin-top:4px"><thead><tr><th>来源</th><th>字段</th><th>值</th></tr></thead><tbody>` +
         adv.evidence.map(ev =>
-          `<tr><td>${ev.source || ""}</td><td>${ev.field || ""}</td>` +
-          `<td class="num">${typeof ev.value === "object" ? JSON.stringify(ev.value) : (ev.value == null ? "—" : ev.value)}</td></tr>`
+          `<tr><td>${String(ev.source||"").replace(/</g,"&lt;")}</td>` +
+          `<td>${String(ev.field||"").replace(/</g,"&lt;")}</td>` +
+          `<td class="num">${typeof ev.value === "object"
+              ? JSON.stringify(ev.value).replace(/</g,"&lt;")
+              : (ev.value == null ? "—" : String(ev.value).replace(/</g,"&lt;"))}</td></tr>`
         ).join("") + `</tbody></table></details>`;
     }
     $("ai-result").innerHTML = html;
 
-    const acc = $("btn-ai-accept");
-    /* ★ 采纳才走既有的玩家提交流程（/api/submit）。默认绝不自动提交。 */
-    if (acc) acc.onclick = async () => {
-      acc.disabled = true;
+    /* ★ 填入按钮的处理：写入 plan → 重画 → toast。绝不调 /api/submit。 */
+    const apply = $("btn-ai-apply");
+    if (apply) apply.onclick = async () => {
+      apply.disabled = true;
       try{
-        await api("POST", "/api/submit", {game:GAME, player:PLAYER, plan: AI_LAST_PLAN});
-        await refresh();
-        toast("已按 AI 草稿提交计划（走玩家通道 /api/submit）。可再点「▶ 推进本季度」结算。", "ok");
-      }catch(e){ fail(e); acc.disabled = false; }
+        applySuggestedPlan(AI_LAST_PLAN);
+        selected = null;
+        renderAll();
+        /* 跟手一发试算（沿用现有"点建造即试算"的习惯）：折后现金 / 名额立刻刷新。
+           失败只 warn —— 草案可能本来就过不了（比如现金不够），玩家可以在表单里修。 */
+        try{
+          await api("POST", "/api/submit", {game:GAME, player:PLAYER, plan: publicPlan()});
+          await refresh();
+          toast("AI 草案已填入左边表单（试算已刷新）。\n" +
+                "⚠️ 还没提交 —— 你可以继续改，改完自己点「▶ 推进本季度」。", "ok");
+        }catch(e2){
+          toast("AI 草案已填入左边表单，但试算未过：" + (e2.message || e2) + "\n" +
+                "⚠️ 还没提交。先在表单里修，再点「▶ 推进本季度」。", "warn");
+        }
+      }finally{
+        apply.disabled = false;
+      }
     };
   } else if (adv && adv.ok === false){
-    /* 分支③：AI 不可用（200 + ok:false）→ detail 人话 + 可以再点一次 */
+    /* 分支③：AI 不可用（200 + ok:false）→ detail 人话 */
     AI_LAST_PLAN = null;
     status.textContent = "";
-    const tag = adv.error ? `<span class="tag">${adv.error}</span> ` : "";
+    const tag = adv.error ? `<span class="tag">${String(adv.error).replace(/</g,"&lt;")}</span> ` : "";
     $("ai-result").innerHTML =
-      `<p style="color:var(--warn);margin:0">${tag}${adv.detail || "AI 这次没给出可用回答。"}</p>` +
-      `<p class="muted" style="margin:6px 0 0">可以再点一次「问 AI」。</p>`;
+      `<p style="color:var(--warn);margin:0">${tag}${String(adv.detail || "AI 这次没给出可用回答。").replace(/</g,"&lt;")}</p>` +
+      `<p class="muted" style="margin:6px 0 0">可以再点一次。</p>`;
   } else {
     /* 分支④：拿到响应但形状出乎意料（不崩，明说） */
     AI_LAST_PLAN = null;
     status.textContent = "";
     $("ai-result").innerHTML =
       `<p style="color:var(--warn);margin:0">⚠️ AI 服务的应答形状出乎意料，没拿到可用的建议。` +
-      `可以再点一次「问 AI」。</p>`;
+      `可以再点一次。</p>`;
   }
-};
+}
+
+$("btn-ai-ask").onclick = () => askAI(false);
+$("btn-ai-draft").onclick = () => askAI(true);
 
 /* 启动 */
 refreshGames();

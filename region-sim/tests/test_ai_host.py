@@ -609,6 +609,216 @@ def test_state_body_limit_enforced_even_with_many_goods():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 七、★ draft=True：让 AI 真能「起草一份计划」（任务 A，2026-10-17）
+# ══════════════════════════════════════════════════════════════════
+#
+# 背景（用户原话）：「我现在可不可以把我的想法直接发给界面中的 AI，
+# 让他起草方案并且填入，等待进入结算了」——**不行**：AI 只能给建议，
+# suggested_plan 只有当调用方预先塞一份 preview_plan 给它试算时才存在。
+# 这五条钉死新行为：
+#
+#   · 模型回一段**合法** Plan JSON → suggested_plan 非空、plan_source='model'；
+#   · 模型回**代码围栏**包着的 JSON → 仍能取出；
+#   · 模型回**非法计划** → suggested_plan is None 且 plan_issues 非空;
+#   · 模型回**一堆废话** → 明确失败（不编）;
+#   · **默认路径回归**：draft 不传时输出与旧行为一致；
+#   · **绝不 submit**：跑完 advise 后 session.plans 仍空、phase 未变。
+# ══════════════════════════════════════════════════════════════════
+
+
+def _valid_draft_json(player_id: str = "p1") -> dict:
+    """一份能过校验的 Plan JSON —— 开局现金 1200、可建选项里农业 L1 80 是锚点。
+
+    ⚠️ 不用任何开局不存在的地块 / 产物；农业 L1 + product=A 是 config 里的合法组合。
+    """
+    return {
+        "player_id": player_id,
+        "plot_plans": {},
+        "purchases": {},
+        "food": {},
+        "builds": [
+            {
+                "plot_id": "0,0",
+                "plot_type": "agriculture",
+                "target_level": 1,
+                "product": "A",
+            }
+        ],
+    }
+
+
+def test_draft_valid_json_yields_suggested_plan():
+    """模型回一段**合法 Plan JSON** → ok、`suggested_plan` 非空、`plan_source='model'`。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    plan = _valid_draft_json()
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi", content=json.dumps(plan, ensure_ascii=False),
+    ))
+    out = ai_host.advise(session, "p1", "帮我起草一份计划", client=fake, draft=True)
+    assert out["ok"] is True, f"合法起草应成功：{out}"
+    assert out["suggested_plan"] is not None, "suggested_plan 不应为 None"
+    assert out["plan_source"] == "model", (
+        f"plan_source 必须是 'model'（模型起草的），实得 {out['plan_source']!r}"
+    )
+    assert not out.get("plan_issues"), "合法计划不该带 issues"
+    # 形状与 /api/submit 同形 —— builds 那一条里的字段要原样回来
+    first = out["suggested_plan"]["builds"][0]
+    assert first["plot_id"] == "0,0"
+    assert first["plot_type"] == "agriculture"
+    assert first["target_level"] == 1
+    assert first["product"] == "A"
+    # player_id 必须被钉死成玩家自己的（模型乱给也得纠）
+    assert out["suggested_plan"]["player_id"] == "p1"
+    # 旧行为的 next_step（AI 无 commit）也得在
+    assert out.get("next_step"), "AI 无 commit 的提示字句不能丢"
+
+
+def test_draft_fenced_json_is_parsed():
+    """模型回**代码围栏**包着的 JSON → 仍能取出（parse_model_json 的剥围栏能力复用）。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    plan = _valid_draft_json()
+    fenced = f"这是草稿：\n```json\n{json.dumps(plan, ensure_ascii=False)}\n```\n希望对你有帮助。"
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi", content=fenced,
+    ))
+    out = ai_host.advise(session, "p1", client=fake, draft=True)
+    assert out["ok"] is True, f"围栏包着的 JSON 也该能解析：{out}"
+    assert out["suggested_plan"] is not None
+    assert out["plan_source"] == "model"
+    assert out["suggested_plan"]["builds"][0]["plot_id"] == "0,0"
+
+
+def test_draft_invalid_plan_yields_issues_not_suggested_plan():
+    """模型回**非法计划**（往 plot_plans 里塞不存在的地块 id）→ `suggested_plan is None`**且** `plan_issues` 非空。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    bad_plan = _valid_draft_json()
+    # ★ 必须是 plot_plans 里的地块 id 才会被 `_check_plot_plans` 抓
+    #   （builds 不在这一项的检查范围，开局还没地，所以"99,99"必 unknown_plot）。
+    bad_plan["plot_plans"] = {
+        "99,99": {"plot_id": "99,99", "active": True, "u": 1.0}
+    }
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi", content=json.dumps(bad_plan, ensure_ascii=False),
+    ))
+    out = ai_host.advise(session, "p1", client=fake, draft=True)
+    assert out["ok"] is True
+    assert out["suggested_plan"] is None, (
+        f"★ 非法计划绝不许到达前端：suggested_plan 应为 None，实得 {out['suggested_plan']!r}"
+    )
+    assert out.get("plan_issues"), (
+        "校验不过时要带上 issues 清单（前端要能告诉玩家\"哪不行\"）"
+    )
+    assert out["plan_source"] == "model", "模型起草的它仍然是 model，只是没过校验"
+    # issues 形状要能告诉人"为什么不行"（五要素）
+    codes = [i.get("code", "") for i in out["plan_issues"]]
+    assert codes and all(codes), f"issues 里要有 code（五要素之错误类型）：{codes}"
+    # 不能让坏 plan 被编造成"看起来合法" —— 绝不能这样偷渡
+
+
+def test_draft_garbage_is_clear_failure_not_fabricated():
+    """模型回**一堆废话**（根本不含 JSON）→ 明确失败，**不编**一份假计划。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content="我觉得你这季应该先攒钱，然后再看情况……（没有任何 JSON）",
+    ))
+    out = ai_host.advise(session, "p1", "起个草", client=fake, draft=True)
+    assert out["ok"] is True
+    assert out["suggested_plan"] is None, "没给到 JSON 时不许编一份 suggested_plan"
+    # 明确失败的一句话必须能看懂（不许闷声不响）
+    assert "起草" in out["summary"] or "放弃" in out["summary"], (
+        f"summary 要让人知道\"这次起草被放弃了\"：{out['summary']!r}"
+    )
+    assert not out.get("plan_issues"), "没给出计划时不该带 issues（这是\"没拿到\"，不是\"被拒\"）"
+
+
+def test_draft_default_false_unchanged_regression():
+    """★ 默认路径回归：`draft` 不传时，输出与旧行为一致（一个字段不许变）。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()  # 默认回固定文本
+    out = ai_host.advise(session, "p1", "我该先建什么？", client=fake)
+    assert out["ok"] is True
+    # 旧字段原样
+    assert out["summary"] == "【假客户端固定建议】先保粮食，再扩产。"
+    assert out["suggested_plan"] is None
+    # 新字段的默认值也要钉死（None / None / None 三元组）
+    assert out.get("plan_source") is None
+    assert out.get("plan_issues") is None
+    assert out["model"] == "fake-kimi"
+    # 传给模型的 user message 里**不该**出现"起草"指令
+    user = fake.calls[0][1]["content"]
+    assert "【起草一份计划" not in user and "draft" not in user.lower(), (
+        f"draft 不传时 messages 里不该出现起草指令：{user}"
+    )
+
+
+def test_draft_never_submits_session_unchanged():
+    """★ 绝不 submit：draft 跑完后 `plans` 仍空、`phase` 未变（铁律的落点）。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    plan = _valid_draft_json()
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi", content=json.dumps(plan, ensure_ascii=False),
+    ))
+    before_plans = copy.deepcopy(session.plans)
+    before_phase = session.phase
+    before_state = json.dumps(
+        session.state_for("p1"), ensure_ascii=False, sort_keys=True, default=str
+    )
+
+    out = ai_host.advise(session, "p1", client=fake, draft=True)
+    assert out["ok"] is True and out["suggested_plan"] is not None
+
+    # ★ 核心断言：AI 只产出数据，**绝不提交**
+    assert session.plans == before_plans, "★ plans 被动了（绝不 submit）"
+    assert session.phase == before_phase, "★ phase 被动了（绝不 commit）"
+    after_state = json.dumps(
+        session.state_for("p1"), ensure_ascii=False, sort_keys=True, default=str
+    )
+    assert after_state == before_state, "★ 只读被破坏：state_for 不一致"
+
+
+def test_route_advise_passes_draft_through():
+    """路由层：`draft: true` 必须**原样透传**给 ai_host（与 preview_plan 同规矩）。"""
+    app = _fresh_app()
+    app.registry.create("g1", "p1")
+
+    import server.app as app_mod
+    orig = app_mod.ai_host.advise
+    captured: dict = {}
+
+    def spy(session, player_id="p1", question=None, **kw):
+        captured.clear()
+        captured.update({"player_id": player_id, "question": question, **kw})
+        return {"ok": True, "summary": "假建议", "suggested_plan": None,
+                "plan_source": None, "plan_issues": None,
+                "evidence": [], "model": "fake", "error": ""}
+
+    app_mod.ai_host.advise = spy
+    try:
+        # ① 传 draft: true
+        code, body = dispatch(app, "POST", "/api/ai/advise", {},
+                              {"game": "g1", "player": "p1", "draft": True})
+        assert code == 200 and body["ok"] is True
+        assert captured.get("draft") is True, (
+            f"draft=true 不透传：收到 {captured.get('draft')!r}"
+        )
+        # ② 不传 draft → False（与旧行为一致）
+        captured.clear()
+        dispatch(app, "POST", "/api/ai/advise", {}, {"game": "g1", "player": "p1"})
+        assert captured.get("draft") is False, (
+            f"不传 draft 时应收到 False，实得 {captured.get('draft')!r}"
+        )
+    finally:
+        app_mod.ai_host.advise = orig
+
+
+# ══════════════════════════════════════════════════════════════════
 # runner（与 tests/test_ai_layer.py 同写法）
 # ══════════════════════════════════════════════════════════════════
 
