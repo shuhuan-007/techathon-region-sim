@@ -48,11 +48,13 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from engine import construction
+from engine.construction import MACHINE_GOODS
 from engine.loader import Config, ConfigError
 from engine.models import (
     BuildOrder,
     Plan,
     PlayerState,
+    Plot,
     PlotPlan,
     PlotStatus,
     PlotType,
@@ -590,6 +592,15 @@ def _check_builds(
             issues += product_issues
             continue
 
+        # ── ⑥b ★ 上下文约束：产物得落在**这一块**地块上 ──
+        # 机械二级四种是不同地块类型，不能互转；研究线只产 I；
+        # 服务/资源/研究地块不产出。真值表（⑥）不看 plot，
+        # 这些"我这块地"的约束由本步拦（★ 2026-10-18）。
+        context_issues = _check_build_product_context(plot, order, idx)
+        if context_issues:
+            issues += context_issues
+            continue
+
         # ── ⑦ ★ 工程表 dry-run：结算第 6 步真去找的就是这条工程 ──
         # 查不到 = 这条指令根本执行不了（例如"空地上新建研究地块"——工程表
         # 14 行里没有 research 这一类）。校验阶段就挡住，别拖到结算把整季废掉。
@@ -664,6 +675,12 @@ def _check_build_product(order: BuildOrder, idx: int) -> list[PlanIssue]:
 
         · 留空 → `build_product_required`（程序不替玩家挑默认值：选错要拆掉重建）
         · 不在真值表里 → `bad_build_product`（如农业写 "Z"、工业二级写 "G"）
+
+    ⚠️ **真值表只回答"这个类型/等级有哪些产出"。**「这块具体的工业二级地块
+       （比如当前产 H-A）能不能升 H-G+」是**上下文约束**——同级真值表里的五
+       个 H-*+/I 都是合法产出，但**机械二级的四种是不同地块、不能互转**；这
+       件事必须由 `_check_build_product_context` 拿当前 `plot.product` 来判，
+       本函数看不到 plot，不能合并过来。
     """
     ptype = order.plot_type
     allowed = _allowed_build_products(ptype, order.target_level)
@@ -703,6 +720,119 @@ def _check_build_product(order: BuildOrder, idx: int) -> list[PlanIssue]:
                 ),
             )
         ]
+
+    return []
+
+
+def _check_build_product_context(
+    plot: Optional[Plot], order: BuildOrder, idx: int
+) -> list[PlanIssue]:
+    """**上下文**约束 —— 产物能不能落在**这一块具体的**地块上。
+
+    与 `_check_build_product`（真值表）的分工：
+
+        真值表：这个类型+等级，**全体可选**的产物有哪些（不含"研究"按用户裁定，
+                农业种 A/B/C/D、工业二级机械四种 + I 等）；**不看当前地块**。
+        上下文：**这一块**地块目前是 H-A，那它只能升 H-A+（不能"转"成 H-G+）
+                —— H-G+ 是另一块二级地块的产物，不是"我这块的升级"。
+
+    ★ 2026-10-18 新增（用户对"工业二级是不同地块类型"的裁定）：
+
+        · 新建工业一级：product 必须是 **G**（真值表已钉，此处再核对）。
+        · 一级 G 升二级：product 必须是 **H-A/H-F/H-G/H-J**（机械线，四种二级
+          地块类型）或 **研究**（研究线）。真值表已钉。
+        · 二级机械 H-* 升三级：product **必须正好等于 当前 product + '+'**
+          （H-A 只能升 H-A+，不能拿 H-G+ 来升）。四种二级地块**不能互转**。
+        · 二级研究（product 为 None 或 "研究"）升三级：product 必须是 **I**。
+        · 服务/资源/研究等资源型地块：**不产出**，product 必须为空。
+        · 农业仍按真值表 A/B/C/D（真值表已钉，此处不重复）。
+
+    新增 issue code 统一用 `build_product_mismatch`，message 用中文说清
+    "二级 H-A 只能升 H-A+，不能转成 …"。
+    """
+    if plot is None:
+        # 空地新建：真值表已覆盖（农业 A/B/C/D、工业一级 G、
+        # 服务资源 None 不在真值表）。服务/资源的 product 非空在下方拦截。
+        if order.plot_type in (PlotType.SERVICE, PlotType.RESOURCE,
+                               PlotType.RESEARCH):
+            if order.product:
+                return [
+                    PlanIssue(
+                        code="build_product_mismatch",
+                        target=order.plot_id,
+                        message=(
+                            f"第 {idx + 1} 条建设指令：{order.plot_type.value} 地块"
+                            f"**不产出商品**，product 必须留空；"
+                            f"当前写的是 {order.product!r}。\n"
+                            f"    ⚠️ 服务/资源/研究三类**没有产物**（§5.1），"
+                            f"它们的 product 字段永远是 None。"
+                        ),
+                    )
+                ]
+        return []
+
+    # ── 工业升级上下文约束 ────────────────────────────────
+    if plot.plot_type is PlotType.INDUSTRY:
+        # 二级机械 H-* 升三级：必须**正好等于**当前 product + '+'。机器二级四种
+        # 是**不同地块类型**（用户裁定），不能拿别的二级类型的三档产出（如 H-G+）
+        # 来升我这块 H-A——那不叫升级，叫"换地块"。
+        if plot.level == 2 and order.target_level == 3 and \
+                plot.product in MACHINE_GOODS:
+            expected = plot.product + "+"
+            if order.product != expected:
+                return [
+                    PlanIssue(
+                        code="build_product_mismatch",
+                        target=order.plot_id,
+                        message=(
+                            f"第 {idx + 1} 条建设指令：二级 {plot.product} 地块"
+                            f"只能升 **{expected}**，不能转成 {order.product!r}。\n"
+                            f"    ⚠️ 机械二级四种（H-A/H-F/H-G/H-J）"
+                            f"是**不同的地块类型**（用户裁定 2026-10-18），"
+                            f"H-*+ 是各自**那一块**的升级，不是共享的三级。"
+                            f"想要 {order.product!r} 的产出：请**另建一块**对应的"
+                            f"二级地块（先在别处建 1 级 G、再升到你要的那条二级）。"
+                        ),
+                    )
+                ]
+            return []
+
+        # 二级研究（product 为 None 或 "研究"）升三级：必须 I。
+        if plot.level == 2 and order.target_level == 3 and \
+                (plot.product is None or plot.product == "研究"):
+            if order.product != "I":
+                return [
+                    PlanIssue(
+                        code="build_product_mismatch",
+                        target=order.plot_id,
+                        message=(
+                            f"第 {idx + 1} 条建设指令：研究线二级地块升三级必须是 **I**"
+                            f"（高技术路线），不能是 {order.product!r}。\n"
+                            f"    ⚠️ 研究线（ind_1_2_research → ind_2_3_high）"
+                            f"与机械线（H-* → H-*+）是**两条独立路线**，"
+                            f"研究线的三级**不产 H-*+,只能产 I**（§5.2 工程表）。"
+                        ),
+                    )
+                ]
+            return []
+
+    # ── 服务 / 资源 / 研究地块：不产出，product 必须空 ─────
+    if plot.plot_type in (PlotType.SERVICE, PlotType.RESOURCE,
+                          PlotType.RESEARCH):
+        if order.product:
+            return [
+                PlanIssue(
+                    code="build_product_mismatch",
+                    target=order.plot_id,
+                    message=(
+                        f"第 {idx + 1} 条建设指令：{plot.plot_type.value} 地块"
+                        f"**不产出商品**，product 必须留空；"
+                        f"当前写的是 {order.product!r}。\n"
+                        f"    ⚠️ 服务/资源/研究三类**没有产物**（§5.1），"
+                        f"它们的 product 字段永远是 None。"
+                    ),
+                )
+            ]
 
     return []
 
@@ -923,24 +1053,58 @@ def _check_cash(
 # ══════════════════════════════════════════════════════════════════
 
 
-def buildable_products(plot_type: PlotType, target_level: int) -> list[str]:
+def buildable_products(
+    plot_type: PlotType,
+    target_level: int,
+    route: Optional[str] = None,
+) -> list[str]:
     """某类型 / 某等级在建造时**可选**的产出或路线。
 
     给前端建造面板填下拉框用（**前端零计算**，所以选项在引擎给）。
-    没有多路线的类型返回空列表。
+    返回**空列表** = 这一行**没有下拉框**：
+    「新建工业（固定 G）／工业升三级（由当前二级地块类型决定，
+    不能跨线转）／研究线（固定"研究"→"I"）／资源与服务（无产物）」
+    都不需要选择；前端只该在 `products` **非空**时渲染下拉。
+
+    参数
+    ----
+    route : 仅工业用（`Work.route` 直接传进来）——
+            `machine` 时二级给 4 个机械二级类型；`research` # as todo: 研究线已被设计为固定产物, dropdowns hide it.
 
     ⚠️ 本函数是**前端下拉框契约**，不等于校验真值：
-       工业二级的「研究」线（`product="研究"` → `ind_1_2_research`，6 季）
-       规则上合法、`_check_build_product` 也放行它，但**这里不列**——
-       前端下拉框要不要放它，得先问 UI（`/api/build_options` 直接吃这个列表）。
-       校验以 `_BUILD_PRODUCTS` 为准，见那里的注释。
+       「研究」线（`product="研究"` → `ind_1_2_research`）规则上合法、
+       `_check_build_product` 也放行它，**这里不列**（研究线二级不
+       产出，没有"选哪一个"的问题）。校验以 `_BUILD_PRODUCTS` 为准。
     """
+    if route is None:
+        # ⚠️ 兼容旧调用（测试 / plan_context / 旧 API）：不传 route 时给
+        #    「该等级所有可能产物」，仍由前端决定怎么展示。新 API 一定传
+        #    route，才能按 work 区分子类型。
+        if plot_type is PlotType.AGRICULTURE:
+            return ["A", "B", "C", "D"]
+        if plot_type is PlotType.INDUSTRY:
+            if target_level == 1:
+                return ["G"]
+            if target_level == 2:
+                return ["H-A", "H-F", "H-G", "H-J"]
+            if target_level == 3:
+                return ["H-A+", "H-F+", "H-G+", "H-J+", "I"]
+        return []
+
     if plot_type is PlotType.AGRICULTURE:
         return ["A", "B", "C", "D"]
     if plot_type is PlotType.INDUSTRY:
         if target_level == 1:
-            return ["G"]
+            # 新建工业一级 → **固定 G**，没有下拉（★ 2026-10-18 改：
+            #  原来返回 ["G"]，让前端误以为有"选择"）。
+            return []
         if target_level == 2:
-            return ["H-A", "H-F", "H-G", "H-J"]
-        return ["H-A+", "H-F+", "H-G+", "H-J+", "I"]
+            if route == "machine":
+                # 二级机械：**四种二级地块类型，选定后不可互转**（§5.1 + 用户裁定）。
+                return ["H-A", "H-F", "H-G", "H-J"]
+            # `research` / `None` → 研究线是**固定路线**，不放下拉。
+            return []
+        # target_level == 3：三级由**当前**二级类型决定（H-A 只能升 H-A+，
+        # 研究线固定 I），不是玩家的选择项。
+        return []
     return []

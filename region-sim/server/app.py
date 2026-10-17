@@ -469,13 +469,38 @@ class App:
 
         ⚠️ 选项由引擎给（`validate.buildable_products`），
            前端不许自己拼 —— 否则规则一改前端就过期。
+
+        每行三个字段讲清「产物从哪来」：
+
+          · `fixed_product`        —— **固定产物**（无需选择）：
+              `ind_new`=G（新建工业一级固定产 G）、
+              `ind_1_2_research`=研究、
+              `ind_2_3_high`=I（研究线三级固定产 I）。
+              其余为 None。
+          · `product_from_current` —— **由当前地块决定**：
+              仅 `ind_2_3_machine`=True（机械二级 H-* 升三级 →
+              产物 = 当前二级 product + '+'，由 plot 决定，不是下拉选择）。
+              其余为 False。
+          · `products`             —— **下拉可选**（非空才渲染下拉框）：
+              `buildable_products(plot_type, to_level, route=w.route)`。
+              空列表 = 没有下拉；前端只该在非空时渲染。
         """
         from engine.construction import load_works
         from engine.validate import buildable_products
 
+        #: `fixed_product` 查真值表（work_id → product）。
+        #   「新建工业一级固定产 G」「研究线二级固定"研究"」「研究线三级固定"I"」
+        #   是**规则层**的口径（用户裁定 2026-10-18），不是前端拼出来的。
+        _FIXED_PRODUCT_BY_WORK = {
+            "ind_new": "G",
+            "ind_1_2_research": "研究",
+            "ind_2_3_high": "I",
+        }
+
         works = load_works(self.cfg)
         rows = []
         for work_id, w in sorted(works.items()):
+            fixed = _FIXED_PRODUCT_BY_WORK.get(work_id)
             rows.append({
                 "work_id": work_id,
                 "label": w.label,
@@ -486,8 +511,14 @@ class App:
                 "materials": dict(w.materials),
                 "quarters": w.quarters,
                 "route": w.route,
-                # 多路线类型需要玩家在下拉框里选产出（建后不可更换，§5.1）
-                "products": buildable_products(w.plot_type, w.to_level),
+                # 产物**怎么来**：固定 / 由当前地块 / 下拉选择（三者互斥）
+                "fixed_product": fixed,
+                "product_from_current": (work_id == "ind_2_3_machine"),
+                # 固定产物 / 由当前地块决定 → 没有下拉；只有真正有多个
+                # 子类型可选（农业、二级机械）才给 products。
+                "products": [] if (fixed is not None or work_id == "ind_2_3_machine")
+                            else buildable_products(w.plot_type, w.to_level,
+                                                    route=w.route),
             })
         return {"ok": True, "works": rows}
 

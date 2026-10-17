@@ -258,7 +258,29 @@ def advise(
         current_plan=current_plan,
     )
 
-    result = client.chat_completions(messages)
+    # ★ 明确撤销建造：**确定性意图解析**，不依赖模型。
+    #   玩家说“取消 9,9 的建造”时，模型仍可能回一份整单计划/什么都不删；
+    #   这里先用正则取出问题里的 plot_id，和 current_plan 的 builds 求交，
+    #   命中就直接生成 `remove_builds` 编辑，让编译器只删这几条、保留其余。
+    explicit_cancel_ids: list[str] = []
+    if draft:
+        explicit_cancel_ids = _explicit_cancel_ids(question, current_plan)
+
+    if explicit_cancel_ids:
+        import json as _json
+        content = _json.dumps(
+            {
+                "remove_builds": explicit_cancel_ids,
+                "why": "已按你的要求撤销 "
+                       + "、".join(explicit_cancel_ids)
+                       + " 的建造，其余安排保持不变。",
+            },
+            ensure_ascii=False,
+        )
+        mdl = "规则/意图解析"
+        result = {"ok": True, "model": mdl, "content": content}
+    else:
+        result = client.chat_completions(messages)
 
     if not result.get("ok") if isinstance(result, dict) else not result.ok:
         # 优雅降级：代理没起 / 超时 / 回了垃圾 —— **原样转达，不编建议**
@@ -335,20 +357,55 @@ def advise(
         #        旧路径只要模型写错一个字，整份草案就作废（真跑实测的故障）。
         # ★ 编辑模式（2026-10-18，《AI交互与建设撤销.md》§三）：
         #    `current_plan` 非空 → 先把模型的轻量编辑合并到玩家草稿上，
-        #    再编译。两个默认值必须关掉：
-        #      · default_run_all=False        —— 玩家没写开工的地块保持不开，
-        #        不许因为"模型漏提"就把整张表全开工（那是替玩家做经营决策）；
-        #      · default_baseline_food=False  —— 不替玩家补口粮；
+        #    再编译。默认值按草稿内容决定：
+        #      · 玩家已写 plot_plans → default_run_all=False，绝不改未列出的地块；
+        #      · 玩家只写了 builds（plot_plans 空）→ default_run_all=True，
+        #        否则“让 AI 取消一条建造”会把现有生产全停；
+        #      · 同理，plot_plans 空且 food 空才补基准口粮；写了就原样保留。
         #    `current_plan` 为空 → 旧路径，一个参数都不加（默认 True）。
         editing = plan_has_content(current_plan)
+        protected_ids: set[str] = set()
+        # 编辑模式的两个默认值：
+        #   · 玩家**已经写了** plot_plans → 绝不替他补/改未提到的地块；
+        #   · 玩家只写了 builds（plot_plans 空）→ 说明他还没排开工，默认全开
+        #     是安全的，否则“只让 AI 取消一条建造”会把所有现有地块停掉。
+        #   口粮同理：没写 food 才补基准档；写了就原样保留。
+        default_run_all = True
+        default_baseline_food = True
+        if editing and isinstance(current_plan, dict):
+            for b in (current_plan.get("builds") or []):
+                if isinstance(b, dict):
+                    pid = b.get("plot_id")
+                    if isinstance(pid, str) and pid.strip():
+                        protected_ids.add(pid.strip())
+            default_run_all = not bool(current_plan.get("plot_plans"))
+            # 只写了 builds（连 plot_plans 都没有）时，才补基准口粮；
+            # 玩家已经排了开工、只是没填 food → 尊重“这季不买口粮”。
+            default_baseline_food = (
+                not bool(current_plan.get("plot_plans"))
+                and not bool(current_plan.get("food"))
+            )
         if obj is not None:
             try:
                 if editing:
+                    # 玩家草稿里**没有** plot_plans（只排了建造 / 只让 AI 撤一条）时，
+                    # 不许模型顺手把“全部地块 u=0”写进来 —— 那会把现有生产全停。
+                    # 这种情形下开工安排交给 default_run_all，模型只改 builds。
+                    if (
+                        isinstance(obj, dict)
+                        and not (current_plan or {}).get("plot_plans")
+                    ):
+                        obj = {k: v for k, v in obj.items() if k != "plot_plans"}
                     request = merge_edits(obj, current_plan)
                     compiled = compile_draft(
                         request, session.state, player_id, session.cfg,
-                        default_run_all=False,
-                        default_baseline_food=False,
+                        default_run_all=default_run_all,
+                        default_baseline_food=default_baseline_food,
+                        # ★ 编辑模式**不搬玩家/模型已选的格**：玩家草稿里的
+                        #   9,8 不能因为“零邻接”被偷偷搬到 1,0，否则保护名单
+                        #   按 plot_id 对不上，缩量时还是会把它删掉（真跑抓到）。
+                        auto_place=False,
+                        protected_build_ids=protected_ids,
                     )
                 else:
                     compiled = compile_draft(
@@ -658,7 +715,10 @@ def _rule_answer_text(excerpts: list[dict]) -> str:
         key = str(ex.get("key") or "")
         title = str(ex.get("title") or "").strip()
         summary = str(ex.get("summary") or "").strip().replace("```", "")
-        head = f"§{key}" + (f" {title}" if title else "")
+        if title.startswith(key):
+            head = title
+        else:
+            head = f"§{key}" + (f" {title}" if title else "")
         parts.append(head + "\n" + summary)
     return "\n\n".join(parts)
 
@@ -676,6 +736,39 @@ def _ensure_rule_answer(
     if _mentions_rule_terms(content, excerpts):
         return content
     return _rule_answer_text(excerpts)
+
+
+_CANCEL_WORDS: tuple[str, ...] = ("取消", "撤销", "删", "移除", "不要", "停掉")
+
+
+def _explicit_cancel_ids(
+    question: Optional[str],
+    current_plan: Optional[dict],
+) -> list[str]:
+    """从“取消 9,9 的建造”这类问题里取 plot_id，且只保留草稿里真有的。"""
+    import re
+
+    if not question or not isinstance(current_plan, dict):
+        return []
+    if not any(w in question for w in _CANCEL_WORDS):
+        return []
+    current = [
+        str(b.get("plot_id", "")).replace(" ", "")
+        for b in (current_plan.get("builds") or [])
+        if isinstance(b, dict)
+    ]
+    # “取消 9,9，保留 9,8”里两个 ID 都在，但只有 9,9 是要删的。
+    # 先切掉“保留/留着/其余/但”之后的部分，避免把保留项也删掉。
+    head = re.split(r"保留|留着|其余|但是|但", question)[0]
+    found = [
+        m.group(1).replace(" ", "")
+        for m in re.finditer(r"(?<!\d)(\d{1,2}\s*,\s*\d{1,2})(?!\d)", head)
+    ]
+    out: list[str] = []
+    for pid in found:
+        if pid in current and pid not in out:
+            out.append(pid)
+    return out
 
 
 def _compact_current_plan(plan: Optional[dict]) -> str:
@@ -1104,7 +1197,12 @@ def _draft_advice(
     if why:
         # ★ 2026-10-18：模型给了 `why` 就**用它当摘要** —— 玩家只要一句
         #   「做了什么 + 为什么」(AI交互与建设撤销.md §五.4)，不贴 JSON。
+        #   ⚠️ 但引擎可能已按预算/校验改了这份计划（例如把新建造撤掉、
+        #   把 u 降下来）。摘要必须点明“这是模型原意 + 引擎已校正”，
+        #   否则会出现“说建了、表单里却没有”的自相矛盾（真跑抓到）。
         summary = why
+        if notes:
+            summary += f"（引擎已按预算/校验校正 {len(notes)} 处，见 plan_notes）"
     else:
         summary = (
             "模型起草了一份计划" +

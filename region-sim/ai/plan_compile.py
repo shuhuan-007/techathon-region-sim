@@ -866,6 +866,7 @@ def _shrink_until_ok(
     player_id: str,
     cfg: Config,
     notes: list[str],
+    protected_build_ids: Optional[set[str]] = None,
 ) -> tuple[Optional[Plan], Optional[dict], str]:
     """资金不足时的确定性缩量。
 
@@ -910,21 +911,38 @@ def _shrink_until_ok(
     #   真跑实测：save 1 现金 416，模型在已有 5 块运行地块上又建 1 块农业；
     #   旧顺序把 u 降到 0 才跑通 —— 计划合法，但“5 块地全停、只留一个工地”，
     #   等于为了新投资把现有产出全牺牲掉。用户要的是经营，不是停工。
-    #   所以：只要计划里还有 u>0 的已建成地块，就先逐条撤新建造（口粮保持
-    #   原申报量），能不降 u 跑通就立刻返回。
+    #   所以：只要计划里还有 u>0 的已建成地块，就先**撤掉新建造**，再在不带
+    #   建造的底子上找“最高可承受的开工率/口粮”；找到就返回。
     if plan.builds and any(pp.u > 0.0 for pp in plan.plot_plans.values()):
-        candidate = copy.deepcopy(plan)
-        removed: list[str] = []
-        while candidate.builds:
-            removed.append(candidate.builds.pop().plot_id)
-            got, preview, _err = _try(candidate)
-            if got is not None:
-                _append_note(
-                    notes,
-                    f"现金不足：为保住现有生产（开工率不降），移除了 "
-                    f"{len(removed)} 条建造（{_join_ids(removed)}）后，试算才跑得通。",
-                )
-                return got, preview, ""
+        protected = set(protected_build_ids or ())
+        removable = [b for b in plan.builds if b.plot_id not in protected]
+        if removable:
+            no_build = copy.deepcopy(plan)
+            no_build.builds = [b for b in no_build.builds if b.plot_id in protected]
+            removed = [b.plot_id for b in removable]
+            for u_factor in _U_LADDER:
+                for food_factor in _FOOD_LADDER:
+                    candidate = copy.deepcopy(no_build)
+                    _apply(candidate, u_factor, food_factor)
+                    got, preview, _err = _try(candidate)
+                    if got is not None:
+                        bits = [
+                            f"为保住现有生产，移除了 {len(removed)} 条新建造"
+                            f"（{_join_ids(removed)}）"
+                        ]
+                        if u_factor < 1.0:
+                            bits.append(
+                                f"开工率降到 {int(round(u_factor * 100))}%"
+                            )
+                        if food_factor < 1.0:
+                            bits.append(
+                                f"口粮降到原申报的 {int(round(food_factor * 100))}%"
+                            )
+                        _append_note(
+                            notes,
+                            "现金不足：" + "、".join(bits) + " 后，试算才跑得通。",
+                        )
+                        return got, preview, ""
 
     # ── 一、二档：u × 口粮 的确定性网格 ──
     # u 从 1 往下、口粮从 1 往下；第一个跑通的组合 = 保留最多生产/口粮的方案。
@@ -955,9 +973,15 @@ def _shrink_until_ok(
     # ── 三档：逐条移除建造（此时 u=0、口粮=0，只保建造的现金也不够）──
     candidate = copy.deepcopy(plan)
     _apply(candidate, 0.0, 0.0)
+    protected = set(protected_build_ids or ())
     removed: list[str] = []
-    while candidate.builds:
-        removed.append(candidate.builds.pop().plot_id)
+    while True:
+        removable = [b for b in candidate.builds if b.plot_id not in protected]
+        if not removable:
+            break
+        b = removable[-1]
+        candidate.builds.remove(b)
+        removed.append(b.plot_id)
         got, preview, _err = _try(candidate)
         if got is not None:
             _append_note(
@@ -970,7 +994,7 @@ def _shrink_until_ok(
     # ── 四档：移除采购（生产原料由引擎按配方自动买，额外采购最不必要）──
     candidate = copy.deepcopy(plan)
     _apply(candidate, 0.0, 0.0)
-    candidate.builds = []
+    candidate.builds = [b for b in candidate.builds if b.plot_id in protected]
     if candidate.purchases:
         n = len(candidate.purchases)
         candidate.purchases = {}
@@ -1001,6 +1025,7 @@ def compile_draft(
     default_baseline_food: bool = True,
     max_validate_rounds: int = 3,
     auto_place: bool = True,
+    protected_build_ids: Optional[set[str]] = None,
 ) -> DraftCompileResult:
     """把模型回的 Plan 形状 JSON 编译成一份**真能跑**的 Plan。
 
@@ -1152,7 +1177,8 @@ def compile_draft(
         "资金" in settle_error or "不足" in settle_error
     )):
         shrunk, preview2, err2 = _shrink_until_ok(
-            plan, state, player_id, cfg, notes
+            plan, state, player_id, cfg, notes,
+            protected_build_ids=protected_build_ids,
         )
         if shrunk is not None:
             plan, preview, settle_error = shrunk, preview2, ""

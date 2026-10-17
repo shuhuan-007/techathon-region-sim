@@ -122,3 +122,15 @@
 - 表单有 2 条建造，对 AI 说“取消 0,0 那条” → 只删 0,0，另一条保留，预览刷新。
 - UI 撤销按钮：点一下删一条，地图/预览同步。
 - 后端测试覆盖：current_plan 合并、remove_builds、未列出的 plot_plans 不被默认改写、机制问答走 answer 分支。
+
+
+---
+
+## 七、落地状态（2026-10-18）
+
+- **前端**：`renderBuilds()` 逐条撤销（`splice`→`renderAll`→`schedulePreview`）；AI 请求带 `current_plan`＋`mode`；有本地草稿先 `window.confirm`，取消不落表；`plan_action/why` 直显。
+- **后端**：`ai/plan_edit.py`（`merge_edits`/`extract_why`/`plan_action_of`）；`ai_host.advise(current_plan, mode)`；`remove_builds` 只删指定项；`protected_build_ids` 保证玩家草稿里的建造不被缩量删掉；编辑模式 `auto_place=False`，不偷偷搬玩家选的格。
+- **明确撤销**：问题里“取消 9,9”这类带 plot_id 的指令走确定性意图解析，不依赖模型；命中才生成 `remove_builds`，其余保留。
+- **机制问答**：`mode=answer` 时按关键词取规则原文；纯公式题（粮食/邻接/价格等）直接回规则原文，不再让模型用“当前人口=0”代替规则。
+- **验证**：`test_plan_edit` 17/0、`test_ai_host` 39/0、`test_plan_compile` 22/0，全量 23 个测试文件 rc=0；8312 真机结算到第 9 季月报、「下一季」可点。
+- **已知边界**：预算不足时优先保现有生产/保玩家已有建造，可能把 AI 新建造撤掉并在 `plan_notes` 说明；编辑模式不自动搬格。

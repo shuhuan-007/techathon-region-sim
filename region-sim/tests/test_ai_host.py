@@ -924,8 +924,8 @@ def _mid_current_plan(builds=None, plot_plans=None) -> dict:
 
 
 def test_current_plan_remove_builds_keeps_other_build():
-    """模型回 `remove_builds: ["0,0"]` → 只删 0,0，另一条保留；
-    `plan_action == "removed"`、summary 用模型的 `why`、`why` 原样透出。"""
+    """明确“取消 0,0” → 确定性意图解析只删 0,0，另一条保留；
+    `plan_action == "removed"`、摘要/why 说明撤销了哪条。"""
     session = _mid_session()
     current = _mid_current_plan(builds=[_build("0,0"), _build("0,1")])
     why = "撤销 0,0 那条，其余安排不动。"
@@ -951,8 +951,10 @@ def test_current_plan_remove_builds_keeps_other_build():
     assert out["plan_action"] == "removed", (
         f"plan_action 应为 removed，实得 {out['plan_action']!r}"
     )
-    assert "撤销" in out["summary"], f"summary 应优先用模型 why：{out['summary']!r}"
-    assert out["why"] == why, f"why 要原样透给前端：{out.get('why')!r}"
+    assert "撤销" in out["summary"], f"summary 应说明撤销：{out['summary']!r}"
+    assert "撤销" in out["why"] and "0,0" in out["why"], (
+        f"why 要说明撤销了哪条：{out.get('why')!r}"
+    )
     # ★ 只读：跑完仍是"什么都没发生"
     assert session.plans == {}, "advise 不许提交（plans 必须还是空的）"
 

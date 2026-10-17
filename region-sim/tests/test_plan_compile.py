@@ -234,6 +234,27 @@ def test_tight_cash_prefers_production_over_new_build():
     assert any("保住现有生产" in n for n in result.notes), result.notes
 
 
+def test_protected_build_is_not_removed_by_shrink():
+    """编辑模式：玩家草稿里已有的建造不能为了省现金被编译器悄悄删掉。"""
+    cfg = load_config()
+    state = _mid_state(cfg)
+    raw = _raw(builds=[{
+        "plot_id": "0,0", "plot_type": "agriculture",
+        "target_level": 1, "product": "A",
+    }])
+    result = compile_draft(
+        raw, state, "p1", cfg, protected_build_ids={"4,4"},
+    )
+    _assert_compiled_ok(result, state, cfg)
+
+    assert [b.plot_id for b in result.plan.builds] == ["4,4"], (
+        f"受保护的建造不能被缩量删掉，实得 {result.plan.builds}"
+    )
+    assert all(pp.u > 0 for pp in result.plan.plot_plans.values()), (
+        "保建造也不该把现有生产降到 0"
+    )
+
+
 # ══════════════════════════════════════════════════════════════════
 # 四、字段规整：产物错 / 坐标越界 / 未知 plot_plan
 # ══════════════════════════════════════════════════════════════════

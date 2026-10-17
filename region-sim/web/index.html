@@ -136,7 +136,7 @@
           <div id="report-narr-body" class="muted">本季财报解读还没生成。</div>
         </div>
 
-        <div class="panel">
+        <div class="panel" id="report-panel">
           <h2>📄 上季报告</h2>
           <div id="report-body" class="muted">还没有结算过（第 1 季结算后出现）。</div>
         </div>
@@ -162,6 +162,31 @@
 </div>
 
 <div id="toast"></div>
+
+<!-- ★ 2026-10-18 · 每季度进入行动阶段自动弹一次月报摘要（不阻塞、同季只弹一次）。
+     由 panel.js 的 maybeShowQuarterReport() 在 refresh 成功 renderAll 后触发；
+     localStorage key = seen_report_<GAME>_<STATE.quarter>。
+     不用 alert/confirm；按钮两枚：「看完整月报」滚动到 #report-panel，「知道了」仅隐藏。 -->
+<div id="report-modal" class="hidden"
+     style="position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.45);
+            display:flex;align-items:center;justify-content:center;padding:16px;">
+  <div role="dialog" aria-modal="true" aria-labelledby="rm-title"
+       style="background:var(--panel,#12151b);color:inherit;max-width:560px;width:100%;
+              border-radius:10px;padding:16px 20px;box-shadow:0 10px 30px rgba(0,0,0,.5);">
+    <h2 id="rm-title" style="margin:0 0 10px;font-size:18px;">第 N 季月报</h2>
+    <div style="font-size:13px;line-height:1.7">
+      <div>💰 期末现金：<b id="rm-cash">—</b></div>
+      <div>🧾 销售收入：<b id="rm-sales">—</b>　🧮 总扣款：<b id="rm-ded">—</b></div>
+      <div>📈 增加值：<b id="rm-vadd">—</b>　😊 幸福度：<b id="rm-happy">—</b></div>
+      <div id="rm-events" style="margin-top:6px;"></div>
+      <div id="rm-warn" style="margin-top:8px;color:var(--warn,#e3b341);display:none;"></div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end">
+      <button id="rm-btn-more" class="primary">看完整月报</button>
+      <button id="rm-btn-ok">知道了</button>
+    </div>
+  </div>
+</div>
 
 <!-- 慢请求加载态：默认隐藏；fetch 耗时 > SL_DELAY_MS 才显形（见 JS）。
      ★ ⑥号改造：结算时**先把回包里的结算细节逐条涌现在这里**，

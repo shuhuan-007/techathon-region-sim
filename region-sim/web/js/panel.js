@@ -54,11 +54,19 @@ async function refresh(){
       api("GET", "/api/map",    null, {game:GAME, player:PLAYER}),
     ]);
     STATE = st.state; MAP = mp.map;
+    /* ★ 2026-10-18：兼容旧存档/旧回包 —— 如果读出来仍是「月报阶段」，
+       自动切回行动阶段。玩家不需要再点「下一季」。 */
+    if (STATE && STATE.phase === "report"){
+      await enterNextQuarter();
+    }
     if (!WORKS.length){
       const w = await api("GET", "/api/build_options");
       WORKS = w.works;
     }
     renderAll();
+    /* ★ 2026-10-18 · 每季度进入行动阶段（collecting）后弹一次上季月报摘要。
+       不阻塞 refresh 主流程；同季只弹一次（localStorage）。失败静默。 */
+    try{ maybeShowQuarterReport(); }catch(_e){ /* modal 失败不影响主界面 */ }
     loadNarratives();                 // 不 await：数字先显示，叙事慢慢来
   }catch(e){
     fail(e);
@@ -97,10 +105,11 @@ function renderTop(){
   const phaseName = {collecting:"行动阶段", resolving:"结算中", report:"月报阶段"}[s.phase] || s.phase;
   $("s-phase").textContent = phaseName;
 
-  const report = s.phase === "report";
-  $("btn-settle").disabled = report || !settleEnabled(s);
-  $("btn-settle").classList.toggle("hidden", report);
-  $("btn-next").classList.toggle("hidden", !report);
+  /* ★ 2026-10-18：月报阶段并入行动阶段 —— 结算完自动进入下一季，
+     玩家永远只需要「推进本季度」这一颗按钮，不再有「下一季」中转页。 */
+  $("btn-settle").disabled = !settleEnabled(s);
+  $("btn-settle").classList.remove("hidden");
+  $("btn-next").classList.add("hidden");
   $("btn-settle").title = (s.settle_blockers || []).join("\n");
 
   /* 现金行的"本季计划扣"那一句由 renderPreviewLine 专管（不在这里动）。 */
@@ -169,13 +178,17 @@ function renderBuilds(){
   }
   el.innerHTML = `<table><thead><tr>
       <th>地块</th><th>类型</th><th class="num">目标等级</th>
-      <th>产物 / 路线</th><th></th>
+      <th>产物 / 路线（子类型）</th><th></th>
     </tr></thead><tbody>` +
     builds.map((b, i) => {
       const pid  = (b && b.plot_id != null) ? String(b.plot_id) : "—";
       const type = (b && b.plot_type) ? (TYPE_CN[b.plot_type] || String(b.plot_type)) : "—";
       const lvl  = (b && b.target_level != null) ? String(b.target_level) : "—";
-      const prod = (b && b.product) ? String(b.product) : "—";
+      /* ★ 2026-10-18：产物/路线不再原样堆字符；按子类型名显示。
+           H-A=机械—农业 / H-F=机械—资源 / H-G=机械—工业 / H-J=机械—服务；
+           H-*+=自动化—对应；I=高技术；其余（A/B/C/D/G/研究/无）走原样/占位。 */
+      const raw  = (b && b.product) ? String(b.product) : null;
+      const prod = raw ? `${productLabel(raw)}（${raw}）` : "—";
       return `<tr>
         <td>${esc(pid)}</td>
         <td>${esc(type)}</td>
@@ -452,14 +465,51 @@ function oneNarr(id, narr, emptyText, factsNull){
 /* ══════════════════════════════════════════════════════════
    三、建造
    ══════════════════════════════════════════════════════════ */
+/* ★ 2026-10-18 · 产物 → 中文【二级地块类型】子类型名（**显示层**，不参与计算）。
+   键是引擎的 product 原值（含 '+'），值是给人看的子类型名；渲染时原值仍作 value。
+     H-A=机械—农业  H-F=机械—资源  H-G=机械—工业  H-J=机械—服务
+     H-*+=自动化—对应（机械路线升三级）
+     I=高技术（研究线三级）
+   农业 A/B/C/D、基础 G、研究、资源/服务 走原样显示。 */
+const PRODUCT_SUBTYPE_CN = {
+  "H-A" : "机械—农业",
+  "H-F" : "机械—资源",
+  "H-G" : "机械—工业",
+  "H-J" : "机械—服务",
+  "H-A+": "自动化—农业",
+  "H-F+": "自动化—资源",
+  "H-G+": "自动化—工业",
+  "H-J+": "自动化—服务",
+  "I"   : "高技术",
+};
+function productLabel(p){
+  if (p == null || p === "") return "";
+  return PRODUCT_SUBTYPE_CN[p] || String(p);
+}
+
+/* 动态决定产物行的文案（二级地块类型 / 产出）。
+   opts 有候选 → 工业二级显示"二级地块类型"，农业 1 级显示"产出"。 */
+function productRowLabel(w){
+  if (!w || !Array.isArray(w.products) || !w.products.length) return "";
+  /* 工业二级机械路线：products 全是 H-* → 玩家挑的是"二级地块类型"。
+     其余有候选的（农业 A/B/C/D 之类）仍叫"产出"。 */
+  const allMachine = w.products.every(p => PRODUCT_SUBTYPE_CN[p] && String(p).startsWith("H-"));
+  return allMachine ? "二级地块类型" : "产出";
+}
+/* ★ 2026-10-18：建造/升级面板按【二级地块类型】展示。
+   本轮 UI 直接隐藏研究线（research）—— ind_1_2_research / ind_2_3_high
+   不给玩家选，避免研究线陷阱（数值/解锁节奏另排）。 */
 function worksForCell(){
   const p = (STATE.plots || []).find(x => x.plot_id === selected);
   if (!p){
     // 空地 → 只能"新建一级"
-    return WORKS.filter(w => w.from_level === 0);
+    return WORKS.filter(w => w.from_level === 0 && w.route !== "research");
   }
   if (p.status === "constructing") return [];
-  return WORKS.filter(w => w.plot_type === p.plot_type && w.from_level === p.level);
+  return WORKS.filter(w =>
+    w.plot_type === p.plot_type &&
+    w.from_level === p.level &&
+    w.route !== "research");
 }
 
 function renderBuildPanel(){
@@ -474,6 +524,7 @@ function renderBuildPanel(){
     $("btn-build").disabled = true;
     $("work-info").textContent = "点地图上任意一格开始。";
     $("row-product").classList.add("hidden");
+    $("sel-product").innerHTML = "";   // 强制清空，防上一格残留
     return;
   }
   if (!list.length){
@@ -484,6 +535,7 @@ function renderBuildPanel(){
     $("btn-build").disabled = true;
     $("work-info").textContent = why;
     $("row-product").classList.add("hidden");
+    $("sel-product").innerHTML = "";   // 强制清空，防上一格残留
     return;
   }
 
@@ -498,20 +550,50 @@ function renderBuildPanel(){
 function renderWorkDetail(){
   const wid = $("sel-work").value;
   const w = WORKS.find(x => x.work_id === wid);
-  if (!w){ $("btn-build").disabled = true; $("quote-info").textContent = ""; return; }
-
-  const opts = w.products || [];
-  if (opts.length){
-    $("row-product").classList.remove("hidden");
-    $("sel-product").innerHTML = opts.map(p => `<option value="${p}">${p}</option>`).join("");
-  } else {
+  if (!w){
+    $("btn-build").disabled = true;
+    $("quote-info").textContent = "";
     $("row-product").classList.add("hidden");
     $("sel-product").innerHTML = "";
+    return;
   }
+
+  /* ★ 2026-10-18 · 产物/类型行按契约三态:
+       ① 有 products 候选 → 显示下拉，标签按 二级地块类型/产出 动态换；
+       ② products 空 + fixed_product（如工业 1 级新建 G）→ 不显示下拉；
+       ③ products 空 + product_from_current=true（机械 2→3）→ 不显示下拉，
+          只显示"将升级为 H-A+（由当前 H-A 决定）"；
+       ④ products 空 + fixed=null + from_current 假 → 强制隐藏并清空 sel-product，
+          防止沿用上一块农业的 A/B/C/D 选项（服务/资源升级就是这条路径）。 */
+  const opts = Array.isArray(w.products) ? w.products : [];
+  const fromCur = w.product_from_current === true;
+  const selEl = $("sel-product");
+  if (opts.length){
+    $("row-product").classList.remove("hidden");
+    const lbl = productRowLabel(w);
+    const l = document.querySelector("#row-product label");
+    if (l) l.textContent = lbl || "产出 / 路线";
+    selEl.innerHTML = opts.map(p =>
+      `<option value="${esc(String(p))}">${esc(productLabel(p))}（${esc(String(p))}）</option>`
+    ).join("");
+  } else {
+    $("row-product").classList.add("hidden");
+    /* 强制清空：不再让隐藏的下拉残留上一格（农业）选过的值。 */
+    selEl.innerHTML = "";
+  }
+
   // ★ 缺陷 3：用 <b> 强调"原价"，不再把 Markdown 的 ** 留在界面上
-  $("work-info").innerHTML =
-    `${w.label}　现金 ${w.cash}（<b>原价</b>）　物资 ${
+  let info = `${w.label}　现金 ${w.cash}（<b>原价</b>）　物资 ${
       Object.entries(w.materials).map(([g,q])=>`${g}×${q}`).join(" + ")}　工期 ${w.quarters} 季`;
+  if (fromCur){
+    /* 机械 2→3：当前 product 决定目标（H-A → H-A+），不显示下拉，只写推断。 */
+    const cur = (STATE.plots || []).find(x => x.plot_id === selected);
+    const curProd = cur && cur.product;
+    const next = curProd ? curProd + "+" : null;
+    info += `<br><span class="muted">将升级为 <b>${esc(next || "（当前地块无产物）")}</b>${
+      curProd ? `（由当前 ${esc(String(curProd))} 决定）` : ""}</span>`;
+  }
+  $("work-info").innerHTML = info;
   $("btn-build").disabled = false;
   renderQuote();
 }
@@ -543,7 +625,33 @@ $("btn-build").onclick = async () => {
   const wid = $("sel-work").value;
   const w = WORKS.find(x => x.work_id === wid);
   if (!w || !selected) return;
-  const product = (w.products && w.products.length) ? $("sel-product").value : null;
+
+  /* ★ 2026-10-18 · product 取值（契约）：
+       ① 有 products 候选 → 用下拉原值（H-A/H-F/…/A/B/C/D）；
+       ② 否则 fixed_product → 用它（如工业 1 级新建 G、研究 1→2）；
+       ③ 否则 product_from_current=true（机械 2→3）→ 当前地块 product + "+"
+          （H-A → H-A+；当前为 null 时退化为 null，由后端兜校验）；
+       ④ 否则 → null（资源/服务本来就不该带产物），
+          且 sel-product 已被 renderWorkDetail 清空，
+          不会沿用上一块农业残留的 A/B/C/D。 */
+  const opts = Array.isArray(w.products) ? w.products : [];
+  let product = null;
+  if (opts.length){
+    product = $("sel-product").value || null;
+  } else if (w.fixed_product != null && w.fixed_product !== ""){
+    product = String(w.fixed_product);
+  } else if (w.product_from_current === true){
+    const cur = (STATE.plots || []).find(x => x.plot_id === selected);
+    const curProd = cur && cur.product;
+    product = curProd ? String(curProd) + "+" : null;
+  }
+  /* 兜底：研究线在本 UI 被 worksForCell 过滤，理论上到不了这里；
+     但万一（WORKS 缓存+selected/__proto__ 等边缘）也绝不给玩家选 research。 */
+  if (w.route === "research"){
+    toast("本轮 UI 未开放研究线（research）。", "warn");
+    return;
+  }
+
   plan.builds.push({
     plot_id: selected,
     plot_type: w.plot_type,
@@ -554,7 +662,7 @@ $("btn-build").onclick = async () => {
      「▶ 推进本季度」发生一次。连续点第二块、第三块不会再被
      「本季已提交，不能修改」挡住。
      扣款数走 /api/simulate（只读试算）实时上顶栏。 */
-  toast(`已加入建设指令：${selected} ${w.label}${product ? "（" + product + "）" : ""}\n` +
+  toast(`已加入建设指令：${selected} ${w.label}${product ? "（" + productLabel(product) + " ＝" + product + "）" : ""}\n` +
         `（本地草稿，点「▶ 推进本季度」才提交。可继续点其它格子。）`, "ok");
   $("btn-build").disabled = true;
   selected = null;
@@ -696,6 +804,20 @@ function publicPlan(){
   };
 }
 
+/* ★ 2026-10-18：不再让玩家点「下一季」。
+   结算后后端处于 report 阶段（月报已出、计划不可编辑），这里自动
+   调一次 /api/next_quarter 把它切回 collecting，再刷新数字。
+   这样每个季度只保留一个动作：「推进本季度」。 */
+async function enterNextQuarter(){
+  try{
+    const r = await api("POST", "/api/next_quarter", {game:GAME, player:PLAYER});
+    if (r && r.state) STATE = r.state;
+    return true;
+  }catch(_e){
+    return false;
+  }
+}
+
 $("btn-settle").onclick = async () => {
   /* ★ 2026-10-18 修「点结算后遮罩永不消失、进不了下一季」（实测 107 秒仍卡）：
      根因是下面那行把 `showStateLoadingNow` 写成了 `setStateLoadingNow`（不存在）
@@ -720,6 +842,10 @@ $("btn-settle").onclick = async () => {
 
     eq = await api("POST", "/api/end_quarter", {game:GAME, player:PLAYER});
 
+    /* ★ 2026-10-18：月报阶段并入行动阶段 —— end_quarter 回包是 report 阶段，
+       立刻自动切回 collecting。玩家不再需要点「下一季」。 */
+    const enteredNext = await enterNextQuarter();
+
     /* end_quarter 一回包，立刻把 report 里的关键项**每 ~140ms 一条**逐条涌上。
        "**全部数字来自引擎**（`QuarterReport.to_dict`），前端只负责挑与摆"。
        ② 流水最多等 8 秒：抽行/推行任何一环出问题都不许卡住结算。 */
@@ -734,9 +860,10 @@ $("btn-settle").onclick = async () => {
       ]);
     }catch(_e){ /* 流水异常不影响结算 */ }
 
-    /* ③ 兜底渲染：`eq.state` 是 end_quarter **当场**给的（phase=report、含上季报告）。
-       先把它画出来 —— 就算后面所有请求都死掉，「下一季 ▶」也已经可点。 */
-    if (eq && eq.state) STATE = eq.state;
+    /* ③ 兜底渲染：如果自动进入下一季失败，`eq.state` 还能把界面切到
+       月报阶段（至少不是旧季度）；正常情况下 `enteredNext` 已经拿到
+       collecting 状态，不能再被旧的 report 状态覆盖。 */
+    if (!enteredNext && eq && eq.state) STATE = eq.state;
     resetPlan();                    // 计划已随结算消耗掉
     if (!WORKS.length){             // 极少数情况（没走过 refresh）补一次建造选项
       try{ const w = await api("GET", "/api/build_options"); WORKS = w.works; }catch(_e){}
@@ -765,9 +892,12 @@ $("btn-settle").onclick = async () => {
       STATE = st.state;
       if (mp && mp.map) MAP = mp.map;
       try{ renderAll(); }catch(_e){ /* 渲染异常不阻塞收尾 */ }
+      /* ★ 2026-10-18：结算后也弹一次上季月报（原先只在 refresh 里弹，
+         结算路径漏了）。不阻塞；同季只弹一次。 */
+      try{ maybeShowQuarterReport(); }catch(_e){ /* modal 失败不影响结算 */ }
       loadNarratives();             // 不 await：数字已显示，叙事后台来
     }else{
-      toast("已结算；界面刷新失败，可点下一季", "warn");
+      toast("已结算；界面刷新失败，请刷新页面或点「推进本季度」", "warn");
     }
     await refreshGames();
 
@@ -783,7 +913,7 @@ $("btn-settle").onclick = async () => {
     if (eq && eq.state){
       try{
         STATE = eq.state; resetPlan(); renderAll();
-        toast("已结算；界面刷新失败，可点下一季", "warn");
+        toast("已结算；界面刷新失败，请刷新页面或点「推进本季度」", "warn");
       }catch(_e2){ /* 兜底本身失败也不能连累 finally */ }
     }
   }finally{
@@ -1070,4 +1200,108 @@ function aiGreet(){
     "你好，我是你的 AI 秘书。问问题、要建议、让我起草本季计划都行。\n" +
     "我起草的计划会**直接填到界面**上，你可以再改；" +
     "**提交永远由你点「▶ 推进本季度」**（§11.4，我无 commit）。");
+}
+
+/* ══════════════════════════════════════════════════════════
+   六、季度月报摘要 modal（2026-10-18 · 同一季度只弹一次）
+   ══════════════════════════════════════════════════════════
+   条件三件事：
+     ① STATE.report 存在（结算过）；
+     ② STATE.phase === "collecting"（行动阶段，不是结算/报告页）；
+     ③ STATE.report.quarter === STATE.quarter - 1（刚跨季，
+        上一季报告是"新的"）；
+   锁：localStorage `seen_report_<GAME>_<STATE.quarter>`，同季只弹一次。
+   入口只在 refresh() 成功 renderAll 后调用一次（try/catch 静默，
+   不能反过来拖住主界面）。按钮两枚：知道了＝隐藏；看完整月报＝隐藏并滚动。 */
+function _reportModalSeenKey(gid, q){
+  return `seen_report_${gid || ""}_${q == null ? "" : q}`;
+}
+
+function maybeShowQuarterReport(){
+  const s = STATE;
+  if (!s) return;
+  const r = s.report;
+  if (!r) return;                                        // ①
+  if (s.phase !== "collecting") return;                  // ②
+  if (r.quarter !== (s.quarter - 1)) return;             // ③
+
+  const modal = $("report-modal");
+  if (!modal) return;
+
+  let key = _reportModalSeenKey(GAME, s.quarter);
+  try{
+    if (window.localStorage && localStorage.getItem(key)) return;
+  }catch(_e){ /* localStorage 不可用时退化为"每次刷新都弹一次"决策仍安全 */ }
+
+  /* 填字段（全部来自 STATE.report，原样显示，前端零计算） */
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  set("rm-title", `第 ${r.quarter} 季月报`);
+  set("rm-cash",  fmt(r.cash_after));
+  set("rm-sales", fmt(r.sales_revenue));
+  set("rm-ded",   fmt(r.total_deduction));
+  set("rm-vadd",  fmt(r.value_added));
+  set("rm-happy", r.food ? fmt(r.food.happiness) : "—");
+
+  /* 工程开工 / 完工（来自 r.construction_events；空就显示「本季无工程变动」） */
+  const events = Array.isArray(r.construction_events) ? r.construction_events : [];
+  const evEl = $("rm-events");
+  if (evEl){
+    const parts = events.filter(e => e && e.plot_id).map(e => {
+      const t = TYPE_CN[e.plot_type] || e.plot_type || "?";
+      const route = e.product ? "·" + productLabel(String(e.product)) : "";
+      const lv = `${t}${e.from_level != null ? e.from_level : "?"}→${e.to_level != null ? e.to_level : "?"}${route}`;
+      return e.event === "completed" ? `✓ 工程完工：${e.plot_id}（${lv}）`
+           : e.event === "started"   ? `✓ 工程开工：${e.plot_id}（${lv}）`
+           : null;
+    }).filter(Boolean);
+    evEl.innerHTML = parts.length
+      ? parts.map(t => `<div>${esc(t)}</div>`).join("")
+      : `<div class="muted">本季无工程变动。</div>`;
+  }
+
+  /* 一条警告（取第一条命中的，不叠加）：
+     · 口粮未达标（r.food.baseline_met === false）
+     · 现金 < 300
+     · 无产出（r.production 空） */
+  const warnEl = $("rm-warn");
+  if (warnEl){
+    let warn = "";
+    if (r.food && r.food.baseline_met === false){
+      warn = "⚠️ 口粮未达标：下季可能影响幸福度。";
+    } else if (r.cash_after != null && Number(r.cash_after) < 300){
+      warn = "⚠️ 现金低于 300：注意下一季预算。";
+    } else if (!Array.isArray(r.production) || !r.production.length){
+      warn = "⚠️ 上季无产出：检查地块开工 / 建造。";
+    }
+    if (warn){
+      warnEl.textContent = warn;
+      warnEl.style.display = "";
+    } else {
+      warnEl.textContent = "";
+      warnEl.style.display = "none";
+    }
+  }
+
+  modal.classList.remove("hidden");
+
+  /* 按钮钩子（每弹一次重挂，避免旧闭包吃到老 GAME / quarter） */
+  const close = () => { modal.classList.add("hidden"); };
+  const okBtn = $("rm-btn-ok"), moreBtn = $("rm-btn-more");
+  if (okBtn) okBtn.onclick = () => { close(); };
+  if (moreBtn){
+    moreBtn.onclick = () => {
+      close();
+      const tgt = $("report-panel") || $("report-body");
+      if (tgt && typeof tgt.scrollIntoView === "function"){
+        try{ tgt.scrollIntoView({behavior:"smooth", block:"start"}); }
+        catch(_e){ tgt.scrollIntoView(); }
+      }
+    };
+  }
+
+  /* 落锁：本次已弹过，本季不再弹。localStorage 写入失败也认了
+     （最坏下场是玩家刷新后又看到一次，不会渲染炸）。 */
+  try{
+    if (window.localStorage) localStorage.setItem(key, "1");
+  }catch(_e){ /* 静默 */ }
 }

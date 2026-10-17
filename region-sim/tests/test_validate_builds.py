@@ -137,6 +137,99 @@ def test_industry_level3_I_is_valid():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 一-bis、★ 工业二级是「不同地块类型」：上下文约束（2026-10-18 用户裁定）
+# ══════════════════════════════════════════════════════════════════
+#
+# 四种机械二级（H-A/H-F/H-G/H-J）是**不同的地块类型**，选定后**不能互转**；
+# 三级不是"共享的下一档"，而是**当前这块二级类型**的延续（H-A 只能升 H-A+）。
+# 研究线二级只能升到 I。service/resource/research 不产出，product 必须留空。
+#
+# ★ 这组用例钉住的是**校验阶段的拦截**；结算层是否拦由 pipeline 管
+#   （事实上 `find_work` 在 route 不符时会 ConfigError，但体验上不该走到那）。
+
+
+def test_machine_HA_upgrades_to_HA_plus():
+    """★ 二级 H-A 升三级 H-A+ 必须**通过**（最基础的机械升级）。"""
+    _, st = new_state(**{"0,0": mature("0,0", PlotType.INDUSTRY, 2, product="H-A")})
+    plan = plan_of(BuildOrder("0,0", PlotType.INDUSTRY, 3, "H-A+"))
+    issues = run_validate(st, plan)
+    assert issues == [], (
+        f"H-A 升 H-A+ 应当合法，实得：{[str(i) for i in issues]}"
+    )
+
+
+def test_machine_HA_cannot_upgrade_to_HG_plus():
+    """★ 二级 H-A 拿 H-G+ 升三级必须被 `build_product_mismatch` 拒。
+
+    H-A 和 H-G 是**不同的二级地块类型**，不是"路线分叉"——
+    拿 H-G+ 来升 H-A 不等于"升级"，等于"换地块"。
+    message 必须中文说清「二级 H-A 只能升 H-A+，不能转成 …」。
+    """
+    _, st = new_state(**{"0,0": mature("0,0", PlotType.INDUSTRY, 2, product="H-A")})
+    plan = plan_of(BuildOrder("0,0", PlotType.INDUSTRY, 3, "H-G+"))
+    issues = run_validate(st, plan)
+    assert codes(issues) == {"build_product_mismatch"}, (
+        f"H-A 拿 H-G+ 应只报 build_product_mismatch，实得：{codes(issues)}"
+    )
+    issue = issues[0]
+    assert issue.target == "0,0"
+    for frag in ("二级 H-A", "只能升", "H-A+", "不能转成", "H-G+"):
+        assert frag in issue.message, (
+            f"message 缺片段 {frag!r}，实得：{issue.message}"
+        )
+
+
+def test_machine_HG_upgrades_to_HG_plus():
+    """组对称：H-G → H-G+ 也必须通过（四种都有这条自己的升级线）。"""
+    _, st = new_state(**{"0,0": mature("0,0", PlotType.INDUSTRY, 2, product="H-G")})
+    plan = plan_of(BuildOrder("0,0", PlotType.INDUSTRY, 3, "H-G+"))
+    issues = run_validate(st, plan)
+    assert issues == [], (
+        f"H-G 升 H-G+ 应当合法，实得：{[str(i) for i in issues]}"
+    )
+
+
+def test_research_level2_upgrades_only_to_I():
+    """★ 研究线二级升三级必须是 **I**（已在 test_industry_level3_I_is_valid 钉
+    住通过）；本用例钉**反面**：研究线拿 "H-A+" 去升三级必须被拒。
+    """
+    _, st = new_state(**{"0,0": mature("0,0", PlotType.INDUSTRY, 2, product="研究")})
+    plan = plan_of(BuildOrder("0,0", PlotType.INDUSTRY, 3, "H-A+"))
+    issues = run_validate(st, plan)
+    assert codes(issues) == {"build_product_mismatch"}, (
+        f"研究线拿 H-A+ 应只报 build_product_mismatch，实得：{codes(issues)}"
+    )
+    assert "I" in issues[0].message, (
+        f"message 应点明研究线三级只能是 I，实得：{issues[0].message}"
+    )
+
+
+def test_service_with_product_is_rejected():
+    """★ 服务地块带 product → `build_product_mismatch`（服务没有产物）。"""
+    _, st = new_state()
+    plan = plan_of(BuildOrder("0,0", PlotType.SERVICE, 1, "X"))
+    issues = run_validate(st, plan)
+    assert codes(issues) == {"build_product_mismatch"}, (
+        f"服务带 product 应只报 build_product_mismatch，实得：{codes(issues)}"
+    )
+    issue = issues[0]
+    assert "不产出" in issue.message or "没有产物" in issue.message, (
+        f"message 应点明服务没有产物，实得：{issue.message}"
+    )
+
+
+def test_resource_with_product_is_rejected():
+    """★ 资源地块带 product → `build_product_mismatch`（资源也没有产物，
+    对称钉住）。"""
+    _, st = new_state()
+    plan = plan_of(BuildOrder("0,0", PlotType.RESOURCE, 1, "F"))
+    issues = run_validate(st, plan)
+    assert codes(issues) == {"build_product_mismatch"}, (
+        f"资源带 product 应只报 build_product_mismatch，实得：{codes(issues)}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
 # 二、★ 资金粗估：10 条工业新建必须当场报「钱不够」
 # ══════════════════════════════════════════════════════════════════
 
