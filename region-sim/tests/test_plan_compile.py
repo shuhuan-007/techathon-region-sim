@@ -24,10 +24,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ai.plan_compile import compile_draft
+from ai.plan_compile import compile_draft, population_after_completion
 from engine import pipeline, validate
 from engine.loader import load_config
-from engine.models import GameState, PlotType, PlayerState
+from engine.models import GameState, Plot, PlotStatus, PlotType, PlayerState
+from engine.population import compute_population
 from tests.test_m1 import mature, make_state
 
 TOL = 1e-6
@@ -720,7 +721,148 @@ def test_h_full_skips_note_when_cash_is_plenty():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 八、只读 / player_id 钉死
+# 八、完工后人口（★ 2026-10-18 R2）
+#   结算第 1 步**先完工**（`_advance_construction`）→ 第 4 步才算人口，
+#   所以编译侧的两档 F 必须按「完工后」算；否则本季完工地块的胃口没算进去，
+#   口粮买少、H 掉档（实测 8550：应填 A=69.83，只填 66.41 → H=0.6）。
+# ══════════════════════════════════════════════════════════════════
+
+
+def _completing_state(cfg, cash: float = 2000.0):
+    """1 块运行农业 `5,5` + 1 块**本季完工**的农业 `5,6`（left==1、1→2）。"""
+    plots = {
+        "5,5": mature("5,5", PlotType.AGRICULTURE, 1, product="A"),
+        "5,6": Plot(
+            plot_id="5,6", plot_type=PlotType.AGRICULTURE, level=1,
+            status=PlotStatus.CONSTRUCTING, running_quarters=0,
+            construction_left=1, target_level=2, product="A",
+        ),
+    }
+    player = PlayerState(player_id="p1", cash=cash, plots=plots, last_happiness=0.8)
+    return GameState(world=cfg.new_world(), players={"p1": player})
+
+
+def test_population_after_completion_matches_engine_step1():
+    """投影人口必须与**引擎第 1 步真跑**之后的人口逐位相同（不另写公式）。
+
+    顺带锁两条：`construction_left == 2` 的地块本季**不**完工、不许计入；
+    `population_after_completion()` 纯只读。
+    """
+    cfg = load_config()
+    state = _completing_state(cfg)
+    # left==2 → 第 1 步只减到 1，本季仍在建（不该进人口）
+    state.player("p1").plots["5,7"] = Plot(
+        plot_id="5,7", plot_type=PlotType.RESOURCE, level=1,
+        status=PlotStatus.CONSTRUCTING, running_quarters=3,
+        construction_left=2, target_level=2,
+    )
+    before = copy.deepcopy(state.to_dict())
+    projected = population_after_completion(state, "p1", cfg)
+    assert state.to_dict() == before, "★ population_after_completion 不许改状态"
+
+    engine_state = GameState.from_dict(copy.deepcopy(before))
+    events = pipeline._advance_construction(engine_state, "p1", cfg)   # 引擎第 1 步
+    assert [e["plot_id"] for e in events] == ["5,6"], (
+        f"夹具里应该只有 5,6 本季完工：{events}"
+    )
+    after = compute_population(engine_state, "p1", {}, cfg)
+    assert projected.to_dict() == after.to_dict(), (
+        f"★ 投影人口 ≠ 引擎第 1 步之后的人口："
+        f"{projected.to_dict()} != {after.to_dict()}"
+    )
+
+    pre = compute_population(state, "p1", {}, cfg)
+    assert projected.labor_food > pre.labor_food + 1e-9, "完工的地块必须带进岗位"
+    assert projected.working_plots == 2, projected  # 含 5,6、不含 left==2 的 5,7
+
+
+def test_food_defaults_use_post_completion_population():
+    """默认补口粮按**完工后** `F_优秀`（不是当前 RUNNING 的 F），且 H=1.0。"""
+    cfg = load_config()
+    state = _completing_state(cfg)
+    pre = compute_population(state, "p1", {}, cfg)
+    post = population_after_completion(state, "p1", cfg)
+    assert post.good_food > pre.good_food + 1e-9, "夹具必须真的本季完工"
+
+    result = compile_draft(_raw(), state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+    for g, quota in cfg.food.good_quota.items():
+        want = quota * post.good_food
+        got = float(result.plan.food.get(g, 0.0) or 0.0)
+        assert abs(got - want) < TOL, (
+            f"★ 口粮 {g} 应按完工后优秀档 {want:.4f} 补，实得 {got:.4f}"
+            f"（按完工前只会是 {quota * pre.good_food:.4f}）"
+        )
+    assert result.preview["food"]["good_met"] is True, result.preview["food"]
+    assert result.preview["food"]["happiness"] >= 1.0 - 1e-9, result.preview["food"]
+
+
+def test_baseline_food_fill_uses_post_completion_population():
+    """`include_excellent_food=False`（只要基准档）时，A/B 也按完工后 `F_基准`。"""
+    cfg = load_config()
+    state = _completing_state(cfg)
+    post = population_after_completion(state, "p1", cfg)
+
+    result = compile_draft(_raw(), state, "p1", cfg, include_excellent_food=False)
+    _assert_compiled_ok(result, state, cfg)
+    assert set(result.plan.food) == set(cfg.food.baseline_quota), result.plan.food
+    for g, quota in cfg.food.baseline_quota.items():
+        want = quota * post.baseline_food
+        assert abs(result.plan.food[g] - want) < TOL, (
+            f"★ 基准档 {g} 应按完工后 {want:.4f} 补，实得 {result.plan.food[g]}"
+        )
+
+
+def test_build_this_season_is_not_counted_in_food():
+    """当季**新建**的地块第 6 步才创建 → 第 4 步人口看不到，不许预扣口粮。"""
+    cfg = load_config()
+    state = make_state(
+        cfg, "p1", mature("5,5", PlotType.AGRICULTURE, 1, product="A"), cash=2000.0,
+    )
+    raw = _raw(builds=[{
+        "plot_id": "0,0", "plot_type": "agriculture",
+        "target_level": 1, "product": "A",
+    }])
+    result = compile_draft(raw, state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+    assert len(result.plan.builds) == 1, "这条建造应该保留（只验口粮口径）"
+
+    pop = compute_population(state, "p1", {}, cfg)   # 新建的地块不在里面
+    for g, quota in cfg.food.good_quota.items():
+        want = quota * pop.good_food
+        got = float(result.plan.food.get(g, 0.0) or 0.0)
+        assert abs(got - want) < TOL, (
+            f"★ 本季新建不该算进胃口：{g} 应按 {want:.4f}，实得 {got:.4f}"
+        )
+
+
+def test_h_gap_note_uses_post_completion_need():
+    """现金只够空计划时：H 兜底 note 的缺口必须按**完工后** F_优秀 算。
+
+    旧口径按完工前 F 算，缺口会偏小（8550 那种 4 块完工的档甚至算成 0 →
+    连 note 都不加）；这里直接用「0.4/0.2/0.1/0.02 × 完工后 F_优秀」对账。
+    """
+    cfg = load_config()
+    state = _completing_state(cfg, cash=30.0)     # 只够「什么都不做」
+    post = population_after_completion(state, "p1", cfg)
+
+    result = compile_draft(_raw(), state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+    h = result.preview["food"]["happiness"]
+    assert h < 1.0 - 1e-9, f"这条夹具的 H 必须 <1.0：{result.preview['food']}"
+    note = next((n for n in result.notes if "按优秀档仍缺" in n), "")
+    assert note, f"★ H<1.0 时必须 append 缺口 note：{result.notes}"
+    for g, quota in cfg.food.good_quota.items():
+        want = quota * post.good_food
+        have = float(result.plan.food.get(g, 0.0) or 0.0)
+        if have + 1e-6 < want:
+            assert f"{g} 缺 {want - have:.2f}" in note, (
+                f"★ 缺口 {g} 应按完工后 {want:.2f} 算（缺口 {want - have:.2f}）：{note}"
+            )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 九、只读 / player_id 钉死
 # ══════════════════════════════════════════════════════════════════
 
 

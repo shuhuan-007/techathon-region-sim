@@ -349,6 +349,49 @@ def test_food_rule_matches_compute_population_22_people():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 七-b、完工后人口（★ 2026-10-18 R2）
+#   结算第 1 步先完工、第 4 步才算人口 → 快照的 F 与逐商品需求必须同口径。
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_food_rule_uses_post_completion_population():
+    """`construction_left == 1` 的地块本季完工 → 快照的两档 F 必须含它。
+
+    旧口径只看当前 RUNNING：实测 `8550`（4 块本季完工）给 A=66.41 而不是
+    69.83，模型照着填就掉到 H=0.6（`good_met=False`）。
+    """
+    from ai.plan_compile import population_after_completion
+
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("5,5", PlotType.AGRICULTURE, 1, product="A"))
+    pre = compute_population(st, "p1", {}, cfg)
+    st.player("p1").plots["5,6"] = Plot(
+        plot_id="5,6", plot_type=PlotType.AGRICULTURE, level=1,
+        status=PlotStatus.CONSTRUCTING, running_quarters=0,
+        construction_left=1, target_level=2, product="A",
+    )
+    post = population_after_completion(st, "p1", cfg)
+    assert post.good_food > pre.good_food + 1e-9, "夹具必须真的本季完工"
+
+    cap = describe_capabilities(st, "p1", cfg)
+    _close(cap["population"]["labor_food"], post.labor_food)
+    _close(cap["population"]["population"], post.population)
+    _close(cap["food_rule"]["baseline_food"], post.baseline_food)
+    _close(cap["food_rule"]["good_food"], post.good_food)
+    for goods, ratio in cfg.food.baseline_quota.items():
+        _close(cap["food_rule"]["baseline_need"][goods], ratio * post.baseline_food)
+    for goods, ratio in cfg.food.good_quota.items():
+        _close(cap["food_rule"]["good_need"][goods], ratio * post.good_food)
+
+    # 文本块写出的也是完工后数字（模型照抄 `[口粮规则]` 那一行就够）
+    text = format_capabilities(cap)
+    assert f"人口={post.population:g}" in text, text
+    for goods, ratio in cfg.food.good_quota.items():
+        shown = f"{goods}×{round(ratio * post.good_food, 3):g}"
+        assert shown in text, f"[口粮规则] 缺完工后数字 {shown}：\n{text}"
+
+
+# ══════════════════════════════════════════════════════════════════
 # 八、推荐空地（B）：真加成、只推空地、排序稳定
 # ══════════════════════════════════════════════════════════════════
 

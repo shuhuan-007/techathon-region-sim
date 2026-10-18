@@ -34,6 +34,8 @@
     2. 语义归位：已有地块的 builds → 本季开工；在建 → 丢弃；
        空地 → 保留，并把**零邻接加成**的新建搬到推荐邻格（`auto_place`）
     3. 补默认：所有 RUNNING 地块默认 u=1；没给口粮 → 按基准档补
+       （★ 2026-10-18 R2：口粮的两档需求一律按**完工后人口**算，见
+        `population_after_completion()` —— 结算第 1 步先完工、第 4 步才算人口）
     4. validate；不过 → 丢掉「能定位的坏项」再验（最多 3 轮）
     5. preview；资金不足 → 先降 u（100→75→50→25→0），
        再逐条移除建造，再降口粮，最后移除采购
@@ -61,11 +63,13 @@ from engine.models import (
     GameState,
     Plan,
     PlayerState,
+    Plot,
     PlotPlan,
     PlotStatus,
     PlotType,
     parse_plot_id,
 )
+from engine.population import PopulationResult, compute_population
 
 # ══════════════════════════════════════════════════════════════════
 # 常量：可选路线 / 默认值 / 修复阶梯
@@ -684,11 +688,84 @@ def _normalize_goods_map(
     return out
 
 
-def _baseline_food(state: GameState, player_id: str, cfg: Config) -> dict[str, float]:
-    """按“基准档”算一份口粮需求（人口只跟已建成地块走，与 u 无关）。"""
-    from engine.population import compute_population
+# ══════════════════════════════════════════════════════════════════
+# ★ 2026-10-18 R2「完工后人口」—— 编译侧与结算侧的唯一人口口径
+# ══════════════════════════════════════════════════════════════════
+#
+# 结算的第 1 步是**先完工**（`pipeline._advance_construction`：在建地块
+# `construction_left -= 1`，减到 0 就 `status→RUNNING`、`level→target_level`），
+# 第 4 步才 `compute_population()` —— 所以结算里的 L/N/F 全是**完工后**的。
+#
+# 而编译发生在**季初**：`construction_left == 1` 的地块还写着 CONSTRUCTING，
+# 直接调 `compute_population()` 会把它们的岗位漏掉 → 口粮买少 → H 掉档。
+# 实测 `saves-live/8550.json`（4 块本季完工）：应填 A=69.83，只填 66.41，H≈0.94。
 
-    pop = compute_population(state, player_id, {}, cfg)
+
+def population_after_completion(
+    state: GameState,
+    player_id: str,
+    cfg: Config,
+) -> PopulationResult:
+    """本季**结算第 4 步**会看到的人口（= 第 1 步完工之后的人口）。
+
+    做法：**不另写一套人口公式** —— 只把「本季会完工」的地块按引擎
+    `_advance_construction` 的**同一语义**投影成完工态，再原样调用
+    `compute_population()`。所以它与第 1 步之后结算看到的数逐位相同。
+
+    哪些算「本季会完工」（与引擎第 1 步逐行对应）：
+
+        CONSTRUCTING 且 `construction_left <= 1`
+            → 第 1 步先 `left -= 1`，减到 `<= 0` 就完工（含 `left == 0` 的边界）；
+              完工后 `status = RUNNING`、`level = target_level`。
+
+    ⚠️ **当季新建的地块不算完工**：新建由第 6 步 `_invest_construction`
+       才创建（季初根本不在 `player.plots` 里），所以这里天然看不到它们。
+    ⚠️ 纯函数：只用 `copy.copy` 拼一个**读视图**，不改 `state` / `player` / `plot`。
+    ⚠️ 为什么必须复用 `compute_population()`：`recipe_for()` 会按**等级**查配方
+       （研究地块、工业三级的 d 都随等级变），自己乘一遍必然对不上。
+
+    `8550` 实测：完工前 N=550 / F_优秀=166.03 → 完工后 N=575 / F_优秀=174.57
+    （4 块：`3,4` `3,5` `4,3` `5,6`，都是 `left==1`）。
+    """
+    player = state.players[player_id]
+
+    view_plots: dict[str, Plot] = {}
+    completing = 0
+    for pid, plot in player.plots.items():
+        will_complete = (
+            plot.status is PlotStatus.CONSTRUCTING
+            and plot.construction_left <= 1
+        )
+        if not will_complete:
+            view_plots[pid] = plot
+            continue
+        projected = copy.copy(plot)
+        projected.status = PlotStatus.RUNNING
+        projected.level = plot.target_level
+        projected.construction_left = 0
+        projected.running_quarters = 0     # 与引擎一致：磨合从完工本季起算
+        view_plots[pid] = projected
+        completing += 1
+
+    if completing == 0:
+        # 没有本季完工的地块 → 与结算完全同一条路径（省掉视图拷贝）
+        return compute_population(state, player_id, {}, cfg)
+
+    view_player = copy.copy(player)
+    view_player.plots = view_plots
+    view_state = copy.copy(state)
+    view_state.players = dict(state.players)
+    view_state.players[player_id] = view_player
+    return compute_population(view_state, player_id, {}, cfg)
+
+
+def _baseline_food(state: GameState, player_id: str, cfg: Config) -> dict[str, float]:
+    """按“基准档”算一份口粮需求（人口只跟已建成地块走，与 u 无关）。
+
+    ★ 2026-10-18 R2：人口走 `population_after_completion()` —— 结算先完工再算
+      人口，本季 `construction_left == 1` 的地块本季就要吃饭。
+    """
+    pop = population_after_completion(state, player_id, cfg)
     if pop.baseline_food <= 0:
         return {}
     quotas = cfg.food.baseline_quota
@@ -739,12 +816,13 @@ def _fill_good_food(
     （compute_population 的 good_food）把四样口粮补到优秀档需求。
     玩家明说「只要基准档/吃饱就行」时调用方才传 False 跳过本步。
 
+    ★ 2026-10-18 R2：`F_优秀` 走 `population_after_completion()`（完工后人口），
+      否则本季完工地块的胃口没算进去，买够了也掉到基准档（H=0.6）。
+
     ⚠️ 只补不足，不削已有；现金不够由后续 `_shrink_until_ok` 缩量，
     本函数不特殊处理。
     """
-    from engine.population import compute_population
-
-    pop = compute_population(state, player_id, {}, cfg)
+    pop = population_after_completion(state, player_id, cfg)
     if pop.good_food <= 0:
         return food
     quotas = cfg.food.good_quota or {}
@@ -784,12 +862,14 @@ def _cap_food_to_need(
     上限 = `good_quota[g] × F_优秀`（超过优秀档的部分不会产生任何幸福度，
     也没有仓库可留到下一季）。这不是“改规则”，只是不让 AI 把“人数”
     误当“口粮数”后白烧钱。
+
+    ★ 2026-10-18 R2：上限同样按**完工后人口**（`F_优秀` 用
+      `population_after_completion()`）—— 不然本季完工地块会把合法口粮
+      误判成“超量”削掉。
     """
     if not food:
         return {}
-    from engine.population import compute_population
-
-    pop = compute_population(state, player_id, {}, cfg)
+    pop = population_after_completion(state, player_id, cfg)
     if pop.good_food <= 0:
         _append_note(
             notes,
@@ -1330,9 +1410,10 @@ def compile_draft(
         food_info = preview.get("food") or {}
         h = food_info.get("happiness")
         if h is not None and float(h) < 1.0 - 1e-9:
-            from engine.population import compute_population
-
-            pop = compute_population(state, player_id, {}, cfg)
+            # ★ 2026-10-18 R2：缺口必须按**完工后人口**算——preview 的 H 就是
+            #   结算口径（先完工再算人口），按完工前人口算会把缺口算成 0，
+            #   于是「H<1.0 却不加 note」，玩家永远不知道差在哪。
+            pop = population_after_completion(state, player_id, cfg)
             quotas = cfg.food.good_quota or {}
             gaps: list[str] = []
             for g, quota in sorted(quotas.items()):

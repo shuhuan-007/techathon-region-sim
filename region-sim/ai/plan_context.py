@@ -41,6 +41,10 @@
     · 不发明数字：材料价一律走 `state.world.last_price(g)`（**没有历史价时它
       自己退回参考价 P0**，见 `engine/models.py::WorldState.last_price`），
       人口 / 口粮一律走 `engine.population.compute_population()`。
+      ★ 2026-10-18 R2：人口 / 口粮那一处改成走
+      `ai/plan_compile.py::population_after_completion()`（它内部就是
+      `compute_population()`，只是先把「本季会完工」的地块按 `target_level`
+      投影成完工态）—— 结算第 1 步先完工、第 4 步才算人口，快照必须同口径。
 
 ⚠️ 已知对齐点（本快照如实转述，不在这一层修）：
 
@@ -67,7 +71,6 @@ from typing import Any, Optional
 
 from engine import construction as C
 from engine import efficiency as E
-from engine import population as P
 from engine.loader import Config
 from engine.models import GameState, Plot, PlotStatus, PlotType, parse_plot_id
 from engine.validate import buildable_products
@@ -367,8 +370,21 @@ def _upgrade_options(state: GameState, player, cfg: Config) -> list[dict]:
 
 
 def _population_rows(state: GameState, player_id: str, cfg: Config) -> tuple[dict, dict]:
-    """人口五项 + 两档口粮需求（纯来自 `compute_population` 与 config 配比）。"""
-    pop = P.compute_population(state, player_id, {}, cfg)
+    """人口五项 + 两档口粮需求（纯来自 `compute_population` 与 config 配比）。
+
+    ★ 2026-10-18 R2「完工后人口」：人口/口粮走
+      `plan_compile.population_after_completion()` —— 结算第 1 步**先完工**
+      （`construction_left == 1` 的地块当场转 RUNNING、`level = target_level`），
+      第 4 步才算人口，所以 `F_基准 / F_优秀` 必须按**完工后**给模型看。
+      否则本季有完工地块时会少给需求（实测 `8550`：A 66.41 而不是 69.83，
+      模型照着填 → H≈0.94 掉档）。
+
+    ⚠️ 局部 import：`ai/plan_compile.py` 顶部反过来 import 本模块，
+       顶层 import 会成环；运行期再取即可（本模块顶层不调用它）。
+    """
+    from ai.plan_compile import population_after_completion
+
+    pop = population_after_completion(state, player_id, cfg)
     population = {
         "labor_total": float(pop.labor_total),
         "labor_food": float(pop.labor_food),
@@ -399,6 +415,9 @@ def _food_rule(population: dict, food_need: dict, cfg: Config) -> dict:
 
     ⚠️ 数字全部来自 `_population_rows()`（其上游是 `compute_population`），
        本函数只做「按 config 配比乘 F」，不另算一套。
+    ★ 2026-10-18 R2：`baseline_food` / `good_food` 与逐商品 `*_need` 都是
+       **完工后人口**口径（`_population_rows` → `population_after_completion`），
+       与结算扣口粮用的是同一个数 —— 模型照抄即可拿到 H=1.0。
     """
     baseline_food = float(population.get("baseline_food", 0.0))
     good_food = float(population.get("good_food", 0.0))
