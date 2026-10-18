@@ -125,10 +125,10 @@ def test_opening_snapshot_empty_builds_and_zero_population():
     # [可建] 的表头与「材料写成 H-A×1」是契约
     assert "[可建] 类型|名|现金|材料|材料价|折后|可产" in text, text
     assert "H-A×1" in text, text
-    # 最后一句必须是硬提示（漏写 plot_plans / builds 只能用于空地）
+    # 最后一句必须是硬提示（漏写 plot_plans；builds 可新建也可升级）
     assert text.splitlines()[-1] == (
         "要开工必须写进 plot_plans，漏写=不开工；"
-        "builds 只能用于 [空地] 里的格子。"
+        "builds 用于 [空地] 新建，也用于 [可升级] 里已有地块的升级。"
     ), text
 
 
@@ -455,6 +455,91 @@ def _print_samples() -> None:
         print(f"【{title}】{len(text)} 字符")
         print("-" * 68)
         print(text)
+
+
+def test_upgrade_options_cover_industry_routes_and_research():
+    """AI 必须看见已有地块的升级选项：一级 G 两条、二级机械只对应 +、研究只 I。"""
+    cfg = load_config()
+    st = GameState(cfg.new_world(), players={"p1": cfg.new_player("p1")})
+    plots = {
+        "3,4": mature("3,4", PlotType.INDUSTRY, 1, "G"),
+        "4,4": mature("4,4", PlotType.INDUSTRY, 2, "H-A"),
+        "5,4": mature("5,4", PlotType.INDUSTRY, 2, "研究"),
+        "6,4": mature("6,4", PlotType.AGRICULTURE, 1, "A"),
+    }
+    for pid, p in plots.items():
+        st.player("p1").plots[pid] = p
+
+    cap = describe_capabilities(st, "p1", cfg)
+    rows = cap["upgrade_options"]
+    by_plot: dict[str, list[dict]] = {}
+    for row in rows:
+        by_plot.setdefault(row["plot_id"], []).append(row)
+
+    l1 = {r["work_id"]: r for r in by_plot["3,4"]}
+    assert set(l1) == {"ind_1_2_machine", "ind_1_2_research"}, l1
+    assert l1["ind_1_2_machine"]["products"] == ["H-A", "H-F", "H-G", "H-J"]
+    assert l1["ind_1_2_research"]["fixed_product"] == "研究"
+    assert l1["ind_1_2_research"]["products"] == []
+
+    h_a = by_plot["4,4"]
+    assert [r["work_id"] for r in h_a] == ["ind_2_3_machine"], h_a
+    assert h_a[0]["product_from_current"] is True
+    assert h_a[0]["target_level"] == 3
+
+    research = by_plot["5,4"]
+    assert [r["work_id"] for r in research] == ["ind_2_3_high"], research
+    assert research[0]["fixed_product"] == "I"
+
+    text = format_capabilities(cap)
+    assert "[可升级]" in text and "二级研究" in text, text
+    assert "[可升级] 无" not in text, text
+
+
+def test_opening_advice_triggers_only_when_opening():
+    """★ 2026-10-18 用户拍板：AI 开局不能只给 2 块。`opening_advice` 在
+    「自己 0–1 块地 + 现金 ≥ 1000」时触发，快照与文本都得带 `[开局建议]`。
+    """
+    cfg = load_config()
+
+    # ① 开局（0 地块 + 现金 1200）→ 触发
+    cap0 = describe_capabilities(_opening_state(cfg), "p1", cfg)
+    advice = cap0["opening_advice"]
+    assert isinstance(advice, dict) and advice.get("active") is True, advice
+    assert advice["own_plot_count"] == 0
+    assert advice["suggested_plot_count"] == 3
+    assert advice["priority_types"] == ["agriculture", "resource", "industry"], advice
+    note = advice["note"]
+    for piece in ("3 块", "农业", "资源", "工业", "2 块"):
+        assert piece in note, f"开局建议 note 缺 {piece}：{note}"
+    text0 = format_capabilities(cap0)
+    assert "[开局建议]" in text0, f"开局文本要带 [开局建议] 块：\n{text0}"
+    assert "3 块" in text0 and "1 农业" in text0 and "1 资源" in text0 and "1 工业" in text0, text0
+    assert "[可建]" in text0 and "[推荐空地]" in text0, "提示不许盖掉数字块"
+
+    # ② 1 块地 + 现金 1000 整 → 仍触发（边缘）
+    st1 = _opening_state(cfg)
+    st1.players["p1"].cash = 1000.0
+    st1.players["p1"].plots["5,5"] = mature("5,5", PlotType.AGRICULTURE, 1, product="A")
+    cap1 = describe_capabilities(st1, "p1", cfg)
+    assert cap1["opening_advice"]["active"] is True, cap1["opening_advice"]
+    assert cap1["opening_advice"]["own_plot_count"] == 1
+
+    # ③ ≥ 2 块地 → 不再触发（开局已过，提示是添乱）
+    st2 = _opening_state(cfg)
+    st2.players["p1"].plots["5,5"] = mature("5,5", PlotType.AGRICULTURE, 1, product="A")
+    st2.players["p1"].plots["5,6"] = mature("5,6", PlotType.RESOURCE, 1)
+    cap2 = describe_capabilities(st2, "p1", cfg)
+    assert cap2["opening_advice"] is None, cap2["opening_advice"]
+    text2 = format_capabilities(cap2)
+    assert "[开局建议]" not in text2, f"非开局时 [开局建议] 应整块缺席：\n{text2}"
+
+    # ④ 0 块地但现金 500 → 不触发（没钱铺 3 块，提示是空头支票）
+    st3 = _opening_state(cfg)
+    st3.players["p1"].cash = 500.0
+    cap3 = describe_capabilities(st3, "p1", cfg)
+    assert cap3["opening_advice"] is None, cap3["opening_advice"]
+    assert "[开局建议]" not in format_capabilities(cap3)
 
 
 def _run_all() -> int:

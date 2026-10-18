@@ -89,6 +89,11 @@ window.APP = window.APP || {};
   const CVS_W = 1280;
   const CVS_H = 720;
 
+  /* v14 拍板（2026-10-18）：用户对屏幕体验不满意，要求先关掉。
+     但代码本身已成熟（v13 修了黑/遮挡/文字），保留整套程序。
+     恢复 = 这里改成 true，其它一行不用动。 */
+  const _SKY_ENABLED = false;
+
   let _opened = false;
   let _report = null;         // 一次成功 fetch 后凕 save
   let _fetchPromise = null;   // 去重
@@ -98,6 +103,7 @@ window.APP = window.APP || {};
   let _mat = null;            // THREE.MeshBasicMaterial
   let _canvas = null;         // offscreen canvas
   let _ctx = null;
+  let _paintYR = 0;           /* v13:_paint() 运行时主内容右列当前 y（公文区定位置参考） */
 
   /* v9 落点 B · 公文区数据源 */
   let _narratives = null;     /* null = 未 fetch 或 fetch 失败 */
@@ -297,10 +303,14 @@ window.APP = window.APP || {};
        pending → "— 本季经营新闻与财报解读正在生成… —"
        fail/未起 → "— 结算后此处将显示经营新闻与财报解读 —" */
   function _drawNewsRegion(ctx, W, H){
+    /* v13 拍板：公文区从「canvas 底部固定 200 px」改为
+       「跟主内容流走（在右列末尾收尾）」。位置=调用方给 yR 当前值。
+       如果主内容多 （yR > H-100) → 不画公文区（主内容已 占满）。 */
     const XR = 30;
     const XR2 = W - 30;
-    const YT = H - 200;                 /* 区顶 */
-    const YB = H - 20;                  /* 区底（canvas 底再留 20 px）*/
+    /* YT 由调用方覆盖 – 这里用全局 _paintYR（主内容当前 y） */
+    const YT = (typeof _paintYR !== 'undefined' && _paintYR < H - 100) ? _paintYR + 10 : H - 200;
+    const YB = Math.min(H - 20, YT + 170);
 
     /* 底框（比主面板略亮一点点）+ 更微的描边 */
     ctx.fillStyle = 'rgba(14, 20, 32, 0.6)';
@@ -368,132 +378,133 @@ window.APP = window.APP || {};
     }
   }
 
-  /* ── 主绘制:把当前 _report(或 STATE fallback)画到 canvas 上 ── */
+  /* ── 主绘制 v13（用户拍板）：
+       "屏上只有经营报表，内容不够，我说的是有文字内容的财报、新闻"——
+       报表占比压缩到左 30%，主区 70% 优先 渲染「新闻 + 财报」。 */
   function _paint(){
     if (!_ctx || !_canvas) return;
     const ctx = _ctx, W = CVS_W, H = CVS_H;
-    /* 清屏 + 半透明深蓝底 */
+    /* 清屏 + **半透明深蓝底**（v13 拍板：不那 么黑）。 */
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(10, 16, 24, 0.92)';
+    ctx.fillStyle = 'rgba(20, 30, 46, 0.78)';
     _roundRect(ctx, 0, 0, W, H, 14);
     ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.20)';
     ctx.lineWidth = 2;
     _roundRect(ctx, 1, 1, W - 2, H - 2, 14);
     ctx.stroke();
 
     const r = _report;
+    const narr = _narratives;
 
     /* 标题 */
     let q = null;
     if (r && r.quarter != null) q = r.quarter;
     else if (typeof STATE !== 'undefined' && STATE && STATE.quarter != null) q = STATE.quarter;
     ctx.fillStyle = 'rgba(255,255,255,0.98)';
-    /* v11 拍板（2026-10-18 用户）：「字体更大一点」标题 28 → 36。 */
     ctx.font = '600 36px system-ui, sans-serif';
-    ctx.fillText('第 ' + (q != null ? q : '—') + ' 季 · 经营报表', 30, 54);
+    ctx.fillText('第 ' + (q != null ? q : '—') + ' 季 · 经营纪要', 30, 54);
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(20, 62); ctx.lineTo(W - 20, 62); ctx.stroke();
 
+    /* 左列：报表区（占比 28%）—— 压缩只显示 核心 4 字段。 */
+    const LW = Math.floor(W * 0.28);
+    let yL = 90;
     if (r){
-      /* 左列 */
-      let yL = 92;
-      const colL = 30, colW = W / 2 - 50;
-      /* 1) 现金截面 */
-      yL = _drawSection(ctx, '现金截面', [
-        ['期初现金',  _fmtSec(r.cash_before)],
-        ['期末现金',  _fmtSec(r.cash_after)],
-        ['本季增值',  _fmtSec(r.value_added)],
-        ['营收',      _fmtSec(r.sales_revenue)],
-      ], colL, yL, colW);
-
-      /* 2) 队伍 */
+      yL = _drawSection(ctx, '现金', [
+        ['期初',  _fmtSec(r.cash_before)],
+        ['期末',  _fmtSec(r.cash_after)],
+        ['增值',  _fmtSec(r.value_added)],
+        ['营收',  _fmtSec(r.sales_revenue)],
+      ], 30, yL, LW - 60);
       if (r.population || r.food){
         const pop = r.population || {};
         const food = r.food || {};
-        const popTotal = pop.population != null ? pop.population : null;
-        const popLvl   = (pop.population_level_avg != null) ? pop.population_level_avg
-                        : (pop.avg_level != null) ? pop.avg_level : null;
         yL = _drawSection(ctx, '队伍', [
-          ['人口',     popTotal != null ? Number(popTotal).toFixed(1) : null],
-          ['劳均等级', popLvl   != null ? _fmtSec(popLvl) : null],
-          ['幸福度',   food.happiness != null ? _fmtPct01(food.happiness) : null],
-          ['饱食基准', food.baseline_food != null ? _fmtSec(food.baseline_food) : null],
-        ], colL, yL, colW);
+          ['人口',  pop.population != null ? Number(pop.population).toFixed(1) : null],
+          ['幸福',  food.happiness != null ? _fmtPct01(food.happiness) : null],
+        ], 30, yL, LW - 60);
       }
+      yL = _drawSection(ctx, '支出', [
+        ['总出',    _fmtSec(r.total_deduction)],
+        ['工资',    _fmtSec(r.wages)],
+        ['建造',    _fmtSec(r.construction_cash)],
+        ['采购',    _fmtSec(r.materials_cost)],
+      ], 30, yL, LW - 60);
+    } else if (typeof STATE !== 'undefined' && STATE){
+      const rows = [];
+      if (STATE.cash != null)         rows.push(['现金', _fmtSec(STATE.cash)]);
+      if (STATE.population_count != null)
+                                      rows.push(['人口', Number(STATE.population_count).toFixed(1)]);
+      if (STATE.happiness != null)    rows.push(['幸福', _fmtPct01(STATE.happiness)]);
+      const plots = (STATE.plots || []);
+      if (plots.length)                 rows.push(['地块', plots.length + ' 块']);
+      yL = _drawSection(ctx, '快照', rows, 30, yL, LW - 60);
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.font = 'italic 14px ui-monospace, monospace';
+      ctx.fillText('STATE fallback',     30, yL + 8);
+    }
 
-      /* 3) 地块效率:最多 3 行 */
-      if (Array.isArray(r.efficiency) && r.efficiency.length){
-        const effRows = r.efficiency.slice(0, 3).map(e => {
-          const lbl = (e && (e.plot_type || e.plot_id)) || '?';
-          const eff_v = (e && e.efficiency != null) ? _fmtSec(e.efficiency) : '—';
-          const prod = (e && e.product) ? (' → ' + e.product) : '';
-          return [lbl, eff_v + prod];
-        });
-        if (r.efficiency.length > 3) effRows.push(['…', r.efficiency.length + ' 条']);
-        yL = _drawSection(ctx, '地块效率', effRows, colL, yL, colW);
-      }
+    /* 右列：财报 + 新闻区（占比 70%）—— 直接搬 DTO，不展表格。 */
+    const RX = LW + 30;                     /* 右列 起点 */
+    const RW = W - RX - 30;                 /* 右列 宽 */
+    let yR = 92;
 
-      /* 右列 */
-      let yR = 92;
-      const colR = W / 2 + 20, colWR = W / 2 - 50;
-      /* 4) 支出拆解 */
-      yR = _drawSection(ctx, '支出拆解', [
-        ['总支出',    _fmtSec(r.total_deduction)],
-        ['工资',      _fmtSec(r.wages)],
-        ['运营',      _fmtSec(r.operating)],
-        ['建造',      _fmtSec(r.construction_cash)],
-        ['采购',      _fmtSec(r.materials_cost)],
-        ['退税',      _fmtSec(r.wage_tax_refund)],
-        ['补贴',      _fmtSec(r.subsidy)],
-      ], colR, yR, colWR);
-
-      /* 5) 市场价 */
-      if (r.prices){
-        const pr = r.prices;
-        const rows = ['H-A', 'H-F', 'H-G', 'H-J']
-          .filter(k => pr[k] != null)
-          .map(k => [k, _fmtSec(pr[k])]);
-        yR = _drawSection(ctx, '市场价', rows, colR, yR, colWR);
-      }
-
-      /* 6) 交易 */
-      if (r.bought != null || r.sold != null || r.bought_breakdown){
-        const rows = [];
-        if (r.bought != null) rows.push(['买入额', _fmtSec(r.bought)]);
-        if (r.sold   != null) rows.push(['卖出额', _fmtSec(r.sold)]);
-        if (r.bought_breakdown && typeof r.bought_breakdown === 'object'){
-          const keys = Object.keys(r.bought_breakdown);
-          if (keys.length) rows.push(['买入品类', keys.join(' · ')]);
-        }
-        yR = _drawSection(ctx, '交易', rows, colR, yR, colWR);
-      }
-    } else {
-      /* fallback:STATE 公共字段 */
-      if (typeof STATE !== 'undefined' && STATE){
-        const rows = [];
-        if (STATE.cash != null)         rows.push(['现金', _fmtSec(STATE.cash)]);
-        if (STATE.population_count != null)
-                                        rows.push(['人口 N', Number(STATE.population_count).toFixed(1)]);
-        if (STATE.happiness != null)    rows.push(['幸福度', _fmtPct01(STATE.happiness)]);
-        const plots = (STATE.plots || []);
-        if (plots.length)               rows.push(['地块', plots.length + ' 块']);
-        let y = _drawSection(ctx, '快照(实时 STATE)', rows, 30, 92, W - 60);
-        ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        /* v11 拍板 fallback 字号 12→15、14→17。 */
-        ctx.font = 'italic 15px ui-monospace, monospace';
-        ctx.fillText('数据来自实时 STATE —— 完整报表需结算后由 /api/report 给出。', 30, y + 8);
-      } else {
-        ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        ctx.font = 'italic 17px ui-monospace, monospace';
-        ctx.fillText('STATE 未就绪。', 30, 100);
+    /* 辅助：多行 wrap 逐行画。 */
+    function _drawBlockText(text){
+      if (!text) return;
+      ctx.font = '16px ui-monospace, monospace';
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      const ls = _wrapText(ctx, String(text), RW);
+      const maxLines = 12;
+      ls.slice(0, maxLines).forEach(ln => {
+        ctx.fillText(ln, RX, yR);
+        yR += 20;
+      });
+      if (ls.length > maxLines){
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.fillText('…（' + (ls.length - maxLines) + ' 行省略）', RX, yR);
+        yR += 20;
       }
     }
 
-    /* v9 拍板 · 公文区：无论上面走到哪个分支都执行，
-       因此"任何情况屏上都有字"。 */
-    _drawNewsRegion(ctx, W, H);
+    /* 新闻 · 1：headline + body */
+    if (narr && narr.news && narr.news.headline){
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.font = '600 20px system-ui, sans-serif';
+      /* headline wrap */
+      const hl = _wrapText(ctx, String(narr.news.headline), RW);
+      hl.forEach(ln => { ctx.fillText(ln, RX, yR); yR += 26; });
+      yR += 4;
+      if (narr.news.body) _drawBlockText(narr.news.body);
+      yR += 10;
+    }
+
+    /* 财报 · 2：headline + body（可选如果 存在） */
+    if (narr && narr.report && narr.report.headline && yR < H - 120){
+      /* 分 隔线 */
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.beginPath(); ctx.moveTo(RX, yR); ctx.lineTo(W - 30, yR); ctx.stroke();
+      yR += 18;
+      /* 标 题 */
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.font = '600 15px system-ui, sans-serif';
+      ctx.fillText('财报解读', RX, yR);
+      yR += 22;
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.font = '600 17px system-ui, sans-serif';
+      const rhl = _wrapText(ctx, String(narr.report.headline), RW);
+      rhl.forEach(ln => { ctx.fillText(ln, RX, yR); yR += 22; });
+      if (narr.report.body && yR < H - 90){
+        yR += 4;
+        _drawBlockText(narr.report.body);
+      }
+    }
+
+    /* v13 拍板：公文区在主内容流末尾收尾。 */
+    _paintYR = yR;
+    if (yR < H - 100) _drawNewsRegion(ctx, W, H);
   }
 
   /* 画 → 贴到 texture */
@@ -523,8 +534,12 @@ window.APP = window.APP || {};
       map: _tex,
       transparent: true,
       side: THREE.DoubleSide,
-      depthTest: false,         /* 永不被 3D 模型遮挡,视觉上"在那" */
+      /* v13 拍板：屏不再永远压底（depthTest false 设）。
+         现在 depthTest:true → 屏前的 模型 能 挡住部分屏，玩家感知到真实 3D 秩序；
+         renderOrder 也降到 0。双面渲染仍会成立（side:DoubleSide）。 */
+      depthTest: true,
       depthWrite: false,
+      opacity: 0.92,           /* 屏 略 透出底下场景。 */
     });
     const mesh = new THREE.Mesh(_geo, _mat);
     const { cx, cz } = _viewCenter();
@@ -538,7 +553,7 @@ window.APP = window.APP || {};
        v12 回到 +30°，屏面向下倾更斜，视觉「广告牌角度」更正经朝用户。
        方向保持 v10 反转的 "+"（下缘向你倾朝地面）。 */
     mesh.rotation.x = Math.PI / 6;  /* = +π/6 ≈ +30° */
-    mesh.renderOrder = 1000;    /* depthTest=false 时压底渲染,确保最后画 */
+    mesh.renderOrder = 0;    /* v13 拍板：普通渲染顺序，不再压底 */
     /* 不调 lookAt —— 静止的天上屏 */
     scene.add(mesh);
     return mesh;
@@ -599,5 +614,5 @@ window.APP = window.APP || {};
     if (_opened && _mesh) _repaint();
   }
 
-  APP.citySky = { open: _open, close: _close, refresh: _refresh, _mesh: null };
+  APP.citySky = { open: _open, close: _close, refresh: _refresh, _mesh: null, _SKY_ENABLED: _SKY_ENABLED };
 })(window.APP);

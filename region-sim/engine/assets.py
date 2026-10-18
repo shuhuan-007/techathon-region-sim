@@ -33,6 +33,9 @@ INDUSTRY_ROUTE_TO_DIR: dict[tuple[str, int], str] = {
     ("H-J", 2): "工业服务2",
     ("H-J", 3): "工业服务业3",   # ⚠️ 注意美术目录命名笔误
     ("I", 3):  "工业高技术3",
+    # 研究线二级（2026-10-18 最小存储改动）：研究地块内部仍编码为
+    # industry L2 product='研究'，但其建模用「研究」目录，不是机械二级目录。
+    ("研究", 2): "研究",
 }
 
 # 简单类型的中文目录前缀（agriculture / resource / service 都是 `<前缀><level>`）
@@ -94,6 +97,8 @@ def asset_key(plot_type: str, level: int, product: Optional[str]) -> Optional[st
     '工业服务业3'
     >>> asset_key("industry", 3, "I")
     '工业高技术3'
+    >>> asset_key("industry", 2, "研究")   # ★ 2026-10-18: 研究线二级用「研究」目录
+    '研究'
     >>> asset_key("research", 1, None)
     '研究'
     >>> asset_key("research", 2, None) is None
@@ -159,6 +164,10 @@ def asset_key(plot_type: str, level: int, product: Optional[str]) -> Optional[st
             return "工业1" if product == "G" else None
         if not product:
             return None
+        # ★ 研究线二级：直接走「研究」目录（2026-10-18 最小存储改动后，
+        #   研究地块内部用 industry L2 product='研究' 编码，不该被当成非法/None）。
+        if product == "研究" and level == 2:
+            return "研究"
         # ★ level 3 的合法 product 只有两类：
         #     · "I"（研究线三级产物，独立查表）
         #     · "H-*+"（机械路线的三级升级版，必须带 +）

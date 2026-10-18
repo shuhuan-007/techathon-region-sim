@@ -454,10 +454,12 @@ def test_m1_full_account():
 
 
 def test_m1_subsidy_is_transfer_not_output():
-    """★ 每季补贴（默认 120）是**转移支付**，不是产值。
+    """★ 每季补贴（E1: Q1–Q4 各 1200、Q5 起 300）是**转移支付**，不是产值。
 
     断言三件事：
-      1. `r.subsidy` 等于 config 的每季补贴值（`cfg.quarterly_subsidy`，默认 120）；
+      1. `r.subsidy` 等于 config 的本季补贴值
+         （`cfg.subsidy_for_quarter(state.world.quarter)`，与 pipeline 同一条公式）；
+         本用例 Q1 → 命中 early 档 = 1200；
       2. 补贴**不**出现在 `sales_revenue`（销售收入只来自卖货）；
       3. 补贴**不**出现在 `value_added`（GDP 不含转移支付）。
     """
@@ -468,8 +470,9 @@ def test_m1_subsidy_is_transfer_not_output():
     pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
     r = st.raw_reports["p1"]
 
-    assert abs(r.subsidy - cfg.quarterly_subsidy) < 1e-9, (
-        f"报告里的补贴应等于 cfg.quarterly_subsidy（{cfg.quarterly_subsidy}），"
+    expected = cfg.subsidy_for_quarter(1)   # Q1 → early 档
+    assert abs(r.subsidy - expected) < 1e-9, (
+        f"报告里的补贴应等于 cfg.subsidy_for_quarter(1)（{expected}），"
         f"实得 {r.subsidy}"
     )
     # 甲区运营锚点：销售收入 94.08、增加值 66 —— 都不含补贴
@@ -479,6 +482,65 @@ def test_m1_subsidy_is_transfer_not_output():
     assert abs(r.value_added - 66.0) < TOL, (
         f"★ 补贴不得混进增加值：应为 66，实得 {r.value_added}"
     )
+
+
+def test_subsidy_early_then_baseline():
+    """★ E1（2026-10-18）：Q1–Q4 发 early_quarterly_subsidy、Q5 起回落 quarterly_subsidy。
+
+    本测试**不依赖** config 的具体数值：
+      1. `Config.subsidy_for_quarter(q)` 在 q ≤ early_subsidy_quarters 时 = early_quarterly_subsidy，
+         否则 = quarterly_subsidy；
+      2. 当 quarter 跨过 early_subsidy_quarters 边界时，pipeline 发出的 `r.subsidy` 会跟着切换；
+      3. 不管哪一档，`sales_revenue` 与 `value_added` 都**不含补贴**（M1 锚点）。
+
+    现场把 `state.world.quarter` 推进到 cfg.early_subsidy_quarters + 1，
+    与 `Config.subsidy_for_quarter` 各点交叉验证。
+    """
+    from engine import pipeline
+
+    cfg = load_config()
+    # config 必须确实配了两档 —— 否则这条用例就是在打空气，立刻报警。
+    assert cfg.early_subsidy_quarters >= 1, (
+        "本用例要求 config.economy.early_subsidy_quarters ≥ 1；E1 配置是 4。"
+    )
+    assert cfg.early_quarterly_subsidy != cfg.quarterly_subsidy, (
+        "本用例要求 early 档与基准档不同值；E1 配置是 1200 vs 300。"
+    )
+
+    # ── ① 直接验纯函数本身 ─────────────────────────────
+    assert abs(cfg.subsidy_for_quarter(1) - cfg.early_quarterly_subsidy) < 1e-9
+    assert abs(cfg.subsidy_for_quarter(cfg.early_subsidy_quarters)
+               - cfg.early_quarterly_subsidy) < 1e-9, (
+        "边界 quarter == early_subsidy_quarters 仍在 early 档"
+    )
+    assert abs(cfg.subsidy_for_quarter(cfg.early_subsidy_quarters + 1)
+               - cfg.quarterly_subsidy) < 1e-9, (
+        "边界 quarter == early_subsidy_quarters + 1 应回落到基准档"
+    )
+
+    # ── ② 跑 Q1：early 档落进 report.subsidy，但不进 sales_revenue/value_added ──
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    pipeline.advance(st, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
+    r1 = st.raw_reports["p1"]
+    assert abs(r1.subsidy - cfg.early_quarterly_subsidy) < 1e-9, (
+        f"Q1 应发 early 档 {cfg.early_quarterly_subsidy}，实得 {r1.subsidy}"
+    )
+    assert abs(r1.sales_revenue - 94.08) < 1e-9, "Q1 销售收入不含补贴"
+    assert abs(r1.value_added - 66.0) < TOL, "Q1 增加值不含补贴"
+
+    # ── ③ 把 quarter 推到边界之后，再跑一季：应回落基准档 ──
+    #    make_state 默认 quarter=1；easy path 是直接改 world.quarter
+    #    （引擎不关心 age，只看 world.quarter 这一个判据）。
+    st2 = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
+    st2.world.quarter = cfg.early_subsidy_quarters + 1     # 例如 4+1 = 5
+    pipeline.advance(st2, {"p1": plain_plan("p1", "0,0", u=1.0)}, cfg)
+    r2 = st2.raw_reports["p1"]
+    assert abs(r2.subsidy - cfg.quarterly_subsidy) < 1e-9, (
+        f"Q{cfg.early_subsidy_quarters + 1} 应回落基准档 {cfg.quarterly_subsidy}，"
+        f"实得 {r2.subsidy}"
+    )
+    assert abs(r2.sales_revenue - 94.08) < 1e-9, "Q5+ 销售收入不含补贴"
+    assert abs(r2.value_added - 66.0) < TOL, "Q5+ 增加值不含补贴"
 
 
 def test_m1_production_is_the_supply():

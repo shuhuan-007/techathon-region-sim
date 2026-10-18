@@ -182,6 +182,9 @@ _ASSET_KEY_CASES = [
     (PlotType.INDUSTRY, 3, "H-J+", "工业服务业3"),    # ⚠️ 三级**多**"业"字（美术笔误，保持）
     (PlotType.INDUSTRY, 3, "I", "工业高技术3"),
     (PlotType.INDUSTRY, 3, "H-A", None),              # lv3 机械路线必须带 +
+    # ★ 2026-10-18：研究地块（最小存储改动）—— industry L2 product='研究'
+    #    → 「研究」模型；内部仍编码为 INDUSTRY/L2，但建模用独立「研究」目录。
+    (PlotType.INDUSTRY, 2, "研究", "研究"),
 ]
 
 
@@ -199,6 +202,14 @@ def test_asset_key_adapter_accepts_string_plot_type():
     assert report.asset_key("agriculture", 1, "A") == "农业1"
     assert report.asset_key("research", 2, None) is None
     assert report.asset_key("industry", 3, "H-J+") == "工业服务业3"
+
+
+def test_industry_l2_research_product_maps_to_research_dir():
+    """★ 2026-10-18 最小存储改动：研究地块内部编码为
+    `industry L2 product='研究'`，但建模必须用「研究」目录，不是机械二级。
+    """
+    assert report.asset_key(PlotType.INDUSTRY, 2, "研究") == "研究"
+    assert report.asset_key("industry", 2, "研究") == "研究"
 
 
 def test_industry_service3_keeps_art_typo():

@@ -550,6 +550,11 @@ def test_state_context_includes_actionable_capabilities():
     assert "0,0" in user, f"空地表应列出 0,0：{user}"
     # 末尾硬提示（模型最容易犯的错）
     assert "漏写=不开工" in user, f"缺「漏写=不开工」硬提示：{user}"
+    # ★ 2026-10-18：开局应带「至少 3 块」建议块（用户拍板 AI 3–4 块）
+    assert "[开局建议]" in user, (
+        f"开局（0 地块 + 现金 1200）必须带 [开局建议] 块：{user}"
+    )
+    assert "3 块" in user, f"[开局建议] 要落到「至少 3 块」：{user}"
 
 
 def test_state_context_keeps_original_seven_keys():
@@ -1015,6 +1020,35 @@ def test_current_plan_is_shown_to_model_in_edit_mode():
     assert "没提到" in user or "只输出改动" in user, (
         f"要给「只输出改动」的硬要求：{user}"
     )
+
+
+def test_draft_instruction_mentions_opening_3_to_4_plots():
+    """★ 2026-10-18 用户拍板：AI 开局不能只给 2 块。起草指令必须告诉模型
+    「开局优先 3–4 块（至少 1 农 + 1 资 + 1 工）、不要只给 2 块、
+    仍必须 ≤ 现金、引擎会缩量」—— 否则模型默认铺 2 块就跑不动。
+    """
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps(_valid_draft_json(), ensure_ascii=False),
+    ))
+    ai_host.advise(session, "p1", "帮我起草开局", client=fake, draft=True)
+    user = fake.calls[0][1]["content"]
+    # ★ 必须含「3–4 块」（用户拍板的原话； en-dash）
+    assert "3–4 块" in user, (
+        f"起草指令缺「3–4 块」开局块数提示：\n{user[-1500:]}"
+    )
+    # ★ 必须含「不要只给 2 块」（对应真跑故障）与「至少 1 农+1 资+1 工」
+    assert "不要只给 2 块" in user, f"起草指令缺「不要只给 2 块」：\n{user[-1500:]}"
+    assert "1 农业" in user and "1 资源" in user and "1 工业" in user, (
+        f"起草指令缺开局类型组合（农+资+工）：\n{user[-1500:]}"
+    )
+    # ★ 数字仍须守真：≤ 现金、引擎会缩量
+    assert "≤ 现金" in user or "≤现金" in user, (
+        f"起草指令缺「总成本 ≤ 现金」约束：\n{user[-1500:]}"
+    )
+    assert "缩量" in user, f"起草指令缺「引擎会缩量」口径：\n{user[-1500:]}"
 
 
 def test_draft_instruction_mentions_why_and_remove_builds():

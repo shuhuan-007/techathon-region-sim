@@ -63,6 +63,13 @@ async function refresh(){
       const w = await api("GET", "/api/build_options");
       WORKS = w.works;
     }
+    /* ★ 2026-10-18 · P0-C：行动阶段（collecting）且本地计划为空 → 默认全开。
+       planEmpty() 是闸门 —— 玩家本季已手动改过的计划不会被覆盖；
+       btn-new / btn-load / btn-next 都先 resetPlan() 再进这里，天然"首次"。 */
+    if (STATE.phase === "collecting" && primeRunAll()){
+      renderPlots();
+      schedulePreview();
+    }
     renderAll();
     /* ★ 2026-10-18 · 每季度进入行动阶段（collecting）后弹一次上季月报摘要。
        不阻塞 refresh 主流程；同季只弹一次（localStorage）。失败静默。 */
@@ -100,7 +107,13 @@ function renderTop(){
   const jobs = (s.jobs != null) ? s.jobs : 0;
   const popc = (s.population_count != null) ? s.population_count : 0;
   $("s-pop").textContent = `${fmt(jobs,1)} / ${fmt(popc,1)}`;
-  $("s-eff").textContent = s.efficiency == null ? "—" : "×" + fmt(s.efficiency);
+  /* ★ 2026-10-18 平均效率兜底：plan 已填（primeRunAll 或玩家手动）后
+     STATE 里的 s.efficiency 还没因新试算回写 → 用最近一次试算 SIM.last.efficiency
+     顶上。STATE.efficiency（即"已经提交的那季"的效率）优先。 */
+  const effShow = (s.efficiency != null) ? s.efficiency
+                : (SIM && SIM.last && typeof SIM.last.efficiency === "number")
+                  ? SIM.last.efficiency : null;
+  $("s-eff").textContent = effShow == null ? "—" : "×" + fmt(effShow);
 
   const phaseName = {collecting:"行动阶段", resolving:"结算中", report:"月报阶段"}[s.phase] || s.phase;
   $("s-phase").textContent = phaseName;
@@ -116,6 +129,12 @@ function renderTop(){
   renderPreviewLine();
 }
 
+/* 研究地块内部是 industry L2 product='研究'；展示时按“研究”而不是“工业”。 */
+function plotDisplayType(p){
+  if (p && String(p.product || "") === "研究") return "研究";
+  return TYPE_CN[p.plot_type] || p.plot_type || "";
+}
+
 /* ── 地块安排(开工比例)───────────────────────────────── */
 function renderPlots(){
   const body = $("plots-body");
@@ -128,10 +147,24 @@ function renderPlots(){
     return;
   }
   body.innerHTML = plots.map(p => {
+    /* ★ 2026-10-18 · P0-A：在建/升级中的地块**锁定**——
+         不渲染 slider；顺手把本地草稿里可能残留的这条开工清掉，
+         并在 work-info 侧写清还剩几季（construction_left 为 null 的
+         "影子"地块引擎没给工期，只写"在建中"，不编数字）。 */
+    if (p.status === "constructing"){
+      if (plan.plot_plans[p.plot_id]) delete plan.plot_plans[p.plot_id];
+      const left = (p.construction_left != null) ? `（还剩 ${p.construction_left} 季）` : "（在建中）";
+      return `<tr>
+        <td>${p.plot_id}<br><span class="muted">${plotDisplayType(p)}${p.level} · ${p.product||"—"}</span></td>
+        <td><span class="tag ${p.status}">在建</span></td>
+        <td class="num">${p.efficiency ? "×"+fmt(p.efficiency.efficiency) : "—"}</td>
+        <td><span class="muted">不可开工${left}</span></td>
+      </tr>`;
+    }
     const cur = plan.plot_plans[p.plot_id];
     const u = cur ? cur.u : 0;
     return `<tr>
-      <td>${p.plot_id}<br><span class="muted">${TYPE_CN[p.plot_type]||""}${p.level} · ${p.product||"—"}</span></td>
+      <td>${p.plot_id}<br><span class="muted">${plotDisplayType(p)}${p.level} · ${p.product||"—"}</span></td>
       <td><span class="tag ${p.status}">${p.status==="running"?"运行":"在建"}</span></td>
       <td class="num">${p.efficiency ? "×"+fmt(p.efficiency.efficiency) : "—"}</td>
       <td><input type="range" min="0" max="100" step="5" value="${Math.round(u*100)}"
@@ -182,7 +215,9 @@ function renderBuilds(){
     </tr></thead><tbody>` +
     builds.map((b, i) => {
       const pid  = (b && b.plot_id != null) ? String(b.plot_id) : "—";
-      const type = (b && b.plot_type) ? (TYPE_CN[b.plot_type] || String(b.plot_type)) : "—";
+      const type = (b && String(b.product || "") === "研究")
+        ? "研究"
+        : (b && b.plot_type) ? (TYPE_CN[b.plot_type] || String(b.plot_type)) : "—";
       const lvl  = (b && b.target_level != null) ? String(b.target_level) : "—";
       /* ★ 2026-10-18：产物/路线不再原样堆字符；按子类型名显示。
            H-A=机械—农业 / H-F=机械—资源 / H-G=机械—工业 / H-J=机械—服务；
@@ -301,32 +336,68 @@ function renderQuota(){
 }
 
 /* ── 收支预览 ─────────────────────────────────────────── */
+/* ★ 2026-10-18 · P0-B：**实时**预览 —— 不等提交。
+   数据源优先级：SIM.last（/api/simulate 只读试算的 report）→ STATE.projection。
+     · 计划非空且 SIM.last 还没回来 → 明确显示「试算中…」（不是"提交后显示"）；
+     · SIM.fail → 把真实原因（资金不足/校验问题）摆上行，不只是"暂不可用"；
+     · 计划空 → 回到旧行为：显示 STATE.projection（上季试算/报错），或"提交计划后显示"。 */
 function renderProj(){
-  const p = STATE.projection;
-  if (!p){
-    $("proj-body").innerHTML = `<tr><td class="muted">提交计划后显示。</td></tr>`;
-    $("proj-note").textContent = "—";
+  /* 计划空：SIM 已被 schedulePreview 清空，走 STATE.projection。 */
+  if (planEmpty()){
+    const p = STATE.projection;
+    if (!p){
+      $("proj-body").innerHTML = `<tr><td class="muted">提交计划后显示。</td></tr>`;
+      $("proj-note").textContent = "—";
+      return;
+    }
+    if (p.error){
+      $("proj-body").innerHTML = `<tr><td class="muted">无法计算</td></tr>`;
+      $("proj-note").textContent = p.error;
+      return;
+    }
+    return _renderProjRows(p, false);
+  }
+
+  /* 计划非空：优先 SIM.last；没回来 → 试算中/失败原因。 */
+  if (!SIM.last){
+    if (SIM.fail){
+      const first = String(SIM.reason || "试算没跑通").split("\n")[0].trim();
+      $("proj-body").innerHTML =
+        `<tr><td class="muted">预览暂不可用</td><td class="num" style="color:var(--warn)">${esc(first || "试算没跑通")}</td></tr>`;
+      $("proj-note").textContent = SIM.reason || "";
+      return;
+    }
+    $("proj-body").innerHTML = `<tr><td class="muted">试算中…</td></tr>`;
+    $("proj-note").textContent = "（/api/simulate 只读试算，不提交计划）";
     return;
   }
-  if (p.error){
-    $("proj-body").innerHTML = `<tr><td class="muted">无法计算</td></tr>`;
-    $("proj-note").textContent = p.error;
-    return;
-  }
+  return _renderProjRows(SIM.last, true);
+}
+
+/* 真正摆行的那一段（SIM.last 与 STATE.projection 共用）。
+   isSim=true 时来源是 QuarterReport.to_dict()：它没有 net_cash 键，
+   但引擎 projection 的 net_cash 本来就是 cash_after − cash_before
+   （engine/report.py:550），此处按**同一口径**补齐，公式不自创。 */
+function _renderProjRows(p, isSim){
+  const netCash = (p.net_cash != null)
+    ? p.net_cash
+    : ((p.cash_after != null && p.cash_before != null) ? p.cash_after - p.cash_before : null);
   const rows = [
     ["物资款", fmt(p.materials_cost)],
     ["工资（税前）", fmt(p.wages)],
     ["经营费", fmt(p.operating)],
     ["一次性扣款", "<b>" + fmt(p.total_deduction) + "</b>"],
     ["销售收入（本季价）", fmt(p.sales_revenue)],
-    ["工资税回流", fmt(p.wage_tax_refund)],
+    /* ★ 2026-10-18 · P0-F：工资税回流是**收入**，标"+"。 */
+    ["工资税回流", "（收入，+" + fmt(p.wage_tax_refund) + "）"],
     ["期末现金", "<b>" + fmt(p.cash_after) + "</b>"],
-    ["本季盈亏", (p.net_cash >= 0 ? "+" : "") + fmt(p.net_cash)],
+    ["本季盈亏", (netCash != null ? (netCash >= 0 ? "+" : "") + fmt(netCash) : "—")],
     ["增加值 GDP（参考价）", fmt(p.value_added)],
   ];
   $("proj-body").innerHTML = rows.map(r =>
     `<tr><td class="muted">${r[0]}</td><td class="num">${r[1]}</td></tr>`).join("");
   $("proj-note").textContent =
+    (isSim ? "只读试算（/api/simulate，未提交）。" : "") +
     "GDP 用固定参考价 P0，与销售收入（本季成交价）是两个口径。";
 }
 
@@ -480,7 +551,8 @@ const PRODUCT_SUBTYPE_CN = {
   "H-F+": "自动化—资源",
   "H-G+": "自动化—工业",
   "H-J+": "自动化—服务",
-  "I"   : "高技术",
+  "I"   : "I（高技术）",
+  "研究" : "研究",
 };
 function productLabel(p){
   if (p == null || p === "") return "";
@@ -496,20 +568,33 @@ function productRowLabel(w){
   const allMachine = w.products.every(p => PRODUCT_SUBTYPE_CN[p] && String(p).startsWith("H-"));
   return allMachine ? "二级地块类型" : "产出";
 }
-/* ★ 2026-10-18：建造/升级面板按【二级地块类型】展示。
-   本轮 UI 直接隐藏研究线（research）—— ind_1_2_research / ind_2_3_high
-   不给玩家选，避免研究线陷阱（数值/解锁节奏另排）。 */
+/* ★ 2026-10-18（修订）：建造/升级面板按【二级地块类型】展示，同时开放研究线。
+   工业升级路线分流：
+     · level1(G) → 同时给两条升级路线：ind_1_2_machine（机械四选一）
+       与 ind_1_2_research（6季，不产商品 → 研究）；
+     · level2 当前 p.product === "研究" → 只给 ind_2_3_high（研究→三级 I）；
+     · level2 当前是机械（H-A/H-F/H-G/H-J）→ 只给 ind_2_3_machine
+       （升到对应 H-*+，不可互转）。
+   新建 / 农业 / 资源 / 服务照旧（route 过滤只对工业升级分支生效）。 */
 function worksForCell(){
   const p = (STATE.plots || []).find(x => x.plot_id === selected);
   if (!p){
     // 空地 → 只能"新建一级"
-    return WORKS.filter(w => w.from_level === 0 && w.route !== "research");
+    return WORKS.filter(w => w.from_level === 0);
   }
   if (p.status === "constructing") return [];
-  return WORKS.filter(w =>
-    w.plot_type === p.plot_type &&
-    w.from_level === p.level &&
-    w.route !== "research");
+  const base = WORKS.filter(w =>
+    w.plot_type === p.plot_type && w.from_level === p.level);
+  if (p.plot_type !== "industry") return base;   // 农/资/服照旧
+  if (p.level === 1) return base;                // G → 机械 + 研究 两条都给
+  if (p.level === 2){
+    const cur = p.product;
+    if (cur === "研究"){
+      return base.filter(w => w.work_id === "ind_2_3_high");
+    }
+    return base.filter(w => w.work_id === "ind_2_3_machine");
+  }
+  return base;
 }
 
 function renderBuildPanel(){
@@ -539,10 +624,19 @@ function renderBuildPanel(){
     return;
   }
 
-  $("sel-work").innerHTML = list.map(w =>
-    `<option value="${w.work_id}">${w.label}　·　${w.cash} 金 + ${
-      Object.entries(w.materials).map(([g,q])=>`${g}×${q}`).join("+")}　·　${w.quarters} 季</option>`
-  ).join("");
+  /* ★ 2026-10-18 · 工程行的显示标签（仅显示层，不改后端 label）：
+       ind_1_2_research 改写成"二级研究（6季，不产商品）"——玩家一眼知道
+       这条线不是机械、本季不产商品；
+       ind_2_3_high 改写成"研究→三级 I（8季）"——点明研究线的终点是 I。 */
+  const WORK_LABEL_OVERRIDE = {
+    ind_1_2_research: "二级研究（6季，不产商品）",
+    ind_2_3_high:     "研究→三级 I（8季）",
+  };
+  $("sel-work").innerHTML = list.map(w => {
+    const lbl = WORK_LABEL_OVERRIDE[w.work_id] || w.label;
+    return `<option value="${w.work_id}">${lbl}　·　${w.cash} 金 + ${
+      Object.entries(w.materials).map(([g,q])=>`${g}×${q}`).join("+")}　·　${w.quarters} 季</option>`;
+  }).join("");
   $("sel-work").onchange = renderWorkDetail;
   renderWorkDetail();
 }
@@ -560,14 +654,19 @@ function renderWorkDetail(){
 
   /* ★ 2026-10-18 · 产物/类型行按契约三态:
        ① 有 products 候选 → 显示下拉，标签按 二级地块类型/产出 动态换；
-       ② products 空 + fixed_product（如工业 1 级新建 G）→ 不显示下拉；
-       ③ products 空 + product_from_current=true（机械 2→3）→ 不显示下拉，
+       ② products 空 + fixed_product（工业新建 G、研究 1→2"研究"、研究 2→3 I）
+          → 隐藏下拉，并在 work-info 写明"固定产出：研究/I/G"；
+       ③ products 空 + product_from_current=true（机械 2→3）→ 隐藏下拉，
           只显示"将升级为 H-A+（由当前 H-A 决定）"；
        ④ products 空 + fixed=null + from_current 假 → 强制隐藏并清空 sel-product，
           防止沿用上一块农业的 A/B/C/D 选项（服务/资源升级就是这条路径）。 */
   const opts = Array.isArray(w.products) ? w.products : [];
   const fromCur = w.product_from_current === true;
+  const fixed = (w.fixed_product != null && w.fixed_product !== "")
+              ? String(w.fixed_product) : null;
   const selEl = $("sel-product");
+  /* 默认先清空：除"有下拉候选"之外的所有路径都不沿用上一格残留。 */
+  selEl.innerHTML = "";
   if (opts.length){
     $("row-product").classList.remove("hidden");
     const lbl = productRowLabel(w);
@@ -576,22 +675,35 @@ function renderWorkDetail(){
     selEl.innerHTML = opts.map(p =>
       `<option value="${esc(String(p))}">${esc(productLabel(p))}（${esc(String(p))}）</option>`
     ).join("");
+    /* ★ 2026-10-18 · P0-E（农业 UI）：选择/切换产物后 btn-build **立即可用**
+         —— 选产物是本地动作，不要求先提交计划，也没有别的门槛。 */
+    selEl.onchange = () => { $("btn-build").disabled = false; };
   } else {
+    selEl.onchange = null;
+    /* ②③④ 全部走这里：固定产物 / 由当前决定 / 服务资源无产物 —— 统一隐藏下拉。 */
     $("row-product").classList.add("hidden");
-    /* 强制清空：不再让隐藏的下拉残留上一格（农业）选过的值。 */
-    selEl.innerHTML = "";
   }
 
   // ★ 缺陷 3：用 <b> 强调"原价"，不再把 Markdown 的 ** 留在界面上
   let info = `${w.label}　现金 ${w.cash}（<b>原价</b>）　物资 ${
       Object.entries(w.materials).map(([g,q])=>`${g}×${q}`).join(" + ")}　工期 ${w.quarters} 季`;
-  if (fromCur){
-    /* 机械 2→3：当前 product 决定目标（H-A → H-A+），不显示下拉，只写推断。 */
+  if (fixed){
+    /* ② 固定产物：工业 1 级新建固定 G；研究 1→2 固定"研究"（不产商品）；
+       研究 2→3 固定 I。 */
+    info += `<br><span class="muted">固定产出：<b>${esc(productLabel(fixed))}</b>（${esc(fixed)}）</span>`;
+  } else if (fromCur){
+    /* ③ 机械 2→3：当前 product 决定目标（H-A → H-A+），不显示下拉，只写推断。 */
     const cur = (STATE.plots || []).find(x => x.plot_id === selected);
     const curProd = cur && cur.product;
     const next = curProd ? curProd + "+" : null;
     info += `<br><span class="muted">将升级为 <b>${esc(next || "（当前地块无产物）")}</b>${
       curProd ? `（由当前 ${esc(String(curProd))} 决定）` : ""}</span>`;
+  } else if (!opts.length){
+    /* ★ 2026-10-18 · P0-D（服务/资源 UI）：products 空 + fixed/fromCurrent 都没有
+         → row-product 已在上面隐藏并清空；这里**明写**"无产物"，btn-build
+         仍可提交（product=null 由 btn-build 的契约分支兜住）。
+         不再出现"请选择产物"这种既不正确又点不下去的状态。 */
+    info += `<br><span class="muted">无产物（服务/资源不产商品）。</span>`;
   }
   $("work-info").innerHTML = info;
   $("btn-build").disabled = false;
@@ -628,7 +740,8 @@ $("btn-build").onclick = async () => {
 
   /* ★ 2026-10-18 · product 取值（契约）：
        ① 有 products 候选 → 用下拉原值（H-A/H-F/…/A/B/C/D）；
-       ② 否则 fixed_product → 用它（如工业 1 级新建 G、研究 1→2）；
+       ② 否则 fixed_product → 用它（工业新建 G、研究 1→2 固定"研究"、
+          研究 2→3 固定"I"）；
        ③ 否则 product_from_current=true（机械 2→3）→ 当前地块 product + "+"
           （H-A → H-A+；当前为 null 时退化为 null，由后端兜校验）；
        ④ 否则 → null（资源/服务本来就不该带产物），
@@ -644,12 +757,6 @@ $("btn-build").onclick = async () => {
     const cur = (STATE.plots || []).find(x => x.plot_id === selected);
     const curProd = cur && cur.product;
     product = curProd ? String(curProd) + "+" : null;
-  }
-  /* 兜底：研究线在本 UI 被 worksForCell 过滤，理论上到不了这里；
-     但万一（WORKS 缓存+selected/__proto__ 等边缘）也绝不给玩家选 research。 */
-  if (w.route === "research"){
-    toast("本轮 UI 未开放研究线（research）。", "warn");
-    return;
   }
 
   plan.builds.push({
@@ -705,6 +812,20 @@ function planEmpty(){
       && !plan.contracts.length;
 }
 
+/* ★ 2026-10-18 · P0-C：**默认全开** —— 把所有 status==="running" 的地块
+   以 u=1 填进本地 plan.plot_plans（constructing 不填；它们本季不能排工，
+   渲染层 renderPlots 的"不可开工"分支也会把残留条目清掉）。
+   只在 planEmpty() 时动手 —— 玩家手动改过的计划**绝不**被覆盖。
+   返回 true = 这次真填了（调用方据此补一发只读试算）。 */
+function primeRunAll(){
+  if (!STATE || !Array.isArray(STATE.plots)) return false;
+  if (!planEmpty()) return false;
+  const run = STATE.plots.filter(p => p && p.status === "running");
+  if (!run.length) return false;
+  run.forEach(p => plan.plot_plans[p.plot_id] = {plot_id:p.plot_id, active:true, u:1});
+  return true;
+}
+
 /* 计划变更的**唯一入口**：所有改造计划的代码（建造/口粮/开工/AI 填入/全部满开工…）
    都调它。它只管安排试算，不重画页面（重画由调用方自己做）。 */
 function schedulePreview(){
@@ -718,8 +839,10 @@ function schedulePreview(){
     SIM.fail = false;
     SIM.reason = "";
     renderPreviewLine();
+    renderProj();                // ★ P0-B：SIM 清空 → 预览面板回到 STATE.projection
     return;
   }
+  renderProj();                  // ★ P0-B：计划刚变 → 立刻先切到「试算中…」
   if (SIM.inflight){ SIM.pending = true; return; }   // 在飞 → 排队即可
   if (SIM.timer) clearTimeout(SIM.timer);
   SIM.timer = setTimeout(() => { SIM.timer = null; runPreview(); }, SIM_DEBOUNCE_MS);
@@ -755,6 +878,8 @@ async function runPreview(){
     SIM.inflight = false;
   }
   renderPreviewLine();
+  renderProj();                    // ★ P0-B：试算成功（SIM.last）/失败（SIM.fail+reason）都立刻上预览面板
+  renderTop();                     /* ★ 2026-10-18：让 ⚡ 平均效率跟上 SIM.last */
   /* 飞行期间排队过一次 → 只补一发最新（不发两轮） */
   if (SIM.pending){ SIM.pending = false; schedulePreview(); }
 }
@@ -794,9 +919,25 @@ function renderPreviewLine(){
 function refreshPreview(){ schedulePreview(); }
 
 function publicPlan(){
+  /* ★ 2026-10-18 · P0-A 防御：提交/试算前把 status==="constructing" 的
+     地块从 plot_plans 里滤掉 —— 在建/升级中不能排工（引擎 validate 也会挡，
+     这里是**不把它带到服务端**的第二道闸）。
+     constructing 集合 = STATE.plots ∪ MAP.virtual_plots（本季已递交的影子）。 */
+  const constructing = new Set();
+  ((STATE && STATE.plots) || []).forEach(p => {
+    if (p && p.status === "constructing") constructing.add(String(p.plot_id));
+  });
+  ((MAP && MAP.virtual_plots) || []).forEach(v => {
+    if (v && v.status === "constructing") constructing.add(String(v.plot_id));
+  });
+  const pp = {};
+  Object.entries(plan.plot_plans || {}).forEach(([pid, v]) => {
+    if (constructing.has(String(pid))) return;
+    pp[pid] = v;
+  });
   return {
     player_id: PLAYER,
-    plot_plans: plan.plot_plans,
+    plot_plans: pp,
     purchases: plan.purchases,
     food: plan.food,
     builds: plan.builds,
@@ -865,6 +1006,13 @@ $("btn-settle").onclick = async () => {
        collecting 状态，不能再被旧的 report 状态覆盖。 */
     if (!enteredNext && eq && eq.state) STATE = eq.state;
     resetPlan();                    // 计划已随结算消耗掉
+    /* ★ 2026-10-18 · P0-C：进入新一季 → 默认全开（只填 running，不碰在建）。
+       planEmpty 闸门保证不覆盖手填；玩家上一季手动"全部停工"的偏好
+       不会跨季残留（计划随结算消耗，resetPlan 后是空）。 */
+    if (STATE.phase === "collecting" && primeRunAll()){
+      renderPlots();
+      schedulePreview();
+    }
     if (!WORKS.length){             // 极少数情况（没走过 refresh）补一次建造选项
       try{ const w = await api("GET", "/api/build_options"); WORKS = w.works; }catch(_e){}
     }
@@ -925,6 +1073,12 @@ $("btn-next").onclick = async () => {
   try{
     await api("POST", "/api/next_quarter", {game:GAME, player:PLAYER});
     resetPlan(); selected = null;
+    /* ★ 2026-10-18 · P0-C：refresh() 内部已按 collecting+planEmpty 默认全开，
+       这里补一道（若 refresh 因故被跳过/未来改动，按钮本身也默认全开）。 */
+    if (STATE && STATE.phase === "collecting" && primeRunAll()){
+      renderPlots();
+      schedulePreview();
+    }
     await refresh();
   }catch(e){ fail(e); }
 };

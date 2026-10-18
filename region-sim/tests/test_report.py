@@ -243,13 +243,22 @@ def test_no_plan_gives_none_not_zero():
     """★ 没提交计划 → 本季预览一律 `None`，**不是 0**。
 
     ⚠️ 给 0 会被读成"本季确实不产/不赚钱"，那是在**编造事实**。
+
+    ★ 2026-10-18 拍板（用户授权改语义）：**`efficiency` 是例外**。
+       顶栏「⚡ 平均效率」是状态速览，不是"本季预览"，
+       玩家希望就算没提交计划也能看到「**如果全开工，平均效率能到多少**」。
+       引擎按「所有 RUNNING 地块 u=1 全开」给一个**参考数**；
+       不是"0"、不是 None —— 而是引擎认真算出来的效率数值。
+       population / projection / output_preview / u 仍是 None（绝不能编）。
     """
     cfg = load_config()
     st = state_with(plot("0,0"))
     out = report.build_state(st, "p1", cfg, plan=None)
 
     assert out["population"] is None, "没计划时人口应为 None，不是 0"
-    assert out["efficiency"] is None, "没计划时平均效率应为 None，不是 0"
+    # ★ 2026-10-18：efficiency 改为「RUNNING 全开平均」参考数（不是 None/0）
+    assert out["efficiency"] is not None, "没计划时平均效率仍应给参考全开数"
+    assert isinstance(out["efficiency"], (int, float)) and out["efficiency"] > 0
     assert out["projection"] is None, "没计划时本季收支应为 None，不是 0"
     assert out["plots"][0]["u"] is None, "没计划时开工比例应为 None，不是 0"
     assert out["plots"][0]["output_preview"] is None

@@ -11,7 +11,8 @@
 
     format_capabilities(cap) -> str
         紧凑中文文本，块名固定（`[现金/预算]` `[空地]` `[推荐空地]` `[可建]`
-        `[可开工]` `[在建]` `[人口/口粮]` `[口粮规则]`），供提示词直接拼接。
+        `[可开工]` `[可升级]` `[在建]` `[人口/口粮]` `[口粮规则]`），
+        供提示词直接拼接。
 
     recommend_build_cells(state, player_id, cfg, *, limit=5, plot_type=None) -> list
         空地按**引擎真实邻接加成**排序（2026-10-18 新增）。
@@ -267,6 +268,104 @@ def _build_options(state: GameState, player, cfg: Config, quota: dict[str, dict]
     return rows
 
 
+#: 研究地块的内部编码（与 server / validate 同口径，但**不 import server**）
+RESEARCH_PRODUCT = "研究"
+
+
+def _upgrade_options(state: GameState, player, cfg: Config) -> list[dict]:
+    """每块**可升级**（running 且 level<3）地块当前能走的工程。
+
+    背景（2026-10-18）：AI 秘书只看到「新建工程」，看不到自己已有地块的
+    升级选项，于是永远不会主动起草「G→二级机械 / G→二级研究 / 二级→三级」。
+    本块把这张表喂进去。
+
+    行形状（每项字段齐）：
+
+        plot_id / plot_type / level / product          —— 起点地块
+        work_id / label / target_level                 —— 工程行（来自 construction.works）
+        cash / materials / quarters                    —— 工程数值（原样，无名额折扣）
+        products          —— 需要玩家选的产出（无下拉 → []）
+        fixed_product     —— 建后固定的产出（G→研究→「研究」、研究→三级→I）
+        product_from_current —— True 时 target = 当前 product + '+'（ind_2_3_machine）
+
+    判定全部走 `construction.load_works()`（按 plot_type + from_level 筛）——
+    工业的特殊性（1→2 两路线互斥、2→3 由**当前**二级类型决定）在这里
+    用与 `find_work_for_build` 同口径的规则拆：
+
+        · 工业 L1（产 G）：同时给 machine（products=H-A/H-F/H-G/H-J）
+          与 research（fixed_product=研究，6 季）两条；
+        · 工业 L2 产「研究」：只给 ind_2_3_high（fixed_product=I）；
+        · 工业 L2 产 H-A/H-F/H-G/H-J：只给 ind_2_3_machine
+          （product_from_current=True，目标是当前 product + '+'，不可互转）；
+        · 农业 / 资源 / 服务：一条线升到底；农业每档可重选 A/B/C/D，
+          资源 / 服务 products=[]。
+
+    ⚠️ **只读**：不改 state；升级工程不吃开局减免名额（§5.3 只作用于新建
+       一级），所以这里不列折后价。
+    """
+    works = C.load_works(cfg)
+    rows: list[dict] = []
+    for plot_id in _sorted_plot_ids(player.plots):
+        plot = player.plots[plot_id]
+        running = plot.status is PlotStatus.RUNNING
+        if not (running and plot.level < 3):
+            continue
+        candidates = [
+            w for w in works.values()
+            if not w.is_new
+            and w.plot_type is plot.plot_type
+            and w.from_level == int(plot.level)
+        ]
+        for w in sorted(candidates, key=lambda x: (x.to_level, x.work_id)):
+            products: list[str] = []
+            fixed_product: Optional[str] = None
+            product_from_current = False
+
+            if w.plot_type is PlotType.INDUSTRY:
+                if w.route == "machine" and w.from_level == 1:
+                    # 二级机械：四选一（H-A/H-F/H-G/H-J），选定不可互转
+                    products = list(buildable_products(
+                        w.plot_type, w.to_level, route=w.route,
+                    ))
+                elif w.route == "research" and w.from_level == 1:
+                    # 二级研究线：固定产出「研究」，不产商品
+                    fixed_product = RESEARCH_PRODUCT
+                elif w.route == "research" and w.from_level == 2:
+                    # 研究→三级高技术：固定 I；**只有**研究地块能走
+                    if plot.product != RESEARCH_PRODUCT:
+                        continue
+                    fixed_product = "I"
+                elif w.route == "machine" and w.from_level == 2:
+                    # 机械→对应 + ：**由当前地块类型决定**，跨类型被
+                    # build_product_mismatch 拦；研究地块不能走这条
+                    if plot.product in (None, RESEARCH_PRODUCT):
+                        continue
+                    product_from_current = True
+            elif w.plot_type is PlotType.AGRICULTURE:
+                # 升级时允许重选 A/B/C/D（与 /api/build_options 同口径）
+                products = list(buildable_products(
+                    w.plot_type, w.to_level, route=w.route,
+                ))
+            # 资源 / 服务：没有多路线 → products=[]
+
+            rows.append({
+                "plot_id": plot.plot_id,
+                "plot_type": plot.plot_type.value,
+                "level": int(plot.level),
+                "product": plot.product,
+                "work_id": w.work_id,
+                "label": w.label,
+                "target_level": int(w.to_level),
+                "cash": float(w.cash),
+                "materials": {g: float(q) for g, q in w.materials.items()},
+                "quarters": int(w.quarters),
+                "products": products,
+                "fixed_product": fixed_product,
+                "product_from_current": product_from_current,
+            })
+    return rows
+
+
 def _population_rows(state: GameState, player_id: str, cfg: Config) -> tuple[dict, dict]:
     """人口五项 + 两档口粮需求（纯来自 `compute_population` 与 config 配比）。"""
     pop = P.compute_population(state, player_id, {}, cfg)
@@ -333,6 +432,52 @@ def _food_rule(population: dict, food_need: dict, cfg: Config) -> dict:
         "baseline_need": baseline_need,
         "good_need": good_need,
         "note": note,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# 二-a、[开局建议]（2026-10-18 新增）——「这局还在开局吗？建议几块？」
+# ══════════════════════════════════════════════════════════════════
+#
+# 用户反馈（2026-10-18）：AI 开局只给 2 块地就跑不动了 —— 模型没有
+# 「开局要铺 3–4 块」的先验。用户已批准「AI 3–4 块」；**数字仍以
+# [可建] / [推荐空地] 为准**，本节只给人形规则。
+#
+# 触发条件（三个同时满足）：
+#   · 自己地块 0–1 块（开局刚过 / 还没真铺）；
+#   · 现金 ≥ 1000（按 config.world.opening_cash 给 1200 是稳的）；
+# 触发时输出一句「至少 3 块、优先 1 农业 + 1 资源 + 1 工业」的提示；
+# 现金低于 1000 / 自己地块已经 ≥ 2 → **不再输出本节**（说"没钱铺 3 块"是添乱）。
+
+
+def opening_advice(state: GameState, player_id: str, cfg: Config) -> Optional[dict]:
+    """开局阶段的「铺几块、优先什么类型」建议（**不触发就返回 None**）。
+
+    只读：不改 state。返回形状：
+
+        active              —— True（触发时才有这条）
+        own_plot_count      —— 自己地块数（0 或 1）
+        cash                —— 当前现金
+        suggested_plot_count —— 建议本季铺的总数（等于 3）
+        priority_types      —— 「农业 / 资源 / 工业」三键各 1（顺序即优先级）
+        note                —— 一句人话（数字仍以 [可建]/[推荐空地] 为准）
+    """
+    player = state.player(player_id)
+    own_plot_count = len(player.plots)
+    cash = float(player.cash)
+    if own_plot_count >= 2 or cash < 1000.0:
+        return None
+    return {
+        "active": True,
+        "own_plot_count": int(own_plot_count),
+        "cash": cash,
+        "suggested_plot_count": 3,
+        "priority_types": ["agriculture", "resource", "industry"],
+        "note": (
+            "开局建议至少铺 3 块（优先 1 农业 + 1 资源 + 1 工业），"
+            "不要只建 2 块就收手；具体建哪格 / 建得起哪几种，仍以 "
+            "[可建] 与 [推荐空地] 为准。"
+        ),
     }
 
 
@@ -475,9 +620,11 @@ def describe_capabilities(
         empty_total / empty_cells      —— 全图空地（任何人未占的格子）
         plots                          —— 自己的地块（含 can_run / can_upgrade）
         build_options                  —— 新建工程（含材料价与折后现金）
+        upgrade_options                —— 已有地块的**升级**工程（工业分两条线）
         quota                          —— 开局减免名额
         population / food_need         —— 岗位、人口、两档口粮需求
         food_rule                      —— 口粮规则（F 与两档逐商品需求量 + 人话）
+        opening_advice                 —— ★ 开局「至少 3 块、优先农+资+工」建议（不触发为 None）
         recommended_build_cells        —— 按邻接加成排序的推荐空地（前 5）
 
     `max_empty` 只影响 `empty_cells` 的截断；`empty_total` 永远是全量。
@@ -508,10 +655,12 @@ def describe_capabilities(
         "empty_cells": empty_all[:limit],
         "plots": _plot_rows(player),
         "build_options": _build_options(state, player, cfg, quota),
+        "upgrade_options": _upgrade_options(state, player, cfg),
         "quota": quota,
         "population": population,
         "food_need": food_need,
         "food_rule": _food_rule(population, food_need, cfg),
+        "opening_advice": opening_advice(state, player_id, cfg),
         "recommended_build_cells": recommend_build_cells(state, player_id, cfg),
     }
 
@@ -520,9 +669,10 @@ def describe_capabilities(
 # 四、公开接口 2：紧凑中文文本（提示词直接拼）
 # ══════════════════════════════════════════════════════════════════
 #
-# ⚠️ 块名（[现金/预算] [空地] [推荐空地] [可建] [可开工] [在建] [人口/口粮]
-#    [口粮规则]）是**契约**：主实现（server/ai_host.py 的起草要求）会按这些
-#    名字指代，别改字；已有的 [人口/口粮] 块**不许删**（旧测试依赖）。
+# ⚠️ 块名（[现金/预算] [空地] [推荐空地] [可建] [可开工] [可升级] [在建]
+#    [人口/口粮] [口粮规则]）是**契约**：主实现（server/ai_host.py 的起草
+#    要求）会按这些名字指代，别改字；已有的 [人口/口粮] 块**不许删**
+#    （旧测试依赖）。
 # ⚠️ 文本里**不许**出现「起草」/「draft」：默认路径的回归测试要保证
 #    不传 draft 时 user message 里没有这两个词（本快照默认也会拼进去）。
 
@@ -589,6 +739,52 @@ def _running_line(cap: dict) -> str:
     return "[可开工] " + " ".join(parts) + "（u 取 0–1）"
 
 
+def _upgrade_lines(cap: dict) -> list[str]:
+    """`[可升级]` —— 已有地块的升级选项（不是新建；新建看 [可建]）。
+
+    形如：
+
+        [可升级] 3,4 工业1 G → 二级机械(H-A/H-F/H-G/H-J,2季/240) / 二级研究(6季/300)；
+                  5,4 农业1 A → 农业1→2(产出A/B/C/D,2季/80)
+
+    · 一地块一段，多工程用「/」分隔，地块之间用「；」；
+    · 没有可升级地块写 `[可升级] 无`（**不许整块缺席**，与 [可开工] 同口径）；
+    · 工业 L2 机械 → 目标是「当前产物+」（由当前决定，不能换线）；
+    · 数字 = 工程表原值（升级不吃开局减免名额）。
+    """
+    rows = cap.get("upgrade_options") or []
+    if not rows:
+        return ["[可升级] 无"]
+
+    by_plot: dict[str, list[dict]] = {}
+    for row in rows:
+        by_plot.setdefault(row["plot_id"], []).append(row)
+
+    def one_work(row: dict) -> str:
+        cost = f"{_display_num(row['quarters'])}季/{_display_num(row['cash'])}"
+        if row["product_from_current"]:
+            target = f"{row['product']}+"
+            return f"{row['label']}(由当前产{row['product']}→{target},{cost})"
+        if row.get("fixed_product"):
+            return f"{row['label']}({cost})"
+        if row["products"]:
+            options = "/".join(row["products"])
+            return f"{row['label']}({options},{cost})"
+        return f"{row['label']}({cost})"
+
+    parts = []
+    for plot_id in sorted(by_plot, key=_sort_key):
+        items = by_plot[plot_id]
+        head = items[0]
+        product = head["product"] or "—"
+        title = (
+            f"{plot_id} {plot_type_name(head['plot_type'])}{head['level']} {product}"
+        )
+        parts.append(f"{title} → " + " / ".join(one_work(r) for r in items))
+
+    return ["[可升级] " + "；".join(parts)]
+
+
 def _constructing_line(cap: dict) -> str:
     constructing = [
         plot for plot in cap.get("plots") or []
@@ -635,6 +831,20 @@ def _recommended_lines(cap: dict) -> list[str]:
     ]
 
 
+def _opening_advice_lines(cap: dict) -> list[str]:
+    """`[开局建议]` —— 开局才触发；其它阶段整块缺席（不是写「无」）。
+    
+    用户反馈：AI 开局只建 2 块就停手。本节给出**至少 3 块、优先农+资+工**
+    的硬提示；数字仍以 [可建] / [推荐空地] 为准（本节不发明数字）。
+    """
+    advice = cap.get("opening_advice") or {}
+    if not advice.get("active"):
+        return []
+    return [
+        "[开局建议] " + str(advice.get("note") or ""),
+    ]
+
+
 def _food_rule_line(cap: dict) -> str:
     """`[口粮规则]` —— 当前数字 + 公式，专治「把 22 人写成 food={"A":22}」。"""
     rule = cap.get("food_rule") or {}
@@ -659,7 +869,8 @@ def format_capabilities(cap: dict) -> str:
     """把 `describe_capabilities()` 的 dict 压成**紧凑中文文本**（给提示词）。
 
     固定块序（主实现按块名引用）：[现金/预算] → [空地] → [推荐空地] →
-    [可建] → [可开工] → [在建] → [人口/口粮] → [口粮规则] → 最后一句硬提示。
+    [可建] → [可开工] → [可升级] → [在建] → [人口/口粮] → [口粮规则] →
+    [开局建议]（仅开局触发）→ 最后一句硬提示。
     """
     lines = [
         _budget_line(cap),
@@ -667,9 +878,12 @@ def format_capabilities(cap: dict) -> str:
         *_recommended_lines(cap),
         *_build_lines(cap),
         _running_line(cap),
+        *_upgrade_lines(cap),
         _constructing_line(cap),
         _population_line(cap),
         _food_rule_line(cap),
-        "要开工必须写进 plot_plans，漏写=不开工；builds 只能用于 [空地] 里的格子。",
+        *_opening_advice_lines(cap),
+        "要开工必须写进 plot_plans，漏写=不开工；"
+        "builds 用于 [空地] 新建，也用于 [可升级] 里已有地块的升级。",
     ]
     return "\n".join(lines)

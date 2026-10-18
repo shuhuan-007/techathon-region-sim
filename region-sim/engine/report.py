@@ -388,7 +388,10 @@ def _jobs_and_population(
         plot = player.plots[pid]
         if plot.status is not PlotStatus.RUNNING:
             continue
-        recipe = cfg.recipe(plot.plot_type, plot.level, plot.product)
+        # ★ 2026-10-18：研究地块（industry L2 '研究'）的配方要从
+        #   research.maintain 拿（d=2），否则 `_jobs_and_population` 在
+        #   有研究地块时会抛 ConfigError。
+        recipe = cfg.recipe_for(plot)
         jobs += recipe.d
     return jobs, jobs * cfg.population.r
 
@@ -401,16 +404,28 @@ def _average_efficiency(
     ⚠️ 只统计 `u > 0` 的地块：把停工/空地的 E 也算进去会把均值拉低，
        玩家会以为"效率掉了"，其实只是有几块地关着。
        一块开工的都没有 → `None`（**不是 0**，0 会显示成"效率为零"）。
+
+    ★ 2026-10-18 UI 排障：plan=None 时 u_map 是空的 →
+       本函数原本直接返回 None、顶栏"⚡ 平均效率"显示 "—"。
+       玩家其实想知道的是「**本季效率能开多高**」——
+       按 §一 第 5 条口径"开工地块"，把 plan=None 视为「**所有 RUNNING 地块
+       都按 u=1 满开工**」给出一个**默认值**填进顶栏；
+       玩家没提交计划时才会有这个默认值，提交后仍严格按 u_map。
+       这并不违反「前端零计算」——计算仍在引擎，只是换了更友好的默认。
     """
     from engine.efficiency import compute_efficiency
+
+    # plan=None 时 u_map 空 → 按「所有 RUNNING 地块按 u=1 满开工」默认算
+    # （docstring 后半段）。玩家提交过计划后才严格按 u_map 过滤。
+    effective_u = u_map if u_map else None
 
     player = state.player(player_id)
     vals: list[float] = []
     for pid in sorted(player.plots):
-        if u_map.get(pid, 0.0) <= 0.0:
-            continue
         plot = player.plots[pid]
         if not plot.is_running:
+            continue
+        if effective_u is not None and effective_u.get(pid, 0.0) <= 0.0:
             continue
         vals.append(compute_efficiency(state, player_id, plot, cfg).efficiency)
 

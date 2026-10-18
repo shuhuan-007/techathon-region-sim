@@ -43,6 +43,7 @@ from typing import Any, Optional
 
 from engine.models import (
     MarketCurve,
+    Plot,
     PlotType,
     Recipe,
     WorldState,
@@ -329,6 +330,15 @@ class Config:
     #   默认 120.0；config.economy.quarterly_subsidy 可覆盖。口径说明见 pipeline.py 第 8.X 步注释。
     quarterly_subsidy: float = 120.0
 
+    # ★ 2026-10-18 E1 用户拍板：开局期加发补贴。
+    #   前 `early_subsidy_quarters` 季（含边界，即 `quarter <= early_subsidy_quarters`）
+    #   发 `early_quarterly_subsidy`；之后回落到 `quarterly_subsidy`。
+    #   缺省 0/0 → 没有任何一季能命中，early 档自动失效（每季发基准 `quarterly_subsidy`）。
+    #   ⚠️ `early_subsidy_quarters` 必须 ≥0 整数；= 0 等价于"关掉早期补贴"。
+    #   ⚠️ 与 `quarterly_subsidy` 同口径：转移支付，不是产值，不进 GDP / 市场求价。
+    early_quarterly_subsidy: float = 0.0
+    early_subsidy_quarters: int = 0
+
     # ★ 政策（§11.9.3）：开局模式 + 乘数数值覆盖。见 policies.py。
     policy_mode: Optional[str] = None
     policy_multipliers: dict = field(default_factory=dict)
@@ -440,12 +450,83 @@ class Config:
             return "high_tech" if (product == "I") else "machine"
         raise ConfigError(f"未知地块类型：{plot_type}")
 
+    # ── 研究地块的「被子」helper（★ 2026-10-18 最小存储改动）─────────────
+    #
+    # 研究地块内部**仍编码为** `PlotType.INDUSTRY + level=2 + product='研究'`
+    # （用户允许的**最小存储改动**：不改存档格式、不引入新枚举值）。
+    # 但它的**行为**必须等同研究地块：配方走 `research.maintain`、
+    # 工资按 `high_tech`、不产商品、参与 `efficiency.research_bonus`。
+    # 这两条 helper 是这套行为的**唯一入口**：所有取配方/工资的地方都改走它，
+    # 避免 pipeline / population / report / validate 各处散写 if-else。
+    #
+    # ⚠️ 独立的 `PlotType.RESEARCH`（工程表外的研究地块）也走它——
+    #   `industry L2 '研究'` 是【研究线二级】、`PlotType.RESEARCH L1` 是【独立
+    #   研究地块】，两者共用同一条 `research.maintain` 配方（Research Recipe
+    #   只按 (RESEARCH, 1) 注册）。
+
+    def recipe_for(self, plot: Plot) -> Recipe:
+        """**按地块**取配方 —— 研究地块重定向到 `research.maintain`，其它走原 `recipe()`。
+
+        ⚠️ **唯一入口**：生产（pipeline）、人口（population）、报表（report）、
+           校验（validate）**都要走它**，不再各自调 `cfg.recipe(...)`。
+           研究地块**不产商品**（`Recipe.output is None`），所以这条也存在
+           「研究地块的配方」这个语义上——尽管存储上研究地块是
+           `PlotType.INDUSTRY + level=2 + product='研究'`。
+        """
+        if plot.is_research:
+            try:
+                return self.recipes[(PlotType.RESEARCH, 1)]
+            except KeyError:
+                raise ConfigError(
+                    "config 缺失研究配方：recipes.research.maintain 未定义。\n"
+                    "  研究地块（含 industry L2 product='研究'）共用 research.maintain。\n"
+                    f"  已加载的研究配方：{sorted((t.value, lv) for t, lv in self.recipes if t is PlotType.RESEARCH)}"
+                ) from None
+        return self.recipe(plot.plot_type, plot.level, plot.product)
+
+    def wage_for_plot(self, plot: Plot) -> float:
+        """**按地块**取工资 —— 研究地块按 `high_tech`（§3.5），其它走原 `wage_for()`。
+
+        ⚠️ **工资 = d × u** 在 `production.py` 里逐地块按 `d` 计算；
+           本函数只给【单位劳动工资】。研究地块 d 来自 `research.maintain`
+           （d=2），乘上这里给的 28 就是"研究人员的工资率"。
+        """
+        if plot.is_research:
+            try:
+                return self.wages["high_tech"]
+            except KeyError:
+                raise ConfigError("工资表缺少 'high_tech'（研究地块按它结算工资）") from None
+        return self.wage_for(plot.plot_type, plot.level, plot.product)
+
     def price_of(self, goods: str) -> float:
         """参考价 P0。"""
         try:
             return self.market[goods].P0
         except KeyError:
             raise ConfigError(f"商品 {goods!r} 不在市场配置里") from None
+
+    # ── 补贴（2026-10-18 E1 拍板）─────────────────────
+
+    def subsidy_for_quarter(self, quarter: int) -> float:
+        """**纯函数**：本季应发多少补贴（每个玩家）。
+
+        E1 口径（2026-10-18 用户拍板）：
+            quarter ≤ early_subsidy_quarters → early_quarterly_subsidy
+            quarter >  early_subsidy_quarters → quarterly_subsidy
+
+        ⚠️ **`early_subsidy_quarters = 0` 时 early 档不可达**（`quarter ≥ 1 > 0`），
+           即"early 未启用"。两个字段任一缺省 0 → 永远都走基准档。
+
+        ⚠️ 是**转移支付**而不是产值：pipeline 只能把它进 cash 与
+           `report.subsidy`，**不进 value_added / sales_revenue / 市场求价**。
+           这条纪律看得见落点 —— 见 `pipeline.py` 第 8.5 步注释。
+
+        ⚠️ 明确写成方法而不是字段拼接，是**为了让 pipeline 与测试共用同一条
+           公式**，避免"代码改了但断言还在拼 `quarterly_subsidy`"。
+        """
+        if quarter <= self.early_subsidy_quarters:
+            return float(self.early_quarterly_subsidy)
+        return float(self.quarterly_subsidy)
 
     def all_goods(self) -> list[str]:
         """全部商品编码（排序，保证确定性）。"""
@@ -628,7 +709,7 @@ def load_config(path: str | Path | None = None) -> Config:
     cfg.opening_quota = dict(opening.get("discount_quota", {}))
     cfg.opening_discount_rate = opening.get("discount_rate")
 
-    # ── 经济（§2026-10-17 补贴）──────────────────────────
+    # ── 经济（§2026-10-17 补贴 / 2026-10-18 E1 早期补贴）─────────────
     # ★ 只加读取，不改既有字段语义（红线：loader 只增不改）。
     #   缺省时用 Config 字段默认 120.0；显式 null / 0 也走默认（视为"未配置"）。
     #   ⚠️ 它是转移支付：不是产值，不进 value_added，不进 sales_revenue，
@@ -644,6 +725,33 @@ def load_config(path: str | Path | None = None) -> Config:
                 f"economy.quarterly_subsidy 必须是数值，实得 {sub!r}。"
             ) from None
     # `sub is None` → 保持 Config 字段的默认 120.0（2026-10-17 用户拍板）。
+
+    # ★ 2026-10-18 E1：开局期加发。规则同 quarterly_subsidy：
+    #    `early_subsidy_quarters = 0` → early 档不可达，等价于关掉早期补贴。
+    #    两个字段任一缺省 → Config 字段默认 0/0 → 永远走基准档（行为与旧代码一致）。
+    early_sub = eco.get("early_quarterly_subsidy")
+    if early_sub is not None:
+        try:
+            cfg.early_quarterly_subsidy = float(early_sub)
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"economy.early_quarterly_subsidy 必须是数值，实得 {early_sub!r}。"
+            ) from None
+
+    early_q = eco.get("early_subsidy_quarters")
+    if early_q is not None:
+        # ⚠️ 必须是 ≥0 整数。float 整数（JSON 读进来的 4 vs 4.0）也放行，
+        #    但要真的按 int 存出去，避免后续 isinstance 判断坑。
+        if isinstance(early_q, bool) or not isinstance(early_q, (int, float)):
+            raise ConfigError(
+                f"economy.early_subsidy_quarters 必须是 ≥0 整数，实得 {early_q!r}。"
+            )
+        qi = int(early_q)
+        if qi < 0 or float(early_q) != float(qi):
+            raise ConfigError(
+                f"economy.early_subsidy_quarters 必须是 ≥0 整数，实得 {early_q!r}。"
+            )
+        cfg.early_subsidy_quarters = qi
 
     # ── 政策（§11.9.3）──────────────────────────────────
     # ⚠️ 四项政策本身、25% 概率、作用范围都是**规则**，不在 config 里增删；

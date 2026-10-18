@@ -378,6 +378,28 @@ class Plot:
     def is_constructing(self) -> bool:
         return self.status is PlotStatus.CONSTRUCTING
 
+    @property
+    def is_research(self) -> bool:
+        """这块地是不是「研究地块」。
+
+        研究地块**不产商品**（`Recipe.output is None`），它的收益体现在
+        其它地块的效率加成（+1%/块、玩家内封顶 +3%，见 `efficiency.research_bonus`）。
+
+        ⚠️ **最小存储改动**（2026-10-18 用户允许）：研究地块**内部仍用**
+           `PlotType.INDUSTRY + level=2 + product='研究'` 编码，**不改存档格式**。
+           判定必须同时认两种形态：
+             ① `plot_type == PlotType.RESEARCH`（**独立的**研究地块，工程表外）
+             ② `plot_type == PlotType.INDUSTRY and level == 2 and product == '研究'`
+                （**嵌入**工业的研究线二级，来自工程表 `ind_1_2_research`）
+        """
+        if self.plot_type is PlotType.RESEARCH:
+            return True
+        return (
+            self.plot_type is PlotType.INDUSTRY
+            and self.level == 2
+            and self.product == "研究"
+        )
+
     def recipe_key(self) -> tuple[PlotType, int]:
         """本块地当前该用哪条配方。"""
         return (self.plot_type, self.level)

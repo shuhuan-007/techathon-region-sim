@@ -119,7 +119,10 @@ def compute_population(
         if plot.status is not PlotStatus.RUNNING:
             continue
 
-        recipe = cfg.recipe(plot.plot_type, plot.level, plot.product)
+        # ★ 2026-10-18：走 `recipe_for` helper —— 研究地块（industry L2 '研究'）
+        #   的 d=2 被当作岗位置人口/口粮链用，**不抛 ConfigError**。
+        #   研究地块**不产商品**，但其 d 与其它地块一样贡献 L → N → F。
+        recipe = cfg.recipe_for(plot)
 
         # ★ 岗位 = d（**不乘 u**）：地建成了，岗位就在那儿，人就要吃饭
         labor_total += recipe.d

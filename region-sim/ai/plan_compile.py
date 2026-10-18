@@ -601,8 +601,13 @@ def _normalize_plot_plans(
     raw: Any,
     player: PlayerState,
     notes: list[str],
+    ignore_missing: frozenset[str] = frozenset(),
 ) -> dict[str, tuple[bool, float]]:
-    """`plot_plans` → `{plot_id: (active, u)}`；未知/未运行的地块丢弃。"""
+    """`plot_plans` → `{plot_id: (active, u)}`；未知/未运行的地块丢弃。
+
+    `ignore_missing` 是本季要新建的格子 —— 模型常把新地块也写进 plot_plans，
+    它们本期本来就不能开工；**静默忽略，不要报「丢弃」噪音**。
+    """
     out: dict[str, tuple[bool, float]] = {}
     dropped: list[str] = []
 
@@ -624,6 +629,8 @@ def _normalize_plot_plans(
 
         plot = player.plots.get(pid)
         if plot is None:
+            if pid in ignore_missing:
+                continue          # 本季新建的格子，不能开工；静默忽略
             dropped.append(f"{pid}(不存在)")
             continue
         if not _is_running(plot):
@@ -914,7 +921,10 @@ def _shrink_until_ok(
     #   所以：只要计划里还有 u>0 的已建成地块，就先**撤掉新建造**，再在不带
     #   建造的底子上找“最高可承受的开工率/口粮”；找到就返回。
     if plan.builds and any(pp.u > 0.0 for pp in plan.plot_plans.values()):
-        protected = set(protected_build_ids or ())
+        # ★ 升级工程（build 指向已有地块）不能按“新建造”撤掉：
+        #   玩家/AI 要的是把 3,4 升成研究，不是把 3,4 拆掉。
+        existing_ids = set(state.player(player_id).plots)
+        protected = set(protected_build_ids or ()) | existing_ids
         removable = [b for b in plan.builds if b.plot_id not in protected]
         if removable:
             no_build = copy.deepcopy(plan)
@@ -1081,7 +1091,28 @@ def compile_draft(
     )
 
     # ── 2. 开工安排 ──
-    run_map = _normalize_plot_plans(raw.get("plot_plans"), player, notes)
+    new_ids = frozenset(o.plot_id for o in orders if o.plot_id not in player.plots)
+    run_map = _normalize_plot_plans(
+        raw.get("plot_plans"), player, notes, ignore_missing=new_ids,
+    )
+    # 新地块本季在“在建”，模型写进来的 plot_plans 不生效；给一条简短说明，
+    # 不再逐条报“丢弃 N 条无效开工安排”。
+    if new_ids:
+        pp_raw = raw.get("plot_plans")
+        if isinstance(pp_raw, dict):
+            pp_keys = [str(k) for k in pp_raw]
+        elif isinstance(pp_raw, list):
+            pp_keys = [
+                str(x.get("plot_id")) for x in pp_raw if isinstance(x, dict)
+            ]
+        else:
+            pp_keys = []
+        ignored = [pid for pid in pp_keys if pid in new_ids]
+        if ignored:
+            _append_note(
+                notes,
+                f"新地块本季在建，plot_plans 里的开工已忽略：{_join_ids(ignored)}。",
+            )
     for pid, u in converted_run.items():
         run_map.setdefault(pid, (True, u))
 

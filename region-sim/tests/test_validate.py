@@ -166,6 +166,67 @@ def test_plot_not_running():
     assert abs(issues[0].available - 2.0) < TOL, "可用值应带出剩余工期"
 
 
+def test_constructing_plot_with_zero_u_is_ignored():
+    """★ 在建地块填 `u=0`（没排开工）→ **不报** plot_not_running。
+
+    玩家把在建地块的开工比例拉成 0%，UI 仍会在 `plan.plot_plans` 里留
+    条目；若这也要报错，结算按钮**永远灰**、进不了下一季。
+    视为"这条计划不涉及这块地"，静默放过。
+    """
+    cfg = load_config()
+    plot = mature("0,0", PlotType.RESOURCE, 1)
+    plot.status = PlotStatus.CONSTRUCTING
+    plot.construction_left = 2
+    player = make_player(**{"0,0": plot})
+    plan = plan_for(plot_plans={"0,0": PlotPlan(plot_id="0,0", u=0.0)})
+
+    issues = validate.validate_plan(plan, player, cfg)
+    assert "plot_not_running" not in codes(issues), (
+        f"在建地块 u=0 不该报 plot_not_running，实得：{codes(issues)}"
+    )
+    assert issues == [], f"在建地块 u=0 应整条放过，实得：{[str(i) for i in issues]}"
+
+
+def test_constructing_plot_with_positive_u_is_still_rejected():
+    """★ 在建地块 `u=1`（**真排了开工**）→ 仍报 plot_not_running。
+
+    静默放过只针对"没排开工"；真要在建地上开工仍然非法。
+    """
+    cfg = load_config()
+    plot = mature("0,0", PlotType.RESOURCE, 1)
+    plot.status = PlotStatus.CONSTRUCTING
+    plot.construction_left = 2
+    player = make_player(**{"0,0": plot})
+    plan = plan_for(plot_plans={"0,0": PlotPlan(plot_id="0,0", u=1.0)})
+
+    issues = validate.validate_plan(plan, player, cfg)
+    assert codes(issues) == {"plot_not_running"}, f"实得：{codes(issues)}"
+
+
+def test_constructing_plot_with_active_false_is_ignored():
+    """★ 在建地块 `active=False`（即使 u=1）→ 同样静默放过。
+
+    与 `u=0` 同义：`active is False` 就是"没排开工"
+    （`effective_u` 也是这么算的：active=False → 0）。
+    """
+    cfg = load_config()
+    plot = mature("0,0", PlotType.RESOURCE, 1)
+    plot.status = PlotStatus.CONSTRUCTING
+    plot.construction_left = 2
+    player = make_player(**{"0,0": plot})
+    plan = plan_for(plot_plans={
+        "0,0": PlotPlan(plot_id="0,0", active=False, u=1.0),
+    })
+
+    issues = validate.validate_plan(plan, player, cfg)
+    assert "plot_not_running" not in codes(issues), (
+        f"在建地块 active=False 不该报 plot_not_running，实得：{codes(issues)}"
+    )
+    assert issues == [], (
+        f"在建地块 active=False 应整条放过，实得：{[str(i) for i in issues]}"
+    )
+
+
 def test_plot_plans_are_reported_in_sorted_order():
     """问题按地块 ID 排序 —— **确定性**（同输入必须同输出，§0）。"""
     cfg = load_config()

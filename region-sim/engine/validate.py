@@ -239,6 +239,13 @@ def _check_plot_plans(
         # ── ② 状态必须 RUNNING ─────────────────────────────
         # 在建 / 升级中的地块**不能开工**（§6 第 1 步：到期才切 RUNNING）
         if plot.status is not PlotStatus.RUNNING:
+            # ★ 2026-10-18：在建/升级中**但没排开工**（u ≤ 0 或 active=False）
+            #    → 静默放过，视为"这条计划不涉及这块地"。
+            #    否则玩家在 UI 里把它填 0% 仍会被 plot_not_running 挡住，
+            #    结算按钮永远灰、进不了下一季。
+            if plot.status is PlotStatus.CONSTRUCTING and \
+                    (pp.u <= 0 or pp.active is False):
+                continue
             issues.append(
                 PlanIssue(
                     code="plot_not_running",
@@ -275,8 +282,11 @@ def _check_plot_plans(
 
         # ── ⑤ 必须能查出配方 ───────────────────────────────
         # 农业缺 product、工业路线非法，都在这里被挡住。
+        # ★ 2026-10-18：走 `recipe_for` helper —— 研究地块（industry L2 '研究'）
+        #   重定向到 research.maintain（不产商品、c=60、d=2）；**不需要**
+        #   PlanIssue 拦截，它就是研究地块的合法配方。
         try:
-            cfg.recipe(plot.plot_type, plot.level, plot.product)
+            cfg.recipe_for(plot)
         except ConfigError as e:
             issues.append(
                 PlanIssue(

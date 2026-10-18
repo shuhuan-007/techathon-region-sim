@@ -301,7 +301,10 @@ def _run_body(
             if plot.status is not PlotStatus.RUNNING:
                 continue
             eff = compute_efficiency(state, player_id, plot, cfg)
-            recipe = cfg.recipe(plot.plot_type, plot.level, plot.product)
+            # ★ 2026-10-18：走 `recipe_for` helper —— 研究地块（industry L2
+            #   '研究'）重定向到 research.maintain（output=None），不影响
+            #   机械/资源地块的 commodity 判定。
+            recipe = cfg.recipe_for(plot)
             commodity = POL.is_commodity_plot(recipe.output, cfg)
             per_plot[pid] = _apply_efficiency_multiplier(
                 eff, POL.efficiency_multiplier(state.world, commodity)
@@ -327,8 +330,11 @@ def _run_body(
             u = u_map.get(pid, 0.0)
             if u <= 0.0:
                 continue
-            recipe = cfg.recipe(plot.plot_type, plot.level, plot.product)
-            wage_rate = cfg.wage_for(plot.plot_type, plot.level, plot.product)
+            # ★ 2026-10-18：配方/工资**都走 helper** —— 研究地块用
+            #   research.maintain（不产商品、c=60、d=2）+ high_tech 工资 28；
+            #   机械/资源等其它地块走原 recipe()/wage_for()。
+            recipe = cfg.recipe_for(plot)
+            wage_rate = cfg.wage_for_plot(plot)
             eff = efficiencies[player_id][pid]
             commodity = POL.is_commodity_plot(recipe.output, cfg)
             # ★ 政策工资 / 经营费乘数（§11.9.3「计算位置」）：
@@ -666,9 +672,11 @@ def _run_body(
         # GDP：有效产出价值（固定参考价）− 实际消耗的中间投入（§7.5）
         rep.value_added = F.value_added(rep, cfg)
 
-    # ══ 第 8.5 步：每季固定补贴 ★ 2026-10-17 用户拍板 ═══════════════════
+    # ══ 第 8.5 步：每季固定补贴 ★ 2026-10-17 用户拍板 / 2026-10-18 E1 早期补贴 ══
     #
-    #   每个玩家每季 +cfg.quarterly_subsidy（默认 120.0）现金。
+    #   每个玩家每季 +cfg.subsidy_for_quarter(state.world.quarter) 现金：
+    #     quarter ≤ cfg.early_subsidy_quarters → cfg.early_quarterly_subsidy（默认 1200）
+    #     quarter >  cfg.early_subsidy_quarters → cfg.quarterly_subsidy（默认 300）
     #
     # ⚠️ 落点：第 8 步税收与 GDP 算完之后、cash_after 落账之前 ——
     #   即"扣款/结算之后、写报告之前"（用户口径），让 subsidy 体现在
@@ -679,10 +687,13 @@ def _run_body(
     #     · 不改 sales_revenue（销售收入，第 7 步已写完）
     #     · 不进市场求价、不改价格、不改效率、不改任何已算好的中间量
     #   它的唯一作用是给现金账面注入一笔钱，并在 report.subsidy 字段如实记录。
+    #
+    # ⚠️ 公式放在 `Config.subsidy_for_quarter(quarter)` 纯函数里：
+    #   pipeline 与 test_m1 共用同一条 —— 否则改了代码断言还在拼 quarterly_subsidy。
     for player_id, plan in plans.items():
         player = state.players[player_id]
         rep = reports[player_id]
-        subsidy = float(cfg.quarterly_subsidy)
+        subsidy = float(cfg.subsidy_for_quarter(state.world.quarter))
         player.cash += subsidy
         rep.subsidy = subsidy
         # ★ cash_after 是"季末玩家手上实际现金"，必须含补贴。

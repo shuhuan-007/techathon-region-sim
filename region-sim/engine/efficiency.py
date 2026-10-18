@@ -184,13 +184,22 @@ def compute_adjacency(
 def research_bonus(state: GameState, player_id: str, plot: Plot, cfg: Config) -> float:
     """研究加成：每块**正常运行**的研究地块 +1%，玩家内封顶 +3%（§3.1）。
 
-    ⚠️ **不对研究地块自身加成**（§3.1 明确）。
+    ★ 2026-10-18 最小存储改动：**研究地块有两种编码形态，都被识别**——
+      ① `PlotType.RESEARCH`（**独立**研究地块，工程表外）
+      ② `PlotType.INDUSTRY + level=2 + product='研究'`（**嵌入**工业的
+         研究线二级，是来自 `ind_1_2_research` 的产物）
+
+    ⚠️ **不对研究地块自身加成**（§3.1 明确）——`plot.is_research` 时返回 1.0。
     ⚠️ **不能写成"每季永久累加"** —— 是"当前有 N 块研究在跑 → +min(N%, 3%)"。
        这条最容易写成累加器，一旦写错，几十季后效率会飞上天。
     """
-    if plot.plot_type is PlotType.RESEARCH:
+    if plot.is_research:
         return 1.0
-    running_research = len(state.players[player_id].running_plots_of(PlotType.RESEARCH))
+    player = state.players[player_id]
+    running_research = sum(
+        1 for p in player.running_plots
+        if p.is_research
+    )
     bonus = min(cfg.efficiency.research_bonus_per_plot * running_research,
                 cfg.efficiency.research_bonus_cap)
     return 1.0 + bonus

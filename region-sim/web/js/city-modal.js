@@ -62,6 +62,7 @@ window.APP = window.APP || {};
   let _controls = null;        // THREE.OrbitControls
   let _plotGroup = null;
   let _wasteGroup = null;      // 简陋荒地（一块薄片 box，不占 gltf）
+  let _roadGroup = null;       /* v15 拍板：平面道路（地块 mesh 间隙下） */
   let _enabled = true;
   let _failedUrls = {};
   let _rafId = 0;              // animation frame id
@@ -132,8 +133,10 @@ window.APP = window.APP || {};
     _startLoop();
     /* 数据飞字层：只读 STATE、零侵入 */
     if (window.APP && APP.cityTicker && APP.cityTicker.start) APP.cityTicker.start();
-    /* 天上报表层(完整经营报表) */
-    if (window.APP && APP.citySky && APP.citySky.open) APP.citySky.open();
+    /* 天上报表层 —— v14（2026-10-18）：整套代码保留，开关默认关。
+       city-modal-sky.js 里设 _SKY_ENABLED=false 才不在此触发。
+       恢复 = 改 city-modal-sky.js:78 那个 const。 */
+    if (window.APP && APP.citySky && APP.citySky._SKY_ENABLED && APP.citySky.open) APP.citySky.open();
   }
 
   function _close(){
@@ -142,7 +145,8 @@ window.APP = window.APP || {};
     _isOpen = false;
     _stopLoop();
     if (window.APP && APP.cityTicker && APP.cityTicker.stop) APP.cityTicker.stop();
-    if (window.APP && APP.citySky && APP.citySky.close) APP.citySky.close();
+    /* 屏开着的才需要 close；开关本身是 false 时调 close 也无害（_opened=false 直接 return） */
+    if (window.APP && APP.citySky && APP.citySky._SKY_ENABLED && APP.citySky.close) APP.citySky.close();
     /* 不 destroy gltf cache——下次打开还能复用；不清 _plotGroup，让
        下次打开瞬间可以一次性把旧场面替换掉而不是空白闪烁。 */
   }
@@ -235,6 +239,8 @@ window.APP = window.APP || {};
     _scene.add(_plotGroup);
     _wasteGroup = new THREE.Group();
     _scene.add(_wasteGroup);
+    _roadGroup = new THREE.Group();
+    _scene.add(_roadGroup);
     _gltfLoader = new THREE.GLTFLoader();
   }
 
@@ -394,6 +400,11 @@ window.APP = window.APP || {};
         _wasteGroup.remove(_wasteGroup.children[0]);
       }
     }
+    if (_roadGroup){
+      while (_roadGroup.children.length){
+        _roadGroup.remove(_roadGroup.children[0]);
+      }
+    }
 
     const cellById = {};
     (MAP.cells || []).forEach(c => { if (c && c.plot_id) cellById[c.plot_id] = c; });
@@ -503,6 +514,134 @@ window.APP = window.APP || {};
         _camera.lookAt(cx, 0, cz);
         _controls.update();
       }
+      /* 3b) v15b 拍板（2026-10-18）：地块 mesh 间隙下面填"平面道路"。
+         ──────────────────────────────────────────────────────────
+         上一版只画"整条 seam 横竖大矩形"，视觉死板。
+         这一版按「**每个空缝单元格**」铺路：
+           · seam 行 → 沿 X 方向铺一段段 "马路横断面"（柏油底 + 白虚线 + 路缘）
+           · seam 列 → 沿 Z 方向铺一段段
+           · seam × seam 交叉口 → 单独铺一块压深的"十字路"，
+             把两段道路自然连起来，不再出现"两张大矩形"。
+         所有路面贴地 y=0.004，比荒地（0.02）矮，比底盘高一点。 */
+      if (_roadGroup){
+        const asphaltMat = new THREE.MeshStandardMaterial({
+          color: 0x22262e,
+          roughness: 0.98,
+          metalness: 0.0,
+        });
+        const crossingMat = new THREE.MeshStandardMaterial({
+          color: 0x181b22,              /* 交叉口压得更深一档 */
+          roughness: 0.98,
+          metalness: 0.0,
+        });
+        const stripeMat = new THREE.MeshStandardMaterial({
+          color: 0xe8e2c8,              /* 偏黄的白虚线 */
+          roughness: 0.6,
+          metalness: 0.0,
+          emissive: 0x202020,
+        });
+        const curbMat = new THREE.MeshStandardMaterial({
+          color: 0x3a3f4a,              /* 路缘肩线 */
+          roughness: 0.9,
+          metalness: 0.0,
+        });
+        /* 得出"整段空缝行集合 / 列集合" */
+        const seamRows = new Set();
+        const seamCols = new Set();
+        for (let nr = 0; nr < rowSize; nr++){
+          if (rowReverse[nr] === undefined) seamRows.add(nr);
+        }
+        for (let nc = 0; nc < colSize; nc++){
+          if (colReverse[nc] === undefined) seamCols.add(nc);
+        }
+        const roadY = 0.004;
+        const roadH = 0.03;
+        const stripeY = roadY + roadH / 2 + 0.001;  /* 浮在柏油面上 1mm */
+        const stripeH = 0.002;
+        const curbW = 0.04;
+
+        /* ── seam 行 → 沿 X 一格一格铺路面段 ── */
+        seamRows.forEach(nr => {
+          const z = nr * CELL_SPACING + CELL_SPACING / 2;
+          for (let nc = 0; nc < colSize; nc++){
+            if (seamCols.has(nc)) continue;        /* 交叉口另画 */
+            const x = nc * CELL_SPACING + CELL_SPACING / 2;
+            const road = new THREE.Mesh(
+              new THREE.BoxGeometry(CELL_SPACING * 0.98, roadH, CELL_SPACING * 0.92),
+              asphaltMat
+            );
+            road.position.set(x, roadY, z);
+            road.receiveShadow = true;
+            _roadGroup.add(road);
+            [-0.45, 0.45].forEach(dz => {
+              const curb = new THREE.Mesh(
+                new THREE.BoxGeometry(CELL_SPACING * 0.98, roadH * 0.6, curbW),
+                curbMat
+              );
+              curb.position.set(x, roadY + roadH * 0.3, z + dz * CELL_SPACING);
+              curb.receiveShadow = true;
+              _roadGroup.add(curb);
+            });
+            for (let k = -1; k <= 1; k++){
+              const stripe = new THREE.Mesh(
+                new THREE.BoxGeometry(CELL_SPACING * 0.18, stripeH, CELL_SPACING * 0.02),
+                stripeMat
+              );
+              stripe.position.set(x + k * CELL_SPACING * 0.33, stripeY, z);
+              _roadGroup.add(stripe);
+            }
+          }
+        });
+
+        /* ── seam 列 → 沿 Z 一格一格铺路面段 ── */
+        seamCols.forEach(nc => {
+          const x = nc * CELL_SPACING + CELL_SPACING / 2;
+          for (let nr = 0; nr < rowSize; nr++){
+            if (seamRows.has(nr)) continue;
+            const z = nr * CELL_SPACING + CELL_SPACING / 2;
+            const road = new THREE.Mesh(
+              new THREE.BoxGeometry(CELL_SPACING * 0.92, roadH, CELL_SPACING * 0.98),
+              asphaltMat
+            );
+            road.position.set(x, roadY, z);
+            road.receiveShadow = true;
+            _roadGroup.add(road);
+            [-0.45, 0.45].forEach(dx => {
+              const curb = new THREE.Mesh(
+                new THREE.BoxGeometry(curbW, roadH * 0.6, CELL_SPACING * 0.98),
+                curbMat
+              );
+              curb.position.set(x + dx * CELL_SPACING, roadY + roadH * 0.3, z);
+              curb.receiveShadow = true;
+              _roadGroup.add(curb);
+            });
+            for (let k = -1; k <= 1; k++){
+              const stripe = new THREE.Mesh(
+                new THREE.BoxGeometry(CELL_SPACING * 0.02, stripeH, CELL_SPACING * 0.18),
+                stripeMat
+              );
+              stripe.position.set(x, stripeY, z + k * CELL_SPACING * 0.33);
+              _roadGroup.add(stripe);
+            }
+          }
+        });
+
+        /* ── seam × seam 交叉口：一整块压深路面 + 不加线 ── */
+        seamRows.forEach(nr => {
+          const z = nr * CELL_SPACING + CELL_SPACING / 2;
+          seamCols.forEach(nc => {
+            const x = nc * CELL_SPACING + CELL_SPACING / 2;
+            const cross = new THREE.Mesh(
+              new THREE.BoxGeometry(CELL_SPACING * 0.98, roadH, CELL_SPACING * 0.98),
+              crossingMat
+            );
+            cross.position.set(x, roadY, z);
+            cross.receiveShadow = true;
+            _roadGroup.add(cross);
+          });
+        });
+      }
+
       /* 3) 荒地：side ≤ 6 才堆（压缩后评估） */
       if (side <= 6 && _wasteGroup){
         /* 原始"被占用"字典:STATE.plots ∪（MAP.cells 里 c.asset 非空） */
