@@ -93,7 +93,7 @@ def plan_of(*builds: BuildOrder, **kw) -> Plan:
 def test_two_agriculture_builds_are_valid():
     """★ 开局 2 块农业（空地新建 1 级、产出 A）**必须合法**。
 
-    账：每块折后现金 40 + 工程物资 H-A×1（P0 64）= 104，两块 208 ≤ 1200。
+    账：每块折后现金 40 + 工程物资 H-A×1（P0 78）= 118，两块 236 ≤ 1200。
     这条同时钉住"新校验没有把正常开局建法拦掉"。
     """
     _, st = new_state()
@@ -106,7 +106,7 @@ def test_two_agriculture_builds_are_valid():
 
 
 def test_industry_level2_research_route_is_valid():
-    """★ 工业 1 级 G 升 2 级、`product="研究"` → **合法**（研究线，6 季）。
+    """★ 工业 1 级 G 升 2 级、`product="研究"` → **合法**（研究线，3 季）。
 
     依据 `tests/test_construction.py::test_build_order_route_resolution`：
     `find_work_for_build` 认「研究」→ `ind_1_2_research`。
@@ -128,7 +128,7 @@ def test_industry_level3_I_is_valid():
     """★ 二级研究线升三级、`product="I"` → **合法**。
 
     二级地块的 `product` 是「研究」（或 None），`find_work_for_build`
-    据此走 research 路线 → `ind_2_3_high`（8 季，500 现金 + H-G×5）。
+    据此走 research 路线 → `ind_2_3_high`（3 季，500 现金 + H-G×5）。
     """
     _, st = new_state(**{"0,0": mature("0,0", PlotType.INDUSTRY, 2, product="研究")})
     plan = plan_of(BuildOrder("0,0", PlotType.INDUSTRY, 3, "I"))
@@ -240,11 +240,11 @@ def test_ten_industry_builds_report_insufficient_cash():
     修复前：`_check_cash` 只看 `purchases`（这份计划一条采购都没有）→
             直接 `return []` → 校验通过、submit 成功、结算第 5 步才炸。
 
-    实算（config §5.2 + §5.3）：
-        每条 ind_new = 180 现金费 + H-G×2（P0 73）；
+    实算（config §5.2 + §5.3；★ 第八轮 P0：H-G 73→88）：
+        每条 ind_new = 180 现金费 + H-G×2（P0 88）；
         工业名额 3 个 → 前 3 条现金 90，其余 7 条 180；
-        现金合计 = 3×90 + 7×180 = 1530；物资 = 10×2×73 = 1460；
-        合计 = **2990** > 开局 1200。
+        现金合计 = 3×90 + 7×180 = 1530；物资 = 10×2×88 = 1760；
+        合计 = **3290** > 开局 1200。
     """
     _, st = new_state()
     ids = [f"0,{c}" for c in range(10)]
@@ -268,14 +268,14 @@ def test_ten_industry_builds_report_insufficient_cash():
 def test_cash_estimate_counts_build_cash_and_materials():
     """没有采购、只有一条建造 → **也**要估钱（修复前 `if not plan.purchases: return []`）。
 
-    一条 ind_new = 折后 90 + H-G×2 = 146 → 236；手上只给 200 → 报。
+    一条 ind_new = 折后 90 + H-G×2@88 = 176 → 266；手上只给 200 → 报。
     """
     _, st = new_state(cash=200.0)
     plan = plan_of(BuildOrder("0,0", PlotType.INDUSTRY, 1, "G"))
     issues = run_validate(st, plan)
     assert codes(issues) == {"insufficient_cash_estimate"}, f"实得：{codes(issues)}"
-    assert abs(issues[0].requested - 236.0) < TOL, (
-        f"建造粗估应为 90 + 2×73 = 236，实得 {issues[0].requested}"
+    assert abs(issues[0].requested - 266.0) < TOL, (
+        f"建造粗估应为 90 + 2×88 = 266，实得 {issues[0].requested}"
     )
 
 

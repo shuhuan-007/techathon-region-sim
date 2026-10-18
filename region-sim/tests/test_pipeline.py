@@ -546,8 +546,8 @@ def test_zero_demand_keeps_previous_happiness():
 def test_total_quarters_is_20():
     """★ 一局 **20 季**（基线 §11.9.2，2026-10-16 用户再次确认）。
 
-    ⚠️ **已知取舍**：高技术路线总工期 14 季（§5.2），20 季局里
-       只有"开局即投"才勉强走得完。这条**明确记录为已知取舍、不再复议**——
+    ⚠️ **口径**（2026-10-18 第九轮）：高技术路线总工期 **8 季**（建 G 2 + 研究 3 + I 3，
+       §5.2），20 季局里可从容走完。这条**明确记录为已知取舍、不再复议**——
        所以**不要**为了让高技术路线跑得舒服而把 20 改回 40。
     """
     cfg = load_config()
@@ -608,30 +608,32 @@ def _running(plot_id: str, ptype: PlotType, level: int = 1, product=None) -> Plo
     )
 
 
-def test_service_adjacency_is_capped_at_40pct():
-    """★ 2026-10-18 服务/市场重做：服务只给出去，自己不吃邻接。
+def test_service_adjacency_has_no_cap():
+    """★ 2026-10-18 第九轮：服务只给出去；加成**不封顶**、率回调 5%/7.5%/10%。
 
-    用户口述的新规则（推翻旧实现）：
+    用户裁定（覆盖第七/八轮）：
       ① 服务给相邻**非服务**地块加成，按服务自身等级 5% / 7.5% / 10%；
-      ② 服务自己 `E_邻接 = 1.0`（`linked_neighbors = 0`、`adjacency_bonus = 0`）；
-      ③ 服务之间互不加成（②的直接推论：谁都不接收，自然谁都不给服务）；
-      ④ 关联表加成（每邻 +5%）与"服务给的"相加后，仍封顶 `adjacency_cap = 0.40`。
+      ② 服务自己 `E_邻接 = 1.0`；
+      ③ 服务之间互不加成；
+      ④ **不再封顶**：关联表加成（每邻 +5%）与服务加成相加后**不截断**
+         （`adjacency_cap = None`、`service_cap = None`）。
 
-    ⚠️ 旧断言（服务数 8 邻居 → 自己被截到 1.40）已随旧实现一起作废。
+    ⚠️ 旧断言（相加后封顶 0.40 / E=1.40）已作废。
     """
     from engine.efficiency import compute_efficiency
 
     cfg = load_config()
     eff = cfg.efficiency
 
-    # ── 配置形状：服务已从关联表删除，率表与总封顶保持原值 ──────────
+    # ── 配置形状：服务不在关联表；不封顶；率回调 ────────────────
     assert PlotType.SERVICE not in eff.adjacency_table, (
         "服务不该再走关联表（config 的 table.service 行应已删除）"
     )
     assert eff.service_rate_by_level == {1: 0.05, 2: 0.075, 3: 0.10}, (
-        f"服务等级率表被改动：{eff.service_rate_by_level}"
+        f"服务等级率表应为 5/7.5/10%：{eff.service_rate_by_level}"
     )
-    assert abs(eff.adjacency_cap - 0.40) < TOL, "总邻接上限仍应是 0.40"
+    assert eff.adjacency_cap is None, "第九轮：邻接加成不封顶（cap=None）"
+    assert eff.service_cap is None, "第九轮：服务加成不封顶（service_cap=None）"
     assert abs(eff.adjacency_per_neighbor - 0.05) < TOL, "关联表每邻仍应是 +5%"
 
     # ── ① 服务 → 非服务：按服务等级取率，可叠加 ──────────────────
@@ -691,7 +693,7 @@ def test_service_adjacency_is_capped_at_40pct():
         f"农业应吃到 5%+10%=15%，实得 {br3.adjacency}"
     )
 
-    # ── ④ 关联表 + 服务 相加后仍封顶 0.40 ─────────────────────────
+    # ── ④ 关联表 + 服务 相加后**不封顶** ─────────────────────────
     ind = _running("1,1", PlotType.INDUSTRY, 1, product="G")
     st3 = make_state(cfg, "p1", ind)
     ring_resource = ["0,0", "0,1", "0,2", "1,2", "2,0", "2,1", "2,2"]
@@ -700,23 +702,23 @@ def test_service_adjacency_is_capped_at_40pct():
         st3.players["p1"].plots[nid] = _running(nid, PlotType.RESOURCE, 1)
 
     br4 = compute_efficiency(st3, "p1", ind, cfg)
-    # 7 个资源邻居 × 5% + 1 块三级服务 × 10% = 45% → 封顶 40%
+    # 7 个资源邻居 × 5% + 1 块三级服务 × 10% = 45% → 第九轮起不截断
     raw = sum(c.bonus for c in br4.contributions)
-    assert abs(raw - 0.45) < TOL, f"封顶前原始加成应为 0.45，实得 {raw}"
+    assert abs(raw - 0.45) < TOL, f"原始加成应为 0.45，实得 {raw}"
     assert br4.linked_neighbors == 7 and br4.service_neighbors == 1
-    assert br4.adjacency_capped, "★ 45% > 40%，必须被标记为已封顶"
-    assert abs(br4.adjacency_bonus - 0.40) < TOL
-    assert abs(br4.adjacency - 1.40) < TOL
+    assert not br4.adjacency_capped, "★ 第九轮：不再封顶，capped 必须为 False"
+    assert abs(br4.adjacency_bonus - 0.45) < TOL
+    assert abs(br4.adjacency - 1.45) < TOL
 
 
 
-def test_service_cap_end_to_end():
-    """★ 2026-10-18 服务/市场重做：端到端验「服务方向 + 40% 封顶 + 服务收入」。
+def test_service_no_cap_end_to_end():
+    """★ 2026-10-18 第九轮：端到端验「服务方向 + 不封顶 + 服务收入」。
 
     摆法：中心 (1,1) 工业；八邻格 = 7 块资源 + 1 块三级服务 (1,0)。
-      · 工业：7×5%（关联表）+ 10%（服务）= 45% → 封顶 40%；
+      · 工业：7×5%（关联表）+ 10%（服务）= 45% → **不封顶**，E_邻接 = 1.45；
       · 服务自己：E_邻接 = 1.0；
-      · 服务收入：服务 (1,0) 的八邻格里运行中的非服务 = 5 块 → 5×12 = 60。
+      · 服务收入：服务 (1,0) 的八邻格里运行中的非服务 = 5 块 → 5×28 = 140。
 
     这条同时防"算式改了、但 `pipeline` 的调用路径没接上"。
     """
@@ -742,14 +744,14 @@ def test_service_cap_end_to_end():
     pipeline.advance(st, {"p1": plan}, cfg)
     rep = st.raw_reports["p1"]
 
-    # ── 工业吃到 7 个关联邻居 + 1 块服务，仍被截到 40% ──────────
+    # ── 工业吃到 7 个关联邻居 + 1 块服务：45%，不封顶 ──────────
     e_ind = rep.efficiency[center]
     assert e_ind["linked_neighbors"] == 7
     assert e_ind["service_neighbors"] == 1
     assert abs(e_ind["service_bonus"] - 0.10) < TOL
-    assert e_ind["adjacency_capped"] is True
-    assert abs(e_ind["adjacency_bonus"] - 0.40) < TOL
-    assert abs(e_ind["adjacency"] - 1.40) < TOL
+    assert e_ind["adjacency_capped"] is False
+    assert abs(e_ind["adjacency_bonus"] - 0.45) < TOL
+    assert abs(e_ind["adjacency"] - 1.45) < TOL
 
     # ── 服务自己不吃邻接 ────────────────────────────────────────
     e_svc = rep.efficiency[svc_id]
@@ -760,10 +762,10 @@ def test_service_cap_end_to_end():
 
     # ── 服务收入：只数服务八邻格里运行中的非服务地块 ─────────────
     # 服务 (1,0) 的邻居 = (0,0)(0,1)(1,1)(2,0)(2,1) → 5 块，全是非服务
-    assert abs(rep.service_revenue - 5 * 12) < TOL, (
-        f"服务收入应为 5×12=60，实得 {rep.service_revenue}"
+    assert abs(rep.service_revenue - 5 * 28) < TOL, (
+        f"服务收入应为 5×28=140，实得 {rep.service_revenue}"
     )
-    assert abs(rep.to_dict()["service_revenue"] - 60.0) < TOL, (
+    assert abs(rep.to_dict()["service_revenue"] - 140.0) < TOL, (
         "QuarterReport.to_dict() 必须带 service_revenue"
     )
     assert rep.service_revenue not in (rep.sales_revenue,), (
@@ -817,8 +819,8 @@ def test_service_income_counts_only_running_non_service_neighbors():
     }
 
     rev, count, rate = compute_service_income(st, "p1", svc, 1.0, cfg)
-    assert (count, rate) == (4, 9.0), f"只应数 4 个非服务邻居，实得 {count}"
-    assert abs(rev - 36.0) < TOL, f"二级服务 4 邻 × 9 = 36，实得 {rev}"
+    assert (count, rate) == (4, 20.0), f"只应数 4 个非服务邻居，实得 {count}"
+    assert abs(rev - 80.0) < TOL, f"二级服务 4 邻 × 20 = 80，实得 {rev}"
 
     # 停工 → 0
     assert compute_service_income(st, "p1", svc, 0.0, cfg) == (0.0, 0, 0.0)
@@ -834,16 +836,16 @@ def test_market_depth_after_q0_upscale():
     用 `MarketCurve` 直接算，不跑整局。边际成本按 config 的
     `input/c/d` 与 P0 手算（工资按税前全额定，未计 10% 回流）：
 
-        H-A（二级机械）：原料 G×3 + F×2 = 3·56 + 2·24 = 216
+        H-A（二级机械）：原料 G×3 + F×2 = 3·56 + 2·18 = 204
                          经营费 c=80；劳动 d=4 × 机械工资 20 = 80
-                         合计 376 / 产量 8 = **47.0 / 单位**
-        I  （三级高技术）：原料 F×3 + G×2 + H-G×1 = 72 + 112 + 73 = 257
+                         合计 364 / 产量 8 = **45.5 / 单位**
+        I  （三级高技术）：原料 F×3 + G×2 + H-G×1 = 54 + 112 + 88 = 254
                          经营费 c=120；劳动 d=6 × 高技术工资 28 = 168
-                         合计 545 / 产量 4 = **136.25 / 单位**
+                         合计 542 / 产量 4 = **135.5 / 单位**
 
     旧 Q0（H-A=30、I=15）下：
-        H-A 卖 22.4（2.8 块地产量）→ P_t=46.30 < 47，卖得越多越亏；
-        I   卖 11.2（2.8 块地产量）→ P_t=105 < 136.25，升级直接亏。
+        H-A 卖 80（10 块地产量）→ P_t≈1 < 45.5，卖得越多越亏；
+        I   卖 22.4（5.6 块地产量）→ P_t=28 < 135.5，升级直接亏。
     新 Q0（150 / 60）下这些量都还在成本线以上。
     """
     cfg = load_config()
@@ -862,31 +864,31 @@ def test_market_depth_after_q0_upscale():
     assert cfg.market["C"].Q0 == 260.0
     assert cfg.market["D"].Q0 == 200.0
     assert cfg.market["F"].Q0 == 300.0
-    assert cfg.market["H-A"].P0 == 64.0 and cfg.market["I"].P0 == 225.0
+    assert cfg.market["H-A"].P0 == 78.0 and cfg.market["I"].P0 == 280.0
 
     # ── H-A：卖 10 块满负荷二级地的产量（80）仍高于边际成本 ──────
     ha = cfg.market["H-A"]
     ha_cost = unit_cost("H-A", 2, "H-A")
-    assert abs(ha_cost - 47.0) < TOL, f"H-A 单位成本手算应为 47，实得 {ha_cost}"
+    assert abs(ha_cost - 45.5) < TOL, f"H-A 单位成本手算应为 45.5，实得 {ha_cost}"
     for sold in (11.2, 22.4, 33.6, 80.0):
         price = ha.price(sold=sold)
         assert price > ha_cost, (
             f"H-A 卖 {sold} 时 P_t={price:.2f} 已低于边际成本 {ha_cost:.2f}"
         )
-    # 旧 Q0=30 下卖 22.4 就已经亏了（对照，说明这次放大不是空改）
+    # 旧 Q0=30 下卖 80（10 块）就亏了（对照，说明这次放大不是空改）
     from engine.models import MarketCurve
     ha_old = MarketCurve(
         goods="H-A", P0=ha.P0, Q0=30.0, Es=ha.Es, Ed=ha.Ed,
         P_min_ratio=ha.P_min_ratio,
     )
-    assert ha_old.price(sold=22.4) < ha_cost, (
-        "对照失效：旧 Q0=30 下 H-A 卖 22.4 本应低于成本"
+    assert ha_old.price(sold=80.0) < ha_cost, (
+        "对照失效：旧 Q0=30 下 H-A 卖 80 本应低于成本"
     )
 
     # ── I：卖 5.6 / 11.2（1.4 / 2.8 块地产量）都在成本线以上 ─────
     i_curve = cfg.market["I"]
     i_cost = unit_cost("I", 3, "I")
-    assert abs(i_cost - 136.25) < TOL, f"I 单位成本手算应为 136.25，实得 {i_cost}"
+    assert abs(i_cost - 135.5) < TOL, f"I 单位成本手算应为 135.5，实得 {i_cost}"
     for sold in (5.6, 11.2):
         price = i_curve.price(sold=sold)
         assert price > i_cost, (
@@ -896,8 +898,8 @@ def test_market_depth_after_q0_upscale():
         goods="I", P0=i_curve.P0, Q0=15.0, Es=i_curve.Es, Ed=i_curve.Ed,
         P_min_ratio=i_curve.P_min_ratio,
     )
-    assert i_old.price(sold=11.2) < i_cost, (
-        "对照失效：旧 Q0=15 下 I 卖 11.2 本应低于成本"
+    assert i_old.price(sold=22.4) < i_cost, (
+        "对照失效：旧 Q0=15 下 I 卖 22.4 本应低于成本"
     )
 
 

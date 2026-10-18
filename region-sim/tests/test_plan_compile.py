@@ -503,6 +503,73 @@ def test_excess_food_is_capped_to_good_need():
     assert result.plan.plot_plans, "不能把 5 块地全停掉来买 22 单位 A"
 
 
+def test_food_float_equal_or_tiny_gap_does_not_emit_notes():
+    """★ 第九轮：口粮的浮点噪声不许再变成 note。
+
+    第八轮实测的两条噪声（都不影响合法性，但玩家读起来像报错）：
+
+        · `口粮 B=35.77 超过优秀档需求 35.77` —— 相等（差 0.00）却报「超过」；
+        · `按优秀档补口粮：A×0.00、C×0.00` —— 补了 0 也发一条。
+
+    口径：差值 < `FOOD_FLOAT_TOL`（0.005 份）**当作相等** —— 数量照旧（该补的
+    补到 want、该压的压回 cap），只是不再播报。
+    """
+    from ai.plan_compile import (
+        FOOD_FLOAT_TOL,
+        _cap_food_to_need,
+        _fill_good_food,
+    )
+
+    cfg = load_config()
+    state = make_state(
+        cfg, "p1", mature("0,0", PlotType.RESOURCE, 1), cash=10000.0
+    )
+    plots = state.player("p1").plots
+    plots["0,1"] = mature("0,1", PlotType.RESOURCE, 1)
+    plots["0,2"] = mature("0,2", PlotType.RESOURCE, 1)
+    plots["0,3"] = mature("0,3", PlotType.AGRICULTURE, 1, product="A")
+
+    pop = population_after_completion(state, "p1", cfg)
+    cap_a = float(cfg.food.good_quota["A"]) * pop.good_food
+    assert cap_a > 0
+
+    # ① 恰好等于上限（只差浮点尾巴）→ 不发 note
+    notes1: list[str] = []
+    out1 = _cap_food_to_need({"A": cap_a + 1e-12}, state, "p1", cfg, notes1)
+    assert notes1 == [], f"浮点相等不该发 note：{notes1}"
+    assert abs(out1["A"] - cap_a) < TOL, out1
+
+    # ② 差值 < 0.005 → 同样不发 note
+    notes2: list[str] = []
+    _cap_food_to_need(
+        {"A": cap_a + FOOD_FLOAT_TOL / 2.0}, state, "p1", cfg, notes2
+    )
+    assert notes2 == [], f"{FOOD_FLOAT_TOL / 2} 份的差额不该发 note：{notes2}"
+
+    # ③ 真超量 → 必须报「超过」并压回（口径没被放宽）
+    notes3: list[str] = []
+    out3 = _cap_food_to_need({"A": cap_a + 1.0}, state, "p1", cfg, notes3)
+    assert any("超过" in n for n in notes3), notes3
+    assert abs(out3["A"] - cap_a) < TOL, out3
+
+    # ④ 按优秀档补口粮：每样只差 0.001 → 不发 note
+    full = {
+        goods: float(quota) * pop.good_food
+        for goods, quota in cfg.food.good_quota.items()
+    }
+    notes4: list[str] = []
+    _fill_good_food(
+        {goods: qty - 0.001 for goods, qty in full.items()},
+        state, "p1", cfg, notes4,
+    )
+    assert notes4 == [], f"补 0（差 < {FOOD_FLOAT_TOL}）不该发 note：{notes4}"
+
+    # ⑤ 真缺 2 份 → 发一条校正说明（该说的仍然说）
+    notes5: list[str] = []
+    _fill_good_food({"A": full["A"] - 2.0}, state, "p1", cfg, notes5)
+    assert any("优秀档" in n for n in notes5), notes5
+
+
 # ══════════════════════════════════════════════════════════════════
 # 五-b、建后不可更换：升级时不能顺手换产物/路线（§5.1）
 # ══════════════════════════════════════════════════════════════════

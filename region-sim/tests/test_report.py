@@ -170,6 +170,7 @@ def test_report_is_none_before_any_settlement():
 
 
 
+def test_projection_carries_finance_derived_fields():
     """本季收支预览要带上 `finance` 的派生量（工资税/净工资/GDP 的 P0 拆解）。
 
     这几个数**只**在 `finance.py` 里有一份实现，report 直接取，不重算。
@@ -181,10 +182,10 @@ def test_report_is_none_before_any_settlement():
     for key in ("wage_tax", "wage_net", "output_value_at_p0", "material_value_at_p0"):
         assert key in proj, f"projection 缺 {key}：{sorted(proj)}"
 
-    # 甲区：工资 36 → 税 3.6、净 32.4；产出价值按 P0=24 算 = 96
+    # 甲区：工资 36 → 税 3.6、净 32.4；产出价值按 P0=18 算 = 72（第八轮 24→18）
     assert abs(proj["wage_tax"] - 3.6) < TOL
     assert abs(proj["wage_net"] - 32.4) < TOL
-    assert abs(proj["output_value_at_p0"] - 96.0) < TOL
+    assert abs(proj["output_value_at_p0"] - 72.0) < TOL
     assert abs(proj["wage_net"] - (proj["wages"] - proj["wage_tax"])) < TOL
 
 
@@ -337,8 +338,8 @@ def test_insufficient_cash_blocks_settle_without_crashing():
     这正是"粗校验"与"最终判据"分工的体现。
     """
     cfg = load_config()
-    # 现金 100；F 的 P0 = 24 → 买 4 个粗估 96 ≤ 100，validate 放行
-    # 但结算还要加工资 36 + 经营费 30 → 总 162 > 100
+    # 现金 100；F 的 P0 = 18 → 买 4 个粗估 72 ≤ 100，validate 放行
+    # 但结算还要加工资 36 + 经营费 30 → 总 138 > 100
     st = state_with(plot("0,0"), cash=100.0)
     plan = full_plan("0,0", purchases={"F": 4.0})
 
@@ -517,11 +518,12 @@ def test_operating_profit_jia_matches_anchor():
     """★ 甲区试算：operating_profit = sales−wages−operating+税回流（无建设物资）。
 
     甲（资源 1 级，无投入）：
-        sales_revenue = 94.72，wages = 36，operating = 30，
+        sales_revenue = 71.04，wages = 36，operating = 30，
         materials_cost = 0 → construction_materials_cost = 0
-        operating_profit = 94.72 − 36 − 30 + 3.6 = 32.32
-        （= 现金进账 − 现金出账 + 税回流）= 1032.32 − 1034.08? 不对 —— 校验算式：
-          94.72 − 36 − 30 − 0 + 3.6 = 32.32。M1 现金净值 1032.32 − 1000 = 32.32 ✓
+        operating_profit = 71.04 − 36 − 30 + 3.6 = 8.64
+        校验：现金净值 1008.64 − 1000 = 8.64 ✓
+        ★ 2026-10-18 第八轮 P0：F 24→18 → 成交价 23.68→17.76，
+          旧锚（94.72 / 32.32 / 1032.32）作废。
     """
     cfg = load_config()
     st = state_with(plot("0,0"))
@@ -534,8 +536,8 @@ def test_operating_profit_jia_matches_anchor():
     assert abs(proj["construction_materials_cost"] - 0.0) < TOL, (
         f"甲区无工程 → 建设物资成本应为 0，实得 {proj['construction_materials_cost']}"
     )
-    assert abs(proj["operating_profit"] - 32.32) < TOL, (
-        f"甲区经营盈亏应为 32.32（94.72−36−30+3.6），实得 {proj['operating_profit']}"
+    assert abs(proj["operating_profit"] - 8.64) < TOL, (
+        f"甲区经营盈亏应为 8.64（71.04−36−30+3.6），实得 {proj['operating_profit']}"
     )
 
     # 与预览的「净现金」自洽：无建设、无口粮时 operating_profit == net_cash

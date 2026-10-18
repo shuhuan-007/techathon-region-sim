@@ -308,7 +308,7 @@ def _run_body(
     #     E_effective = E_base × 政策效率乘数       ← 下面这一行
     #   ⚠️ 乘数**只作用于商品生产地块**（研究 R / 本地服务 J 不受影响）；
     #   ⚠️ 乘数在**原有效率结果之后**应用，**不回写**邻接/幸福/磨合分量，
-    #      更不碰邻接的 40% 上限（§11.9.3 明写）。
+    #      更不碰邻接的加成上限（§11.9.3 明写；第九轮起该上限已删、cap=None 直接相加）。
     #   ⚠️ 存进 `efficiencies` 的 **E_effective** ——
     #      `EfficiencyBreakdown.efficiency` 是四分量乘积（E_base），
     #      所以这里换成一个显式携带 E_effective 的副本，
@@ -935,7 +935,7 @@ def _apply_efficiency_multiplier(
 
     ⚠️ **不回写分量**：`adjacency / happiness / ramp_up / research_multiplier`
        原样保留 —— 基线明写"效率乘数在原有效率结果之后应用，**不回写邻接
-       参数**"，且"政策**不改变**邻接分项的 40% 上限"。
+       参数**"，且"政策**不改变**邻接分项的加成上限"（第九轮起不封顶）。
        所以这里只换掉那个**派生属性** `efficiency`，
        而且必须新建对象（`frozen=False` 的 dataclass，但共享引用会污染调用方）。
 

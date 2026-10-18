@@ -182,11 +182,11 @@ def test_yi_material_cost_is_130():
     material = o.material_cost(P0)
 
     assert o.inputs == {"C": 2.0, "D": 1.0, "F": 3.0}
-    assert abs(material - 130.0) < TOL, f"按配方应为 130，实得 {material}"
+    assert abs(material - 98.0) < TOL, f"按配方应为 98，实得 {material}"
 
     # 与 §8.2 静态成本四点自洽（这是**独立**的文档锚点）
     total = material + o.wage + o.operating_cost
-    assert abs(total - 215.0) < TOL, f"G 季度成本应为 215（§8.2），实得 {total}"
+    assert abs(total - 183.0) < TOL, f"G 季度成本应为 183（§8.2），实得 {total}"
 
     # 旧表的 72/157 已被证伪（漏算 C、D），不应再复现
     assert abs(material - 72.0) > 1.0, "72 是漏算 C、D 的旧值"
@@ -247,7 +247,7 @@ def test_price_floor_still_sells_everything():
 
 
 def test_value_added_matches_regenerated_anchor():
-    """增加值（GDP）：甲 66 / 乙 110 / **合计 176**（§8.1 重算值）。
+    """增加值（GDP）：甲 42 / 乙 142 / **合计 184**（§8.1 重算值）。
 
         增加值 = 有效产出价值（**固定参考价**） − 中间投入（原料 + 经营费 c）
 
@@ -257,8 +257,8 @@ def test_value_added_matches_regenerated_anchor():
     P0 = {g: c.P0 for g, c in cfg.market.items()}
 
     cases = [
-        ("甲", PlotType.RESOURCE, 1, None, 66.0),
-        ("乙", PlotType.INDUSTRY, 1, "G", 110.0),
+        ("甲", PlotType.RESOURCE, 1, None, 42.0),
+        ("乙", PlotType.INDUSTRY, 1, "G", 142.0),
     ]
     total_va = 0.0
     for name, ptype, level, product, expected in cases:
@@ -276,11 +276,11 @@ def test_value_added_matches_regenerated_anchor():
         )
         total_va += va
 
-    assert abs(total_va - 176.0) < TOL, f"增加值合计应为 176，实得 {total_va}"
+    assert abs(total_va - 184.0) < TOL, f"增加值合计应为 184，实得 {total_va}"
 
 
 def test_static_cost_four_points():
-    """§8.2 静态成本四点：G 215 / H-A 376 / I 545 / H-A+ 821。
+    """§8.2 静态成本四点：G 183 / H-A 364 / I 542 / H-A+ 920。
 
     这条**不依赖弹性**，可以直接验：固定效率 1、参考价。
     """
@@ -288,10 +288,10 @@ def test_static_cost_four_points():
     P0 = {g: c.P0 for g, c in cfg.market.items()}
 
     cases = [
-        ("G",     PlotType.INDUSTRY, 1, "G",     215.0),
-        ("H-A",   PlotType.INDUSTRY, 2, "H-A",   376.0),
-        ("I",     PlotType.INDUSTRY, 3, "I",     545.0),
-        ("H-A+",  PlotType.INDUSTRY, 3, "H-A+",  821.0),
+        ("G",     PlotType.INDUSTRY, 1, "G",     183.0),
+        ("H-A",   PlotType.INDUSTRY, 2, "H-A",   364.0),
+        ("I",     PlotType.INDUSTRY, 3, "I",     542.0),
+        ("H-A+",  PlotType.INDUSTRY, 3, "H-A+",  920.0),
     ]
     for name, ptype, level, product, expected in cases:
         plot = mature("0,0", ptype, level, product=product)
@@ -427,9 +427,9 @@ def test_m1_full_account():
     cfg = load_config()
     cases = [
         # 名称, 类型, 等级, 产出, 结算价, 销售收入, 期末现金, 增加值
-        ("甲", PlotType.RESOURCE, 1, None, 23.68, 94.72, 1032.32, 66.0),
+        ("甲", PlotType.RESOURCE, 1, None, 17.76, 71.04, 1008.64, 42.0),
         ("乙", PlotType.INDUSTRY, 1, "G", 55.48148148148148,
-         277.4074074074074, 1066.9074074074074, 110.0),
+         277.4074074074074, 1098.9074074074074, 142.0),
     ]
 
     for name, ptype, level, product, price, revenue, cash, va in cases:
@@ -482,12 +482,12 @@ def test_m1_subsidy_is_transfer_not_output():
     assert abs(r.subsidy) < 1e-9, (
         f"报告里的补贴应为 0（S1 起季初发放、结算不记），实得 {r.subsidy}"
     )
-    # 甲区运营锚点：销售收入 94.72、增加值 66 —— 都不含补贴
-    assert abs(r.sales_revenue - 94.72) < 1e-9, (
-        f"★ 补贴不得混进销售收入：应为 94.72，实得 {r.sales_revenue}"
+    # 甲区运营锚点：销售收入 71.04、增加值 42 —— 都不含补贴
+    assert abs(r.sales_revenue - 71.04) < 1e-9, (
+        f"★ 补贴不得混进销售收入：应为 71.04，实得 {r.sales_revenue}"
     )
-    assert abs(r.value_added - 66.0) < TOL, (
-        f"★ 补贴不得混进增加值：应为 66，实得 {r.value_added}"
+    assert abs(r.value_added - 42.0) < TOL, (
+        f"★ 补贴不得混进增加值：应为 42，实得 {r.value_added}"
     )
 
 
@@ -543,8 +543,8 @@ def test_pipeline_subsidy_always_zero():
         f"S1 起结算报告 subsidy 应恒 0（Q1 也不例外），实得 {r1.subsidy}"
     )
     # Q1（early 档）的 sales_revenue / value_added 不受补贴影响
-    assert abs(r1.sales_revenue - 94.72) < 1e-9, "Q1 销售收入不含补贴"
-    assert abs(r1.value_added - 66.0) < TOL, "Q1 增加值不含补贴"
+    assert abs(r1.sales_revenue - 71.04) < 1e-9, "Q1 销售收入不含补贴"
+    assert abs(r1.value_added - 42.0) < TOL, "Q1 增加值不含补贴"
 
     # ── preview 同源（试算也必须给 0）─────────────────
     st2 = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
@@ -562,8 +562,8 @@ def test_pipeline_subsidy_always_zero():
         f"S1 起 Q{cfg.early_subsidy_quarters + 1}（基准档）结算报告 subsidy 也应为 0，"
         f"实得 {r8.subsidy}"
     )
-    assert abs(r8.sales_revenue - 94.72) < 1e-9, "Q8+ 销售收入不受补贴影响"
-    assert abs(r8.value_added - 66.0) < TOL, "Q8+ 增加值不受补贴影响"
+    assert abs(r8.sales_revenue - 71.04) < 1e-9, "Q8+ 销售收入不受补贴影响"
+    assert abs(r8.value_added - 42.0) < TOL, "Q8+ 增加值不受补贴影响"
 
 
 def test_m1_production_is_the_supply():
@@ -615,8 +615,8 @@ def _print_reconciliation() -> None:
     print("=" * 70)
 
     cases = [
-        ("甲 (F)", PlotType.RESOURCE, 1, None, 0.0, 36.0, 30.0, 66.0, 66.0),
-        ("乙 (G)", PlotType.INDUSTRY, 1, "G", 130.0, 45.0, 40.0, 215.0, 110.0),
+        ("甲 (F)", PlotType.RESOURCE, 1, None, 0.0, 36.0, 30.0, 66.0, 42.0),
+        ("乙 (G)", PlotType.INDUSTRY, 1, "G", 98.0, 45.0, 40.0, 183.0, 142.0),
     ]
     for name, ptype, level, product, d_mat, d_wage, d_op, d_total, d_va in cases:
         plot = mature("0,0", ptype, level, product=product)
@@ -649,7 +649,7 @@ def _print_reconciliation() -> None:
     print("  按 §11.6，应重新生成 M1 预期，不迁就旧数字。")
     print("-" * 70)
     print("\n价格一步：弹性已到位（2026-10-16），结算价与期末现金已在上方断言真算。")
-    print("  对应的完整账（上方第六节断言：甲 23.68/1032.32、乙 55.481481/1066.907407）：")
+    print("  对应的完整账（上方第六节断言：甲 17.76/1008.64、乙 55.481481/1098.907407）：")
     print("    甲：期末现金 = 1000 − 66  + 4·P_F + 3.60")
     print("    乙：期末现金 = 1000 − 215 + 5·P_G + 4.50")
     for g in ("F", "G"):

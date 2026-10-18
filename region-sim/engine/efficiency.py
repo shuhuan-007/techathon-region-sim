@@ -4,8 +4,10 @@
 
     E = E_邻接 × E_幸福 × E_磨合 × (1 + 研究加成)
 
-**乘法关系是防效率重复放大的关键**：四分量各自有上限，
-相乘后总上限可控（理论 1.40 × 1.10 × 1.00 × 1.03 ≈ 1.59）。
+**乘法关系是防效率重复放大的关键**：幸福 / 磨合 / 研究三分量各有上限
+（1.10 / 1.00 / 1.03），相乘后不会互相叠成失控倍数；邻接分项
+**第九轮起不封顶**（`cap=None` 时表内 + 服务直接相加），总效率因此
+不再有固定硬顶 —— 旧口径 `1.40 × 1.10 × 1.00 × 1.03 ≈ 1.59` 已作废。
 
 ═══════════════════════════════════════════════════════════════════
 ★ 服务是唯一的例外分支（§3.6，2026-10-18 重做）
@@ -15,7 +17,8 @@
         ① 数八邻格中**落在关联表里**的邻居 → 每个 +5%
         ② 再加上八邻格中**运行中的服务地块** → 按该服务自身等级
            一级 +5% / 二级 +7.5% / 三级 +10%
-        ③ ①+② 封顶 +40% → E_邻接 = 1 + bonus
+        ③ ①+② **直接相加，不封顶**（第九轮删掉 +40% 上限）
+           → E_邻接 = 1 + bonus
 
     服务：
         **不接收**任何邻接加成（服务之间也不加成）：
@@ -83,14 +86,14 @@ class EfficiencyBreakdown:
     research_multiplier: float = 1.0
 
     linked_neighbors: int = 0         # 关联表邻居个数（服务恒为 0 —— 它不吃邻接）
-    adjacency_bonus: float = 0.0      # **封顶后**的总加成（表内 + 服务，服务自身恒 0）
-    adjacency_capped: bool = False    # 是否被 40% 上限截断
+    adjacency_bonus: float = 0.0      # 生效的总加成（表内 + 服务，服务自身恒 0；第九轮起不封顶）
+    adjacency_capped: bool = False    # 旧字段：是否被 40% 上限截断（第九轮 cap=None → 恒 False，留作兼容）
     is_service: bool = False
     service_rate: float = 0.0         # 服务地块**给出去**的等级加成率（非服务恒 0）
     # ★ 2026-10-18：把"服务给的"从总加成里单独拆出来，UI 才能解释
     #   "这 12% 里有 7.5% 是隔壁二级服务给的"。
     service_neighbors: int = 0        # 提供加成的相邻运行中服务地块数
-    service_bonus: float = 0.0        # 这些服务贡献的加成（封顶**前**的原始和）
+    service_bonus: float = 0.0        # 这些服务贡献的加成（原始和；第九轮起不封顶）
     contributions: list[NeighborContribution] = field(default_factory=list)
 
     @property
@@ -141,14 +144,18 @@ def compute_adjacency(
 ) -> tuple[float, list[NeighborContribution], int, float, bool, float]:
     """算 E_邻接（§3.2 通用 / §3.6 服务）。**纯函数，不改状态。**
 
-    返回 ``(E_邻接, 贡献明细, 关联邻居数, 封顶后加成, 是否封顶, 服务率)``。
+    返回 ``(E_邻接, 贡献明细, 关联邻居数, 生效后加成, 是否封顶, 服务率)``。
+
+    ⚠️ 第九轮起 `adjacency_cap = None`（不封顶）→「是否封顶」恒 `False`；
+       该字段保留只为兼容旧调用方。
 
     ★ 2026-10-18 重做后的两条分支：
 
         非服务：
-            bonus = per_neighbor × (关联表邻居数)
-                    + Σ(相邻运行中服务地块的 rate(该服务等级))
-            bonus = min(bonus, adjacency_cap)
+            raw_bonus = per_neighbor × (关联表邻居数)
+                        + Σ(相邻运行中服务地块的 rate(该服务等级))
+            bonus = raw_bonus          # 第九轮起 cap=None → 直接相加、不封顶
+            # 旧口径（cap 非 None）才截断成 min(raw_bonus, cap)；第九轮已删。
             E_邻接 = 1 + bonus
 
         服务（服务自己**不吃**邻接）：
@@ -219,6 +226,9 @@ def compute_adjacency(
         return 1.0, contributions, 0, 0.0, False, eff.service_rate(plot.level)
 
     raw_bonus = eff.adjacency_per_neighbor * linked + service_bonus
+    # ★ 2026-10-18 第九轮：用户裁定「加成封顶删掉」→ cap=None 表示不封顶。
+    if eff.adjacency_cap is None:
+        return 1.0 + raw_bonus, contributions, linked, raw_bonus, False, 0.0
     capped = raw_bonus > eff.adjacency_cap + 1e-12
     bonus = min(raw_bonus, eff.adjacency_cap)
     return 1.0 + bonus, contributions, linked, bonus, capped, 0.0

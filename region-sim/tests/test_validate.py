@@ -614,20 +614,20 @@ def test_contract_shape_issues_reported():
 def test_insufficient_cash_estimate():
     """钱明显不够（按参考价估）→ 提前报，别等到第 5 步。"""
     cfg = load_config()
-    # F 的 P0 = 24 → 100 × 24 = 2400，远超手上的 10
+    # F 的 P0 = 18（第八轮 24→18）→ 100 × 18 = 1800，远超手上的 10
     plan = plan_for(purchases={"F": 100.0})
     issues = validate.validate_plan(plan, make_player(cash=10.0), cfg)
     assert codes(issues) == {"insufficient_cash_estimate"}, f"实得：{codes(issues)}"
     issue = issues[0]
-    assert abs(issue.requested - 2400.0) < TOL, f"申请值应为 2400，实得 {issue.requested}"
+    assert abs(issue.requested - 1800.0) < TOL, f"申请值应为 1800，实得 {issue.requested}"
     assert abs(issue.available - 10.0) < TOL, f"可用值应为 10，实得 {issue.available}"
-    assert abs(issue.shortfall - 2390.0) < TOL, f"差额应为 2390，实得 {issue.shortfall}"
+    assert abs(issue.shortfall - 1790.0) < TOL, f"差额应为 1790，实得 {issue.shortfall}"
 
 
 def test_enough_cash_passes():
     """钱够就放行。"""
     cfg = load_config()
-    plan = plan_for(purchases={"F": 10.0})     # 10 × 24 = 240
+    plan = plan_for(purchases={"F": 10.0})     # 10 × 18 = 180
     issues = validate.validate_plan(plan, make_player(cash=1000.0), cfg)
     assert issues == [], f"实得：{[str(i) for i in issues]}"
 

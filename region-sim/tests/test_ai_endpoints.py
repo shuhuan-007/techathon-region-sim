@@ -339,7 +339,12 @@ def test_simulate_overbudget_uses_real_preview_not_p0_estimate():
 
     `/api/simulate` 的权威是**真引擎试算**；`validate` 里的
     `insufficient_cash_estimate` 只是“按 P0 的预警”，可能误判。
-    放它过去后，preview 会给出**真实**资金缺口（10 条工业 ≈ 2990）。
+    放它过去后，preview 会给出**真实**资金缺口。
+
+    ★ 2026-10-18 第八轮新 P0（H-G 73→88）后：
+        10 条 ind_new，前 3 条吃开局减免（90 + H-G×2×88 = 266），
+        后 7 条原价（180 + H-G×2×88 = 356）
+        → 3×266 + 7×356 = **3290**（旧值 2990）。
     """
     c = Client()
     c.new_game("g1")
@@ -359,7 +364,7 @@ def test_simulate_overbudget_uses_real_preview_not_p0_estimate():
     assert body["report"] is None
     assert body["kind"] == "settlement_failed"
     assert "资金不足" in body["blocker"]
-    assert "2990" in body["blocker"] or "实际" in body["blocker"]
+    assert "3290" in body["blocker"] or "实际" in body["blocker"]
 
 
 # ══════════════════════════════════════════════════════════════════

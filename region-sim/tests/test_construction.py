@@ -41,22 +41,32 @@ TOL = 1e-9
 #
 # ⚠️ 这张表是**从《规则基线》§5.2 逐行抄下来的**，不是从 config 生成的。
 #    两边对不上就说明有一边错了 —— 这正是本测试的目的。
+#
+# ★ 2026-10-18 第八轮数值调整：P0 变了 →
+#    §5.2 的「按参考价合计」列必须按**新 P0** 重算（现金费 / 物资 / 工期不变）：
+#      H-A 64→78、H-A+ 277→330、H-F 68→82、H-F+ 283→336、
+#      H-G 73→88、H-J 64→78、H-J+ 277→330
+#    例：agri_new = 80 + 1×78 = 158（旧 144）；
+#        ind_2_3_high = 500 + 5×88 = 940（旧 865）。
+# ★ 2026-10-18 第九轮工期调整（用户拍板 3+3）：
+#    ind_1_2_research 4→3 季、ind_2_3_high 5→3 季；
+#    现金费 / 物资 / 合计均不变，只改工期。
 BASELINE_5_2 = [
     # work_id,            现金费, 物资,              合计, 工期
-    ("agri_new",           80,  {"H-A": 1},  144, 1),
-    ("agri_1_2",           80,  {"H-A": 1},  144, 2),
-    ("agri_2_3",          100,  {"H-A+": 1}, 377, 3),
-    ("res_new",           100,  {"H-F": 1},  168, 1),
-    ("res_1_2",           120,  {"H-F": 2},  256, 2),
-    ("res_2_3",           160,  {"H-F+": 1}, 443, 3),
-    ("ind_new",           180,  {"H-G": 2},  326, 2),
-    ("ind_1_2_machine",   240,  {"H-G": 3},  459, 2),
-    ("ind_1_2_research",  300,  {"H-G": 3},  519, 4),
-    ("ind_2_3_high",      500,  {"H-G": 5},  865, 5),
-    ("ind_2_3_machine",   360,  {"H-G": 3},  579, 4),
-    ("srv_new",            80,  {"H-J": 1},  144, 1),
-    ("srv_1_2",           100,  {"H-J": 1},  164, 2),
-    ("srv_2_3",           140,  {"H-J+": 1}, 417, 3),
+    ("agri_new",           80,  {"H-A": 1},  158, 1),
+    ("agri_1_2",           80,  {"H-A": 1},  158, 2),
+    ("agri_2_3",          100,  {"H-A+": 1}, 430, 3),
+    ("res_new",           100,  {"H-F": 1},  182, 1),
+    ("res_1_2",           120,  {"H-F": 2},  284, 2),
+    ("res_2_3",           160,  {"H-F+": 1}, 496, 3),
+    ("ind_new",           180,  {"H-G": 2},  356, 2),
+    ("ind_1_2_machine",   240,  {"H-G": 3},  504, 2),
+    ("ind_1_2_research",  300,  {"H-G": 3},  564, 3),
+    ("ind_2_3_high",      500,  {"H-G": 5},  940, 3),
+    ("ind_2_3_machine",   360,  {"H-G": 3},  624, 4),
+    ("srv_new",            80,  {"H-J": 1},  158, 1),
+    ("srv_1_2",           100,  {"H-J": 1},  178, 2),
+    ("srv_2_3",           140,  {"H-J+": 1}, 470, 3),
 ]
 
 
@@ -191,24 +201,24 @@ def test_construction_events_report_started_and_completed():
 
 
 def test_industry_level_up_has_two_routes():
-    """★ 工业 1→2 与 2→3 **各有两条互斥路线**，工期差很远。
+    """★ 工业 1→2 与 2→3 **各有两条互斥路线**，工期不同。
 
     | 路线 | 1→2 | 2→3 |
     |---|---:|---:|
     | 机械 | 2 季 | 4 季 |
-    | 研究 | **6 季** | **8 季** |
+    | 研究 | **3 季** | **3 季** |
     """
     cfg = load_config()
     assert C.find_work(cfg, PlotType.INDUSTRY, 1, 2, "machine").quarters == 2
-    assert C.find_work(cfg, PlotType.INDUSTRY, 1, 2, "research").quarters == 4
+    assert C.find_work(cfg, PlotType.INDUSTRY, 1, 2, "research").quarters == 3
     assert C.find_work(cfg, PlotType.INDUSTRY, 2, 3, "machine").quarters == 4
-    assert C.find_work(cfg, PlotType.INDUSTRY, 2, 3, "research").quarters == 5
+    assert C.find_work(cfg, PlotType.INDUSTRY, 2, 3, "research").quarters == 3
 
 
 def test_ambiguous_route_is_not_guessed():
     """★ 两条路线可选时**不替玩家猜**，直接报错。
 
-    ⚠️ 猜错的代价很大（2 季 vs 6 季），所以必须显式指定。
+    ⚠️ 猜错的代价不小（机械 2 季 vs 研究 3 季），所以必须显式指定。
     """
     cfg = load_config()
     try:
@@ -253,10 +263,10 @@ def test_build_order_route_resolution():
                               BuildOrder("0,0", PlotType.INDUSTRY, 2, product="H-A"))
     assert w.work_id == "ind_1_2_machine" and w.quarters == 2
 
-    # 一级 G 升二级，选研究线 → research（6 季）
+    # 一级 G 升二级，选研究线 → research（3 季）
     w = C.find_work_for_build(cfg, g1,
                               BuildOrder("0,0", PlotType.INDUSTRY, 2, product="研究"))
-    assert w.work_id == "ind_1_2_research" and w.quarters == 4
+    assert w.work_id == "ind_1_2_research" and w.quarters == 3
 
     # 二级机械升三级 → machine（4 季）
     mech = mature("0,0", PlotType.INDUSTRY, 2, product="H-A")
@@ -264,11 +274,11 @@ def test_build_order_route_resolution():
                               BuildOrder("0,0", PlotType.INDUSTRY, 3, product="H-A+"))
     assert w.work_id == "ind_2_3_machine" and w.quarters == 4
 
-    # 二级研究线升三级 → research（8 季）
+    # 二级研究线升三级 → research（3 季）
     res = mature("0,0", PlotType.INDUSTRY, 2, product=None)
     w = C.find_work_for_build(cfg, res,
                               BuildOrder("0,0", PlotType.INDUSTRY, 3, product="I"))
-    assert w.work_id == "ind_2_3_high" and w.quarters == 5
+    assert w.work_id == "ind_2_3_high" and w.quarters == 3
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -302,18 +312,18 @@ def test_build_charges_cash_and_materials():
     # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
     assert abs(r.construction_cash - 40.0) < TOL, f"折后现金费应为 40，实得 {r.construction_cash}"
     assert r.construction == {"H-A": 1.0}, f"物资应为 H-A×1，实得 {r.construction}"
-    # 物资款 = H-A 参考价 64（物资不打折）
-    assert abs(r.materials_cost - 64.0) < TOL, f"物资款应为 64，实得 {r.materials_cost}"
+    # 物资款 = H-A 参考价 78（物资不打折；第八轮 P0 64→78）
+    assert abs(r.materials_cost - 78.0) < TOL, f"物资款应为 78，实得 {r.materials_cost}"
     # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
-    # 总扣款 = 40 + 64 = 104（现金打折不改变物资款）
-    assert abs(r.total_deduction - 104.0) < TOL, (
-        f"总扣款应为 104（= 折后现金 40 + 物资 64），实得 {r.total_deduction}"
+    # 总扣款 = 40 + 78 = 118（现金打折不改变物资款）
+    assert abs(r.total_deduction - 118.0) < TOL, (
+        f"总扣款应为 118（= 折后现金 40 + 物资 78），实得 {r.total_deduction}"
     )
     # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
     # ★ 2026-10-18 S1：补贴季初发放、不进结算 → 期末 = 运营账本身
     assert abs(r.subsidy) < TOL, f"S1 起结算报告 subsidy 应为 0，实得 {r.subsidy}"
-    assert abs(st.players["p1"].cash - 1096.0) < TOL, (
-        f"期末现金应为 1200 − 104 = 1096.0（S1 起补贴不进账），"
+    assert abs(st.players["p1"].cash - 1082.0) < TOL, (
+        f"期末现金应为 1200 − 118 = 1082.0（S1 起补贴不进账），"
         f"实得 {st.players['p1'].cash}"
     )
 
@@ -428,7 +438,7 @@ def test_insufficient_cash_for_build_raises():
     """钱不够建 → 第 5 步明确报错（不允许部分执行，§11.3）。"""
     from engine.pipeline import SettlementError
 
-    st = fresh_state(cash=100.0)     # 新建一级农业要 144
+    st = fresh_state(cash=100.0)     # 新建一级农业要 158（折后现金 40 + 物资 78）
     try:
         run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.AGRICULTURE, 1, "A")]))
     except SettlementError as e:
@@ -511,19 +521,19 @@ def test_discount_fourth_new_agriculture_pays_full_price():
     assert abs(r.construction_cash - 200.0) < TOL, (
         f"四条农业现金费应为 200（3×40 + 80），实得 {r.construction_cash}"
     )
-    # 物资：4 块 × H-A×1 = 4 × 64 = 256（物资不打折）
+    # 物资：4 块 × H-A×1 = 4 × 78 = 312（物资不打折；第八轮 P0 64→78）
     assert r.construction == {"H-A": 4.0}, f"物资应为 H-A×4，实得 {r.construction}"
-    assert abs(r.materials_cost - 256.0) < TOL, (
-        f"物资款应为 256，实得 {r.materials_cost}"
+    assert abs(r.materials_cost - 312.0) < TOL, (
+        f"物资款应为 312，实得 {r.materials_cost}"
     )
-    # 总分摊 = 200 + 256 = 456
-    assert abs(r.total_deduction - 456.0) < TOL, (
-        f"总扣款应为 456（= 现金 200 + 物资 256），实得 {r.total_deduction}"
+    # 总分摊 = 200 + 312 = 512
+    assert abs(r.total_deduction - 512.0) < TOL, (
+        f"总扣款应为 512（= 现金 200 + 物资 312），实得 {r.total_deduction}"
     )
-    # ★ 2026-10-18 S1：补贴季初发放、不进结算 → 期末 = 744 本身
+    # ★ 2026-10-18 S1：补贴季初发放、不进结算 → 期末 = 688 本身
     assert abs(r.subsidy) < TOL, f"S1 起结算报告 subsidy 应为 0，实得 {r.subsidy}"
-    assert abs(st.players["p1"].cash - (1200.0 - 456.0)) < TOL, (
-        f"期末现金应为 744（S1 起补贴不进账），实得 {st.players['p1'].cash}"
+    assert abs(st.players["p1"].cash - (1200.0 - 512.0)) < TOL, (
+        f"期末现金应为 688（S1 起补贴不进账），实得 {st.players['p1'].cash}"
     )
     # 用满 3 个名额
     assert st.players["p1"].opening_quota_used.get("agriculture") == 3, (
@@ -560,8 +570,8 @@ def test_materials_are_never_discounted():
     r = run(st, Plan("p1", builds=[BuildOrder("0,0", PlotType.AGRICULTURE, 1, "A")]))
 
     assert r.construction == {"H-A": 1.0}, f"物资应为 H-A×1，实得 {r.construction}"
-    assert abs(r.materials_cost - 64.0) < TOL, (
-        f"物资款应仍为 H-A 参考价 64（不打折），实得 {r.materials_cost}"
+    assert abs(r.materials_cost - 78.0) < TOL, (
+        f"物资款应仍为 H-A 参考价 78（不打折；第八轮 P0 64→78），实得 {r.materials_cost}"
     )
     p = st.players["p1"].plots["0,0"]
     assert p.construction_materials == {"H-A": 1.0}, (

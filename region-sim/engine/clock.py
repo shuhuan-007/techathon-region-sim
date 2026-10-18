@@ -48,7 +48,8 @@ START_YEAR = 1
 
 # 一局默认总季数。
 # ✅ 2026-10-16 用户拍板：**20 季**（《规则基线》§11.9.2）。
-#    ⚠️ 高技术路线总工期 14 季，20 季局里"开局即投"才勉强走完——**已知取舍，不再复议**。
+#    ⚠️ 高技术路线总工期 8 季（建 G 2 + 研究线 3 + I 线 3；旧值 14 季），
+#       20 季局里余量充足。
 #    这里是**缺省展示值**：真实值由 config 的 `world.total_quarters` 提供
 #    （`Config.new_world()` 会把它写进 `WorldState`）。只有拿不到 config 时
 #    才用它兜底，仅用于 UI 显示"第 7 / 20 季"。
@@ -90,7 +91,7 @@ def format_quarter(quarter: int, start_year: int = START_YEAR) -> str:
 
 
 def format_progress(quarter: int, total: int = DEFAULT_TOTAL_QUARTERS) -> str:
-    """季度序号 → 进度串，如 `第 7 / 40 季`（UI 顶栏用）。
+    """季度序号 → 进度串，如 `第 7 / 20 季`（UI 顶栏用）。
 
     `total <= 0` 视为"未设总季数"，退化为 `第 7 季`。
     """

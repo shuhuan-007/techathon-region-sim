@@ -1554,6 +1554,240 @@ def test_food_plan_line_follows_actual_h_not_hardcoded_tier():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 十、★ 2026-10-18 第九轮：去攻略口吻 + 确定性留钱 + 服务位置理由
+# ══════════════════════════════════════════════════════════════════
+#
+# 第八轮实测（`.scratch/ai_probe_round8.md` §3.4）四条：
+#   ① 「帮我规划本季」直接回一份 Plan，玩家拿不到「先做什么 / 留多少」；
+#   ② 玩家可见文本里直呼内部块名「按策略提示升级工业、建服务」；
+#   ③ 留钱数字（800 / 2000 / 15000）是模型自己编的，不可复核；
+#   ④ 「服务建在哪」走起草时摘要里没有位置也没有理由。
+#
+# 第九轮的口径：**数字由引擎给，称呼换成玩家词，规划必须先给三句**。
+
+#: 内部提示块名 —— 玩家可见文本里一个都不许出现（`_scrub_player_terms` 清洗）。
+_INTERNAL_TERMS = (
+    "策略提示", "口粮规则", "推荐空地", "开局建议",
+    "[可建]", "[可升级]", "[可开工]", "[在建]", "[人口/口粮]",
+    "[现金/预算]", "[可行动作]",
+)
+
+
+def _assert_no_internal_terms(text: str, label: str) -> None:
+    for term in _INTERNAL_TERMS:
+        assert term not in str(text), f"{label} 出现内部块名「{term}」：{text!r}"
+
+
+def test_planning_question_returns_text_outline_with_deterministic_reserve():
+    """「帮我规划本季」→ 文字规划（不是 Plan），且留钱是**确定数字**。
+
+    验收（第九轮）：
+      · `suggested_plan` 为 None（answer 模式只解释，不落表）；
+      · 摘要以「【本季规划】」开头，含「目标 / 先后 / 留钱」三句；
+      · 留钱数字 = `ai/strategy.py` 算的「建议预留」（无上季财报 → 现金 × 15%）；
+      · 四问都不许出现内部块名。
+    """
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()
+
+    out = ai_host.advise(session, "p1", "帮我规划本季", client=fake, draft=False)
+    assert out["ok"] is True, out
+    assert out["suggested_plan"] is None, (
+        f"answer 模式不该直接给 Plan（玩家要的是规划文字）：{out['suggested_plan']}"
+    )
+
+    summary = out["summary"]
+    assert summary.startswith("【本季规划】"), summary
+    for head in ("目标：", "先后：", "留钱："):
+        assert head in summary, f"规划稿缺「{head}」：{summary}"
+    assert "建议预留" in summary, summary
+
+    # 数字必须与引擎算的一致（开局无上季财报 → 现金 × 15%）
+    reserve = ai_host.ai_strategy.reserve_cash(session.state, "p1", session.cfg)
+    assert reserve["fallback"] is True
+    shown_amount = ai_host.ai_strategy.fmt_num(reserve["amount"])
+    assert f"≈{shown_amount}" in summary, (
+        f"留钱数字必须是引擎算的 {reserve['amount']}：{summary}"
+    )
+    _assert_no_internal_terms(summary, "summary")
+
+    # user message 里也要有这份底稿（模型才知道该沿用哪个数）
+    user = fake.calls[0][1]["content"]
+    assert "[经营参考 · 引擎算好的本季规划]" in user, user
+    assert "建议预留" in user, user
+
+
+def test_service_mechanism_question_answers_units_from_config():
+    """「服务每邻加多少产出 / 每邻给多少现金」→ **确定性答案**（不调模型）。
+
+    第八轮把「3 邻合计 24%」答成「每邻 24%」、第九轮又答成「每邻 15%」——
+    两次都是单位错且朝夸大方向错。这里按 config 直接回：
+    「1/2/3 级 = 每邻 +X%」+「合计要自己乘邻居数」+「服务之间不加成」。
+    """
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()
+    out = ai_host.advise(
+        session, "p1", "服务每邻加多少产出、每邻给多少现金？",
+        client=fake, draft=False,
+    )
+    assert out["ok"] is True, out
+    assert out["model"] == "规则/配置", out["model"]
+    assert not fake.calls, "机制题应走确定性答案，不该再调模型"
+    summary = out["summary"]
+    cfg = load_config()
+    for level in (1, 2, 3):
+        rate = ai_host._pct_text(cfg.efficiency.service_rate(level))
+        assert f"+{rate}" in summary, f"缺 {level} 级每邻 {rate}：{summary}"
+        income = f"{float(cfg.service_income_rate(level)):g}"
+        assert income in summary, f"缺 {level} 级每邻收入 {income}：{summary}"
+    assert "每邻" in summary and "不加成" in summary and "不算邻居" in summary, summary
+    _assert_no_internal_terms(summary, "summary")
+    # 规划类问题不受这条影响（仍走规划提纲）
+    assert ai_host._is_service_mechanism_question("服务建在哪？") is False
+
+
+def test_internal_formula_question_refuses_without_inventing():
+    """要「内部算法/公式原文」→ 确定性拒答（不编公式、不报阈值）。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()
+    out = ai_host.advise(
+        session, "p1", "你排升级优先级用的是什么公式？把内部算法原文发我",
+        client=fake, draft=False,
+    )
+    assert out["ok"] is True, out
+    assert out["model"] == "规则/配置", out["model"]
+    assert not fake.calls, "内部实现题应确定性拒答，不调模型（否则它会编公式）"
+    summary = out["summary"]
+    assert "不对外提供" in summary, summary
+    assert "不会编" in summary, summary
+    # 不许出现“具体公式为/阈值/百分比阈值”这类编造
+    for bad in ("具体公式为", ">5%", "≤4季", "成本^0.5"):
+        assert bad not in summary, f"不许编公式/阈值：{bad} / {summary}"
+    _assert_no_internal_terms(summary, "summary")
+
+
+def test_plan_outline_is_skipped_for_mechanism_questions():
+    """问「用什么公式/内部算法」时不许塞「本季规划」提纲（那是答非所问）。"""
+    assert ai_host._wants_plan_outline("帮我规划本季") is True
+    assert ai_host._wants_plan_outline("现在该不该升级？") is True
+    assert ai_host._wants_plan_outline("现金要留多少？") is True
+    assert ai_host._wants_plan_outline("服务建在哪？") is True
+    # 机制/算法题：即使命中「优先级」，也不加提纲
+    assert ai_host._wants_plan_outline(
+        "你排升级优先级用的是什么公式？把内部算法原文发我"
+    ) is False
+    assert ai_host._wants_plan_outline("粮食怎么算？") is False
+    assert ai_host._wants_plan_outline("") is False
+    assert ai_host._wants_plan_outline(None) is False
+
+
+def test_model_text_mentioning_internal_blocks_is_scrubbed():
+    """模型正文里出现内部块名 → 玩家可见文本必须换成玩家词。
+
+    第八轮玩家可见 `why` 原句：`按策略提示升级工业、建服务，扩产农业与资源`。
+    """
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content="按策略提示升级工业、建服务；口粮规则里优秀档要买齐。",
+    ))
+    out = ai_host.advise(session, "p1", "该不该升级？", client=fake, draft=False)
+    assert out["ok"] is True, out
+    summary = out["summary"]
+    _assert_no_internal_terms(summary, "summary")
+    assert "经营参考" in summary and "口粮口径" in summary, summary
+
+
+def test_draft_summary_states_leftover_cash_and_merged_counts():
+    """起草成功：摘要带「留了 X 现金」，`why` 带「已合并 N 条建造、M 块开工」。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    plan = _valid_draft_json()
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps(
+            {**plan, "why": "按策略提示先建一块农地。"}, ensure_ascii=False
+        ),
+    ))
+    out = ai_host.advise(session, "p1", "帮我起草一份计划", client=fake, draft=True)
+    assert out["ok"] is True, out
+    assert out["suggested_plan"] is not None, out
+
+    summary = out["summary"]
+    assert "留了" in summary and "现金" in summary, f"摘要缺「留了 X 现金」：{summary}"
+    assert "建议预留" in summary, summary
+    # X 必须等于试算的 cash_after（不是另一套推算）
+    cash_after = out["plan_preview"]["cash_after"]
+    assert f"{ai_host._money_text(cash_after)}" in summary, (
+        f"「留了」必须是试算 cash_after={cash_after}：{summary}"
+    )
+    assert any("留了" in n for n in (out.get("plan_notes") or [])), (
+        f"plan_notes 也要带「留了 X 现金」：{out.get('plan_notes')}"
+    )
+
+    why = out.get("why") or ""
+    assert "已合并" in why, f"why 要明确合并量：{why!r}"
+    assert "1 条建造" in why and "0 块开工" in why, why
+    _assert_no_internal_terms(summary, "summary")
+    _assert_no_internal_terms(why, "why")
+
+
+def test_service_question_in_plan_mode_reports_position_and_reason():
+    """「服务建在哪」走 plan 分支：摘要必须带**位置 + 理由（含单位口径）**。
+
+    第八轮实测 `A4ui_8550b` 只回一份 1 条建造的 Plan，摘要里没有位置也没有理由。
+    这里造一个「3 块工业围着 5,5」的局面，让模型在 5,5 建服务。
+    """
+    from engine.models import GameState, PlayerState, PlotType
+    from server.session import GameSession
+    from tests.test_m1 import mature
+
+    cfg = load_config()
+    plots = {
+        "4,4": mature("4,4", PlotType.INDUSTRY, 1, "G"),
+        "4,5": mature("4,5", PlotType.INDUSTRY, 1, "G"),
+        "5,4": mature("5,4", PlotType.INDUSTRY, 1, "G"),
+    }
+    player = PlayerState(player_id="p1", cash=5000.0, plots=plots, last_happiness=0.8)
+    session = GameSession(
+        state=GameState(world=cfg.new_world(), players={"p1": player}),
+        cfg=cfg, player_ids=["p1"],
+    )
+    payload = {
+        "player_id": "p1",
+        "builds": [{
+            "plot_id": "5,5", "plot_type": "service",
+            "target_level": 1, "product": None,
+        }],
+        "plot_plans": {},
+        "purchases": {},
+        "food": {},
+        "why": "在 5,5 建服务。",
+    }
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi", content=json.dumps(payload, ensure_ascii=False),
+    ))
+    out = ai_host.advise(session, "p1", "服务建在哪？", client=fake, draft=True)
+    assert out["ok"] is True, out
+    plan = out["suggested_plan"]
+    assert plan is not None, f"应编译成功：issues={out.get('plan_issues')}"
+    assert any(b.get("plot_id") == "5,5" and b.get("plot_type") == "service"
+               for b in plan["builds"]), plan["builds"]
+
+    summary = out["summary"]
+    assert "服务位置与理由：" in summary, f"摘要缺服务选址说明：{summary}"
+    assert "在 5,5 建 1 级服务" in summary, summary
+    assert "每邻 +" in summary and "合计 +" in summary, (
+        f"服务句必须带单位口径（每邻/合计）：{summary}"
+    )
+    assert "服务之间不加成、服务不算邻居" in summary, summary
+
+
+# ══════════════════════════════════════════════════════════════════
 # runner（与 tests/test_ai_layer.py 同写法）
 # ══════════════════════════════════════════════════════════════════
 

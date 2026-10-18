@@ -31,8 +31,9 @@
 
     B. 建在哪 —— AI 总选左上角 `0,0`，不会贴着已有地块吃邻接加成。
        现在快照给 `recommended_build_cells`：按**引擎的 compute_adjacency**
-       （八邻格 / 关联表 / 服务按等级取率 / 封顶）对每块空地算「新建后能
-       吃到多少加成」，取前 5 个。数字全部来自引擎，不在这里重写公式。
+       （八邻格 / 关联表 / 服务按等级取率 / 加成上限——第九轮起不封顶）
+       对每块空地算「新建后能吃到多少加成」，取前 5 个。数字全部来自引擎，
+       不在这里重写公式。
 
 ⚠️ 本模块不做的事（边界）：
 
@@ -300,7 +301,7 @@ def _upgrade_options(state: GameState, player, cfg: Config) -> list[dict]:
     用与 `find_work_for_build` 同口径的规则拆：
 
         · 工业 L1（产 G）：同时给 machine（products=H-A/H-F/H-G/H-J）
-          与 research（fixed_product=研究，6 季）两条；
+          与 research（fixed_product=研究，3 季）两条；
         · 工业 L2 产「研究」：只给 ind_2_3_high（fixed_product=I）；
         · 工业 L2 产 H-A/H-F/H-G/H-J：只给 ind_2_3_machine
           （product_from_current=True，目标是当前 product + '+'，不可互转）；
@@ -409,7 +410,33 @@ def _population_rows(state: GameState, player_id: str, cfg: Config) -> tuple[dic
     return population, food_need
 
 
-def _food_rule(population: dict, food_need: dict, cfg: Config) -> dict:
+def _food_cost(state: Optional[GameState], need: dict) -> Optional[float]:
+    """一批口粮按**上季价**折成现金；`state` 缺失 / 有商品查不到价 → `None`。
+
+    用途：`[口粮规则]` 里那句「优秀档总花费 ≈ X 现金（按上季价）」。
+    第八轮实测里模型把 111 的优秀档口粮报成 1200–1400（实际 ≈45）——
+    给它一个**现成的总花费**，比让它自己乘可靠。
+
+    ⚠️ 只算**买入现金**（不含工资/经营费）；
+       `world.last_price()` 无历史价时自己回退 P0，与「买入按上季价」同口径。
+    """
+    if state is None or not need:
+        return None
+    total = 0.0
+    for goods, qty in need.items():
+        try:
+            total += float(qty) * float(state.world.last_price(goods))
+        except KeyError:
+            return None
+    return total
+
+
+def _food_rule(
+    population: dict,
+    food_need: dict,
+    cfg: Config,
+    state: Optional[GameState] = None,
+) -> dict:
     """口粮规则（结构化）—— 让模型看得懂「怎么算」，而不是把人数当口粮数。
 
     用户反馈：真跑里模型把「22 人」写成 `food={"A": 22}`。
@@ -431,6 +458,8 @@ def _food_rule(population: dict, food_need: dict, cfg: Config) -> dict:
     good_need = {
         goods: float(qty) for goods, qty in (food_need.get("good") or {}).items()
     }
+    # ★ 2026-10-18 第九轮：优秀档四样按上季价折现（单位口径修复，见报告 §3.4-③）
+    good_cost = _food_cost(state, good_need)
 
     def quota_text(quota: dict) -> str:
         return "、".join(
@@ -448,12 +477,16 @@ def _food_rule(population: dict, food_need: dict, cfg: Config) -> dict:
         f"优秀档（{quota_text(cfg.food.good_quota or {})}）× F_优秀"
         f"（{tiers}）；多买没有仓库、结算会丢弃。"
     )
+    if good_cost is not None:
+        note += f"优秀档总花费≈{_display_num(round(good_cost, 1))} 现金（按上季价）。"
 
     return {
         "baseline_food": baseline_food,
         "good_food": good_food,
         "baseline_need": baseline_need,
         "good_need": good_need,
+        # ★ 第九轮：优秀档四样的买入现金（按上季价）；取不到价 → None（不编）
+        "good_cost": good_cost,
         "note": note,
     }
 
@@ -513,7 +546,7 @@ def opening_advice(state: GameState, player_id: str, cfg: Config) -> Optional[di
 # 本模块**不自己发明邻接规则**，只把引擎的 `compute_adjacency()` 拿来问
 # 「如果在这块空地上新建一个 X，能吃到多少加成」——探测用的 `Plot` 是
 # 临时对象，不写回 `state`。于是八邻格、关联表、服务按自身等级取率、
-# 封顶这些细节全部与结算时一致。
+# 加成上限（第九轮起不封顶）这些细节全部与结算时一致。
 
 
 def _new_build_types(cfg: Config) -> list[PlotType]:
@@ -536,7 +569,7 @@ def adjacency_bonus_for_new_plot(
 
     直接调 `engine.efficiency.compute_adjacency()`（引擎真实规则），
     **不在这里重写公式**。返回 `(加成, 邻居明细)`：
-    加成是**封顶后**的原始比例（0.05 = +5%），明细为
+    加成是**生效后**的原始比例（0.05 = +5%；第九轮起不封顶），明细为
     `[{plot_id, plot_type, level, bonus_pct}]`，只含真正计入的邻居。
 
     ⚠️ 探测用的 `Plot` 是临时对象：不进 `state.players[...].plots`、
@@ -650,7 +683,7 @@ def describe_capabilities(
         opening_advice                 —— ★ 开局「至少 3 块、优先农+资+工」建议（不触发为 None）
         recommended_build_cells        —— 按邻接加成排序的推荐空地（前 5）
         strategy_lines                 —— ★ 策略提示（服务选址 / 升级经济性 / 市场余量 /
-                                          现金红线，≤4 句；来源 `ai/strategy.py`）
+                                           建议预留 / 现金红线，≤5 句；来源 `ai/strategy.py`）
 
     `max_empty` 只影响 `empty_cells` 的截断；`empty_total` 永远是全量。
     """
@@ -684,7 +717,7 @@ def describe_capabilities(
         "quota": quota,
         "population": population,
         "food_need": food_need,
-        "food_rule": _food_rule(population, food_need, cfg),
+        "food_rule": _food_rule(population, food_need, cfg, state),
         "opening_advice": opening_advice(state, player_id, cfg),
         "recommended_build_cells": recommend_build_cells(state, player_id, cfg),
         # ★ 2026-10-18 第七轮 C：经济判断（只读、纯函数，见 ai/strategy.py）。
@@ -771,7 +804,7 @@ def _upgrade_lines(cap: dict) -> list[str]:
 
     形如：
 
-        [可升级] 3,4 工业1 G → 二级机械(H-A/H-F/H-G/H-J,2季/240) / 二级研究(6季/300)；
+        [可升级] 3,4 工业1 G → 二级机械(H-A/H-F/H-G/H-J,2季/240) / 二级研究(3季/300)；
                   5,4 农业1 A → 农业1→2(产出A/B/C/D,2季/80)
 
     · 一地块一段，多工程用「/」分隔，地块之间用「；」；
@@ -873,21 +906,23 @@ def _opening_advice_lines(cap: dict) -> list[str]:
 
 
 def _strategy_lines(cap: dict) -> list[str]:
-    """`[策略提示]` —— 四个确定性判断（服务选址 / 升级经济性 / 市场余量 / 现金红线）。
+    """`[策略提示]` —— 服务选址 / 升级经济性 / 市场余量 / 建议预留 / 现金红线。
 
     ★ 2026-10-18 第七轮 C：秘书 AI 原来只有「能建什么」，没有「值不值得」。
-      这里把 `ai/strategy.py` 算好的 ≤4 句结论摆出来，**块名即契约**
+      这里把 `ai/strategy.py` 算好的结论摆出来，**块名即契约**
       （`server/ai_host.py` 的起草要求按这个名字指代）。
+    ★ 第九轮：4 → 5 行。新增「建议预留 ≈X 现金」——留钱原则由引擎给
+      确定性数字（第八轮实测模型自己编 800/2000/15000，全不可复核）。
 
     · 每行以 `- ` 开头（模型一眼能看出这是条目，不是数字表）；
-    · 最多 4 行（四个函数各至多一句）——够用，且不让上下文失控；
+    · 最多 5 行（各项至多一句）——够用，且不让上下文失控；
     · 一条都没有时整块写 `[策略提示] 暂无`（**不许缺席**，与其它块同口径）。
     """
     rows = [str(line).strip() for line in (cap.get("strategy_lines") or [])]
     rows = [line for line in rows if line]
     if not rows:
         return ["[策略提示] 暂无"]
-    return ["[策略提示]"] + [f"- {line}" for line in rows[:4]]
+    return ["[策略提示]"] + [f"- {line}" for line in rows[:5]]
 
 
 def _food_rule_line(cap: dict) -> str:
@@ -902,10 +937,16 @@ def _food_rule_line(cap: dict) -> str:
             f"{goods}×{_display_num(qty)}" for goods, qty in sorted(items.items())
         ) or "—"
 
+    cost = rule.get("good_cost")
+    cost_text = (
+        f"优秀档总花费≈{_display_num(round(float(cost), 1))} 现金（按上季价）；"
+        if cost is not None else ""
+    )
     return (
         f"[口粮规则] 人口={_display_num(population.get('population', 0))} "
         f"F_基准={_display_num(rule.get('baseline_food', 0))} → 合格档 A+B {pairs(baseline)}；"
         f"F_优秀={_display_num(rule.get('good_food', 0))} → 优秀档 A/B/C/D {pairs(good)}；"
+        f"{cost_text}"
         f"★ 为拿 H=1.0（优秀），本季 food 应含：{pairs(good)}；"
         f"只填 A+B 最高 H=0.6（合格档，A+B 必须同时有，缺一则 H=0）；"
         f"多买会被丢弃（没有仓库）。"

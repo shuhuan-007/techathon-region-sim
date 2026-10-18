@@ -281,7 +281,7 @@ def test_research_plot_can_upgrade_to_i_via_ind_2_3_high():
     assert work is not None
     assert work.label == "二级研究→三级 I"
     assert work.from_level == 2 and work.to_level == 3
-    assert work.quarters == 5 and work.cash == 500
+    assert work.quarters == 3 and work.cash == 500
 
 
 # ══════════════════════════════════════════════════════════════════

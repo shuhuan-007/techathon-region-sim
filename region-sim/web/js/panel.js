@@ -658,7 +658,7 @@ function productRowLabel(w){
 /* ★ 2026-10-18（修订）：建造/升级面板按【二级地块类型】展示，同时开放研究线。
    工业升级路线分流：
      · level1(G) → 同时给两条升级路线：ind_1_2_machine（机械四选一）
-       与 ind_1_2_research（6季，不产商品 → 研究）；
+       与 ind_1_2_research（3季，不产商品 → 研究）；
      · level2 当前 p.product === "研究" → 只给 ind_2_3_high（研究→三级 I）；
      · level2 当前是机械（H-A/H-F/H-G/H-J）→ 只给 ind_2_3_machine
        （升到对应 H-*+，不可互转）。
@@ -721,12 +721,14 @@ function renderBuildPanel(){
   }
 
   /* ★ 2026-10-18 · 工程行的显示标签（仅显示层，不改后端 label）：
-       ind_1_2_research 改写成"二级研究（6季，不产商品）"——玩家一眼知道
+       ind_1_2_research 改写成"二级研究（3季，不产商品）"——玩家一眼知道
        这条线不是机械、本季不产商品；
-       ind_2_3_high 改写成"研究→三级 I（8季）"——点明研究线的终点是 I。 */
+       ind_2_3_high 改写成"研究→三级 I（3季）"——点明研究线的终点是 I。
+       ⚠️ 括号里的季数是**速览**，权威值仍是 config 的 work.quarters
+       （下面每行尾还会再拼一次「N 季」）；config 改了这里要跟着改。 */
   const WORK_LABEL_OVERRIDE = {
-    ind_1_2_research: "二级研究（6季，不产商品）",
-    ind_2_3_high:     "研究→三级 I（8季）",
+    ind_1_2_research: "二级研究（3季，不产商品）",
+    ind_2_3_high:     "研究→三级 I（3季）",
   };
   $("sel-work").innerHTML = list.map(w => {
     const lbl = WORK_LABEL_OVERRIDE[w.work_id] || w.label;
@@ -1231,13 +1233,21 @@ function applySuggestedPlan(sp){
   }
 }
 
-/* ── 机制题 / 规划题分流（与后端同一套关键词；前端先判一版，后端仍可改判）──
+/* ── 机制题 / 规划题 / 起草题分流（与后端同一套关键词；前端先判一版，后端仍可改判）──
    · 强动作词优先：只要出现「建/造/取消/撤销/删/安排/…/改」，就是让我动手 → plan；
+   · ★ 2026-10-18 第九轮：出现「规划/该不该/值不值/要不要/建议/划算/留多少/建在哪」
+     → answer（**只解释、不落表**）。第八轮实测把「帮我规划本季」「现在该不该升级」
+     判成 auto（前端固定 draft:true）→ 直接回一份 Plan，玩家永远拿不到
+     「先做什么 / 留多少 / 有什么取舍」的**文字规划**。这里把这几类词显式判成 answer；
+     后端会按 mode 强翻 draft=False，摘要里带「目标/先后/留钱」三句（引擎算的数字）。
+     ⚠️ 强动作词仍在最前面：说「帮我规划」但同时说「建两块」→ 仍按 plan 起草。
    · 否则出现机制词（怎么算/为什么/是什么/…）→ answer：只解释，不生成计划；
    · 都不沾 → auto：交给后端判断（闲聊、模糊请求都走这条）。
    返回 "answer" | "plan" | "auto"（原样塞进 /api/ai/advise 的 mode）。 */
 const AI_ACTION_WORDS = ["建","造","取消","撤销","删","安排","起草","填",
                          "开工","停工","买","卖","改"];
+const AI_ADVICE_WORDS = ["规划","该不该","值不值","要不要","建议",
+                         "划算","留多少","建在哪","先做什么","优先级"];
 const AI_MECHANISM_WORDS = ["怎么算","为什么","是什么","机制","规则","解释",
                             "原理","公式","多少","区别","能不能"];
 /* ★ 2026-10-18 D3：问「口粮/粮食要多少」不是机制题，是要**填数字**。
@@ -1250,6 +1260,9 @@ const AI_FOOD_ASK_WORDS = ["多少","几","够","买","要"];
 function detectAiMode(q){
   const s = String(q == null ? "" : q);
   if (AI_ACTION_WORDS.some(w => s.includes(w))) return "plan";
+  /* ★ 第九轮：「规划 / 该不该 / 值不值 / 建议」等**要判断**的问题走 answer
+     （后端会强翻 draft=False，回来的是文字规划；不再直接甩一份 Plan 给玩家）。 */
+  if (AI_ADVICE_WORDS.some(w => s.includes(w))) return "answer";
   if (AI_FOOD_WORDS.some(w => s.includes(w))
       && AI_FOOD_ASK_WORDS.some(w => s.includes(w))) return "plan";
   if (AI_MECHANISM_WORDS.some(w => s.includes(w))) return "answer";
@@ -1339,12 +1352,17 @@ $("btn-ai-send").onclick = async () => {
 
   /* ★ 带上当前草稿与模式（新契约，后端可缺省忽略）：
      · current_plan：让后端「续写/只撤这一条」，而不是每次从零起草；
-     · mode：前端按同一套关键词先判一版 —— answer = 机制题（只解释、不落表）、
-       plan = 有强动作词（要我动手）、auto = 其余交给后端判。 */
+     · mode：前端按同一套关键词先判一版 —— answer = 机制题/规划题（只解释、不落表）、
+       plan = 有强动作词（要我动手）、auto = 其余交给后端判；
+     · draft：★ 第九轮不再固定 true —— answer 模式（「帮我规划本季」「该不该升级」）
+       必须让后端回**文字规划**，而不是直接甩一份 Plan（后端也会按 mode 强翻，
+       这里先对齐意图，读到请求体的人一眼能看出这次要不要起草）。 */
+  const aiMode = detectAiMode(q);
   const body = {
-    game: GAME, player: PLAYER, question: q, draft: true,
+    game: GAME, player: PLAYER, question: q,
+    draft: aiMode !== "answer",
     current_plan: publicPlan(),
-    mode: detectAiMode(q),
+    mode: aiMode,
   };
   let resp;
   try{

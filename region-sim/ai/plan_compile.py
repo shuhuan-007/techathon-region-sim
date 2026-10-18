@@ -116,6 +116,18 @@ _U_LADDER: tuple[float, ...] = (1.0, 0.75, 0.5, 0.25, 0.0)
 #  1.0 = 全额（默认优秀档全额）、0.75/0.5/0.25 依次缩量、0.0 = 不买口粮。
 _FOOD_LADDER: tuple[float, ...] = (1.0, 0.75, 0.5, 0.25, 0.0)
 
+#: 口粮「算不算差一截」的浮点容差（2026-10-18 第九轮）。
+#:
+#: 第八轮实测的 `plan_notes` 噪声：
+#:
+#:   · `口粮 B=35.77 超过优秀档需求 35.77` —— 相等（差 0.00）却报「超过」；
+#:   · `按优秀档补口粮：A×0.00、C×0.00` —— 补了 0 也发一条。
+#:
+#: 这两条都不影响合法性，但玩家读起来像报错。口径：**差值 < 0.005 当作相等**
+#: （口粮单位是「份」，0.005 份没有任何实际意义），既不改 Plan 的数量，
+#: 也不发 note。
+FOOD_FLOAT_TOL: float = 0.005
+
 
 class DraftCompileError(ValueError):
     """编译器自身无法继续（输入形状完全不对）。"""
@@ -794,6 +806,8 @@ def _fill_baseline_food(
         if current + 1e-9 < qty:
             food[g] = round(qty, 6)
             added[g] = round(qty - current, 6)
+    # ★ 第九轮：只报**真有缺口**的项（< 0.005 视为相等，见 FOOD_FLOAT_TOL）。
+    added = {g: q for g, q in added.items() if q >= FOOD_FLOAT_TOL}
     if added:
         parts = "、".join(f"{g}×{q:.2f}" for g, q in sorted(added.items()))
         _append_note(notes, f"口粮缺基准档，已补：{parts}。")
@@ -837,6 +851,10 @@ def _fill_good_food(
         if current + 1e-9 < want:
             food[g] = round(want, 6)
             added[g] = round(want - current, 6)
+    # ★ 第九轮：补 0（差 < 0.005）不发 note —— 第八轮实测的
+    #   `按优秀档补口粮：A×0.00、C×0.00` 就是这条噪声。数量照补（几乎为 0），
+    #   只是不再把它当成「引擎改动」播报给玩家。
+    added = {g: q for g, q in added.items() if q >= FOOD_FLOAT_TOL}
     if added:
         parts = "、".join(f"{g}×{q:.2f}" for g, q in sorted(added.items()))
         _append_note(notes, f"按优秀档补口粮：{parts}。")
@@ -884,12 +902,15 @@ def _cap_food_to_need(
         cap = quota * pop.good_food
         if cap <= 0:
             continue
-        if qty > cap + 1e-9:
-            _append_note(
-                notes,
-                f"口粮 {g}={qty:.2f} 超过优秀档需求 {cap:.2f}；"
-                f"多买的部分没有仓库、结算会丢弃，已压回 {cap:.2f}。",
-            )
+        # ★ 第九轮：差值 < FOOD_FLOAT_TOL 当相等 —— 不报「超过」、也不发 note。
+        #   第八轮实测的 `口粮 B=35.77 超过优秀档需求 35.77`（差 0.00）就是这条。
+        if qty > cap:
+            if qty - cap >= FOOD_FLOAT_TOL:
+                _append_note(
+                    notes,
+                    f"口粮 {g}={qty:.2f} 超过优秀档需求 {cap:.2f}；"
+                    f"多买的部分没有仓库、结算会丢弃，已压回 {cap:.2f}。",
+                )
             qty = cap
         out[g] = qty
     return out

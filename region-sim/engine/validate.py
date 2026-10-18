@@ -652,7 +652,7 @@ def _parse_build_coords(plot_id: object) -> Optional[tuple[int, int]]:
 # ⚠️ 为什么另起一张表，而不是复用 `buildable_products()`：
 #    后者是**给前端下拉框**用的，工业二级只列 H-A/H-F/H-G/H-J；
 #    但"研究线"（`product="研究"`）是**规则上合法**的二级路线
-#    （`construction.find_work_for_build` 认它 → `ind_1_2_research`，6 季），
+#    （`construction.find_work_for_build` 认它 → `ind_1_2_research`，3 季），
 #    只是前端暂时没把它放进下拉框。校验若照抄下拉框，就会把这条合法路线判死。
 #    → 校验真值以本表为准；UI 选项等前端契约定了再单独改 `buildable_products()`。
 #
@@ -662,7 +662,7 @@ _BUILD_PRODUCTS: dict[tuple[PlotType, int], tuple[str, ...]] = {
     (PlotType.AGRICULTURE, 2): ("A", "B", "C", "D"),
     (PlotType.AGRICULTURE, 3): ("A", "B", "C", "D"),
     (PlotType.INDUSTRY, 1): ("G",),
-    # ★ 工业二级多一条「研究」（研究线：6 季，之后才能升三级 I）
+    # ★ 工业二级多一条「研究」（研究线：3 季，之后才能升三级 I）
     (PlotType.INDUSTRY, 2): ("H-A", "H-F", "H-G", "H-J", "研究"),
     (PlotType.INDUSTRY, 3): ("H-A+", "H-F+", "H-G+", "H-J+", "I"),
 }

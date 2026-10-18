@@ -6,7 +6,7 @@
 
 守护任务书《秘书 AI「稍微有点脑子」任务书》的四条：
 
-    1. 服务选址：3 块工业围着 `5,5` → 必须推荐 `5,5`，且写清邻数 / +15%；
+    1. 服务选址：3 块工业围着 `5,5` → 必须推荐 `5,5`，且写清邻数 / +24%；
        邻居不足 3 块、已有 3 块服务、地图已满 → `None`；
     2. 升级经济性：造一块工业 G，把 H-A 价顶到成本之上 → 判「划算」，
        并给出 MC / 每季 GDP / 现金成本；四个 H-* 全砸到成本之下 → 判「不划算」；
@@ -16,7 +16,7 @@
        远低于 → `None`；没有报告 → `None`。
 
 还守两条边界：**纯只读**（`state.to_dict()` 前后逐字相同）、
-**`strategy_lines` 最多 4 行**（`[策略提示]` 的合同）。
+**`strategy_lines` 最多 5 行**（`[策略提示]` 的合同；2026-10-18 第九轮新增「建议预留」一行）。
 
 ⚠️ 夹具复用 `tests/test_m1.py` 的 `make_state / mature`（同一套口径），
    不另造一份地图，避免两份夹具漂移。
@@ -62,19 +62,45 @@ def _industry_row(cfg, plot_ids=("4,4", "4,5", "5,4")):
 
 
 def test_service_hint_picks_the_cell_with_three_running_neighbors():
-    """3 块工业围着 5,5 → 推荐 5,5，邻 3 块、+15%、服务收入 3×6=18/季。"""
+    """3 块工业围着 5,5 → 推荐 5,5，邻 3 块、每邻 +X%、合计 +3X%、收入 3×12/季。
+
+    ★ 2026-10-18 第九轮：单位口径改成「每邻 +X%、合计 +3X%」（第八轮实测
+      把「3 邻合计 24%」答成「每邻 24%」，朝夸大方向错），并补一句
+      「服务之间不加成、服务不算邻居」。**加成率从 config 取**（本轮口径
+      在 5%/7.5%/10% 与 8/12/16% 之间改过，测试不再写死某一个值）。
+    """
     cfg = load_config()
     st = _industry_row(cfg)
+
+    rate_pct = float(cfg.efficiency.service_rate(1)) * 100.0
+    total_pct = rate_pct * 3
+    income = 3 * float(cfg.service_income_rate(1))
 
     hint = ST.service_hint(st, "p1", cfg)
     assert hint, "3 个邻居应当值得建服务"
     assert "5,5" in hint, f"应当推荐 5,5（八邻格唯一同时挨着三块地）：{hint}"
     assert "邻 3 块" in hint, hint
-    assert "+15%" in hint, f"邻 3 × 5% = +15%：{hint}"
-    assert "服务收入 18" in hint, f"3 邻 × 6 现金 = 18/季：{hint}"
-    # GDP 增量必须是真的正数（1 级服务给别人 +5% 产出，按 P0 折 GDP）
+    assert f"每邻 +{rate_pct:g}%" in hint, f"每邻口径缺失：{hint}"
+    assert f"合计 +{total_pct:g}%" in hint, f"合计口径缺失（3 邻 × {rate_pct:g}%）：{hint}"
+    assert f"服务收入 {income:g}" in hint, hint
+    assert "服务之间不加成" in hint and "服务不算邻居" in hint, (
+        f"服务句必须注明这两条口径：{hint}"
+    )
+    # GDP 增量必须是真的正数（一级服务给邻居加产出，按 P0 折 GDP）
     assert "GDP/季" in hint, hint
-    assert "≈ 0 GDP/季" not in hint, f"3 块工业的 +5% 不可能折成 0 GDP：{hint}"
+    assert "≈ 0 GDP/季" not in hint, f"3 块工业的加成不可能折成 0 GDP：{hint}"
+
+
+def test_service_plot_line_uses_same_unit_wording_for_any_cell():
+    """`service_plot_line()` 与 `service_hint()` 是**同一套单位口径**（摘要要用）。"""
+    cfg = load_config()
+    st = _industry_row(cfg)
+    line = ST.service_plot_line(st, "p1", cfg, "5,5")
+    assert line and line.startswith("在 5,5 建 1 级服务："), line
+    assert "每邻 +" in line and "合计 +" in line, line
+    assert "服务之间不加成、服务不算邻居" in line, line
+    # 没有邻居的空格 → None（不给空话）
+    assert ST.service_plot_line(st, "p1", cfg, "9,9") is None
 
 
 def test_service_hint_is_none_when_not_worth_it():
@@ -103,12 +129,12 @@ def test_service_hint_is_none_when_not_worth_it():
 
 
 def test_upgrade_economics_marks_profitable_and_uses_configured_cost():
-    """H-A 价 100 ≫ 成本 37 → 「划算」，且该行确实按工程表 + 上季价算钱。
+    """H-A 价 100 ≫ 成本 35.5 → 「划算」，且该行确实按工程表 + 上季价算钱。
 
-    锚点（全部可手算，config 值）：
-        MC(H-A) = (3×P0(G)=56 + 2×P0(F)=24 + 0.7×80 + 0.3×80) / 8 = 37
-        margin  = e×Ê×(100−37) = 8×1×(63) = 504 GDP/季
-        现金    = 工程 240 + H-G×3 = 240 + 3×73 = 459
+    锚点（全部可手算，config 值；★ 2026-10-18 第八轮 P0：F 24→18、H-G 73→88）：
+        MC(H-A) = (3×P0(G)=56 + 2×P0(F)=18 + 0.7×80 + 0.3×80) / 8 = 35.5
+        margin  = e×Ê×(100−35.5) = 8×1×(64.5) = 516 GDP/季
+        现金    = 工程 240 + H-G×3 = 240 + 3×88 = 504
     """
     cfg = load_config()
     st = make_state(cfg, "p1", mature("4,5", PlotType.INDUSTRY, 1, "G"))
@@ -120,21 +146,21 @@ def test_upgrade_economics_marks_profitable_and_uses_configured_cost():
     assert best["plot_id"] == "4,5" and best["from_product"] == "G"
     assert best["product"] == "H-A", f"H-A 价 100 时应当选 H-A：{best['product']}"
     assert best["to_level"] == 2 and best["quarters"] == 2
-    _close(best["unit_cost"], 37.0)
-    _close(best["margin_gdp"], 504.0)
-    _close(best["cash_cost"], 459.0)
+    _close(best["unit_cost"], 35.5)
+    _close(best["margin_gdp"], 516.0)
+    _close(best["cash_cost"], 504.0)
     assert best["profitable"] is True
     _close(best["price"], 100.0)
 
-    # 排序 = ΔGDP / 现金成本 降序（H-A 1.098 > H-G .505 > H-F .505 > H-J .471）
+    # 排序 = ΔGDP / 现金成本 降序（默认 limit=3：H-A 1.024 > H-G .722 > H-F .702）
     ratios = [row["margin_ratio"] for row in rows]
     assert ratios == sorted(ratios, reverse=True), ratios
 
     line = ST.format_upgrade_line(rows)
     assert line and "H-A" in line and ">" in line, line
     assert "升级 4,5 G→H-A" in line, f"行的形状是契约：{line}"
-    assert "+504 GDP/季" in line, line
-    assert "459 现金" in line and "2 季" in line, line
+    assert "+516 GDP/季" in line, line
+    assert "504 现金" in line and "2 季" in line, line
 
 
 def test_upgrade_economics_says_loss_when_price_below_cost():
@@ -174,7 +200,7 @@ def test_upgrade_economics_skips_research_route_and_non_level1():
 
 
 def test_market_headroom_positive_at_p0_and_zero_when_under_cost():
-    """P0 口径：G 有肉（slack=22）；把 G 价压到 10 → slack<0、余量截 0。"""
+    """P0 口径：G 有肉（slack=28.4）；把 G 价压到 10 → slack<0、余量截 0。"""
     cfg = load_config()
     st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1))
 
@@ -183,24 +209,25 @@ def test_market_headroom_positive_at_p0_and_zero_when_under_cost():
     assert "G" in by_goods, f"G 必须被评估：{sorted(by_goods)}"
 
     g = by_goods["G"]
-    # MC(G) = (2×16 + 26 + 3×24 + 0.7×40 + 0.3×40) / 5 = 34；P0 = 56
-    _close(g["unit_cost"], 34.0)
+    # MC(G) = (2×12 + 20 + 3×18 + 0.7×40 + 0.3×40) / 5 = 27.6；P0 = 56
+    # ★ 第八轮 P0：C 16→12、D 26→20、F 24→18 → MC 34→27.6
+    _close(g["unit_cost"], 27.6)
     _close(g["price"], 56.0)
-    _close(g["slack"], 22.0)
+    _close(g["slack"], 28.4)
     assert g["profitable"] is True
-    # ΔQ = 22 × (s+d) = 22 × (5.357142857 + 4.285714286) ≈ 212.14
-    _close(g["headroom_units"], 22.0 * (5.357142857142857 + 4.285714285714286), 1e-6)
+    # ΔQ = 28.4 × (s+d) = 28.4 × (5.357142857 + 4.285714286) ≈ 273.86
+    _close(g["headroom_units"], 28.4 * (5.357142857142857 + 4.285714285714286), 1e-6)
     _close(g["headroom_plots"], g["headroom_units"] / 5.0)
     assert g["headroom_units"] > 0
 
-    # 顶端排序 = 余量降序（G 212 > F 206 > C 179）
+    # 顶端排序 = 余量降序（G 274 > H-A 221 > F 175）
     units = [row["headroom_units"] for row in rows]
     assert units == sorted(units, reverse=True), units
     line = ST.format_market_line(rows[:3])
     assert line and line.startswith("市场余量："), line
     assert "还能卖" in line and "块" in line, line
 
-    # 把 G 价砸到 10（低于成本 34）→ slack 转负、余量截 0
+    # 把 G 价砸到 10（低于成本 27.6）→ slack 转负、余量截 0
     st.world.price_history["G"] = [10.0]
     rows2 = {
         row["goods"]: row
@@ -270,23 +297,24 @@ def test_cash_ceiling_hint_flags_overdraft_near_line_and_quiet():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 五、合成器：≤4 行、顺序固定、只读
+# 五、合成器：≤5 行、顺序固定、只读
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_strategy_lines_composes_at_most_four_in_fixed_order():
-    """服务 → 升级 → 市场 → 现金，最多 4 行；`limit` 生效。"""
+def test_strategy_lines_composes_at_most_five_in_fixed_order():
+    """服务 → 升级 → 市场 → 预留 → 现金，最多 5 行；`limit` 生效。"""
     cfg = load_config()
     st = _industry_row(cfg)
     st.players["p1"].cash = 100.0
     st.report = {"p1": {"total_deduction": 99.0, "construction_cash": 0.0}}
 
     lines = ST.strategy_lines(st, "p1", cfg)
-    assert len(lines) == 4, f"四件事都该有话说，实得 {len(lines)}：{lines}"
+    assert len(lines) == 5, f"五件事都该有话说，实得 {len(lines)}：{lines}"
     assert lines[0].startswith("建议在 "), lines[0]
     assert "升级 " in lines[1], lines[1]
     assert lines[2].startswith("市场余量："), lines[2]
-    assert "总扣款" in lines[3], lines[3]
+    assert lines[3].startswith("建议预留 "), lines[3]
+    assert "总扣款" in lines[4], lines[4]
     assert all("\n" not in line for line in lines), "一行一句，不能自带换行"
 
     assert len(ST.strategy_lines(st, "p1", cfg, limit=2)) == 2
@@ -294,19 +322,109 @@ def test_strategy_lines_composes_at_most_four_in_fixed_order():
 
 
 def test_strategy_functions_are_readonly():
-    """四个函数 + 合成器都不许改 state（AI 无 commit 的前置）。"""
+    """四个函数 + 预留 + 提纲 + 合成器都不许改 state（AI 无 commit 的前置）。"""
     cfg = load_config()
     st = _industry_row(cfg)
     st.report = {"p1": {"total_deduction": 500.0, "construction_cash": 0.0}}
     before = st.to_dict()
 
     ST.service_hint(st, "p1", cfg)
+    ST.service_advice(st, "p1", cfg)
+    ST.service_plot_line(st, "p1", cfg, "5,5")
     ST.upgrade_economics(st, "p1", cfg)
     ST.market_headroom(st, cfg)
     ST.cash_ceiling_hint(st, "p1", cfg)
+    ST.reserve_cash(st, "p1", cfg)
+    ST.plan_outline(st, "p1", cfg)
     ST.strategy_lines(st, "p1", cfg)
 
     assert st.to_dict() == before, "ai/strategy.py 改了状态"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 五-b、★ 第九轮：建议预留（确定性留钱）+ 规划提纲
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_reserve_cash_is_recurring_spend_times_one_and_falls_back():
+    """留钱口径：上季经常性支出 × 1.0；取不到财报 → 现金 × 15%。
+
+    第八轮实测里模型自己编了 800 / 2000 / 15000，**一个都不可复核**。
+    这条路必须只由引擎算（`_report_entry` → total_deduction − construction_cash）。
+    """
+    cfg = load_config()
+    st = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1), cash=1000.0)
+    st.report = {"p1": {"total_deduction": 600.0, "construction_cash": 100.0}}
+
+    res = ST.reserve_cash(st, "p1", cfg)
+    # 经常性支出 = 600 − 100（工程现金是投资，不算经常性）→ 建议预留 500
+    _close(res["amount"], 500.0)
+    _close(res["recurring"], 500.0)
+    assert res["fallback"] is False
+    line = ST.format_reserve_line(res)
+    assert "建议预留" in line and "500" in line, line
+    assert "上季经常性支出" in line and "1.0" in line, line
+
+    # ① total_deduction 缺失 → 退回 wages + operating + materials_cost
+    st2 = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1), cash=1000.0)
+    st2.report = {"p1": {"total_deduction": 0.0, "wages": 30.0,
+                         "operating": 20.0, "materials_cost": 50.0}}
+    res2 = ST.reserve_cash(st2, "p1", cfg)
+    _close(res2["amount"], 100.0)
+
+    # ② 没有上季财报 → 现金 × 15%（并写明这是兜底口径）
+    st3 = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1), cash=1000.0)
+    res3 = ST.reserve_cash(st3, "p1", cfg)
+    _close(res3["amount"], 150.0)
+    assert res3["fallback"] is True
+    line3 = ST.format_reserve_line(res3)
+    assert "15%" in line3 and "150" in line3, line3
+
+    # ③ 建议预留超过现金 → 明确说「应先减支」，不假装留得住
+    st4 = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1), cash=100.0)
+    st4.report = {"p1": {"total_deduction": 500.0, "construction_cash": 0.0}}
+    assert "已超过当前现金" in ST.format_reserve_line(
+        ST.reserve_cash(st4, "p1", cfg)
+    )
+
+    # ④ 也认 `state.world.report`（另一个挂报告的位置）
+    st5 = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1), cash=1000.0)
+    st5.world.report = {"p1": {"total_deduction": 400.0, "construction_cash": 0.0}}
+    _close(ST.reserve_cash(st5, "p1", cfg)["amount"], 400.0)
+
+
+def test_plan_outline_gives_goal_order_and_reserve():
+    """规划提纲三句：目标（可动用现金）/ 先后（服务+升级）/ 留钱（确定数字）。
+
+    这三句是「帮我规划本季」这类问题的确定性底稿 —— 模型不给规划时，
+    玩家至少能看到「先做什么、留多少」。
+    """
+    cfg = load_config()
+    st = _industry_row(cfg)
+    st.players["p1"].cash = 1000.0
+    st.report = {"p1": {"total_deduction": 400.0, "construction_cash": 0.0}}
+
+    lines = ST.plan_outline(st, "p1", cfg)
+    assert len(lines) == 3, f"目标是三句：{lines}"
+    assert lines[0].startswith("目标：") and "600" in lines[0], lines[0]  # 1000 − 400
+    assert lines[1].startswith("先后："), lines[1]
+    assert "建 1 级服务" in lines[1] and "升级 " in lines[1], lines[1]
+    assert lines[2].startswith("留钱：") and "建议预留" in lines[2], lines[2]
+    assert "400" in lines[2], lines[2]
+    assert all("\n" not in line for line in lines), lines
+
+    # 没有可说的工程 → 「先后」也要有一句（不许留空）
+    # 一块一级服务地：升级候选为空（本模块不评服务升级）、也没有服务选址（无邻居）
+    st2 = make_state(cfg, "p1", mature("0,0", PlotType.SERVICE, 1))
+    lines2 = ST.plan_outline(st2, "p1", cfg)
+    assert lines2[1].startswith("先后："), lines2[1]
+    assert "没有明显更划算" in lines2[1], lines2[1]
+
+    # 建议预留 > 现金 → 目标句改成「先保住现有开工与口粮」
+    st3 = make_state(cfg, "p1", mature("0,0", PlotType.RESOURCE, 1), cash=100.0)
+    st3.report = {"p1": {"total_deduction": 500.0, "construction_cash": 0.0}}
+    lines3 = ST.plan_outline(st3, "p1", cfg)
+    assert lines3[0].startswith("目标：") and "暂不新增工程" in lines3[0], lines3[0]
 
 
 # ══════════════════════════════════════════════════════════════════

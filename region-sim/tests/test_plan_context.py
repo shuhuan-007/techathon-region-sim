@@ -82,15 +82,15 @@ def test_opening_snapshot_empty_builds_and_zero_population():
         "agriculture", "industry", "resource", "service",
     ], [o["plot_type"] for o in opts]
 
-    # 农业新建：现金 80、材料 H-A×1、上季价缺失 → P0 64
+    # 农业新建：现金 80、材料 H-A×1、上季价缺失 → P0 78
     agri = opts[0]
     assert agri["target_level"] == 1
     _close(agri["cash"], 80)
     _close(agri["cash_after_discount"], 40)       # 80 × 0.50
     assert agri["quota_remaining"] == 3, "农业开局名额应剩 3"
     assert agri["materials"] == {"H-A": 1.0}, agri["materials"]
-    _close(agri["materials_cost"], 64)            # P0(H-A) = 64
-    _close(agri["total_cost"], 104)               # 40 + 64
+    _close(agri["materials_cost"], 78)            # P0(H-A) = 78（第八轮 64→78）
+    _close(agri["total_cost"], 118)               # 40 + 78
     assert agri["products"] == ["A", "B", "C", "D"], "农业新建必须给出可选产出"
 
     # 工业新建：产线只有 G；资源没有多路线 → []
@@ -98,7 +98,7 @@ def test_opening_snapshot_empty_builds_and_zero_population():
     assert industry["products"] == ["G"], industry["products"]
     resource = next(o for o in opts if o["plot_type"] == "resource")
     assert resource["products"] == [], "资源没有多路线，products 必须是 []"
-    _close(resource["materials_cost"], 68)        # P0(H-F) = 68
+    _close(resource["materials_cost"], 82)        # P0(H-F) = 82（第八轮 68→82）
 
     # ── 名额表：每类型独立，3 个全额 ─────────────────────────────
     assert cap["quota"]["agriculture"] == {"used": 0, "total": 3, "remaining": 3}
@@ -346,6 +346,19 @@ def test_food_rule_matches_compute_population_22_people():
         "多买会被丢弃",
     ):
         assert piece in text, f"口粮规则文本缺 {piece}：\n{text}"
+
+    # ★ 2026-10-18 第九轮：优秀档四样的**总花费**（按上季价）。
+    #   第八轮实测把 111 的优秀档口粮报成 1200–1400（实际 ≈45）——
+    #   把这笔钱直接摆出来，模型就不必自己乘（也乘不错）。
+    expected_cost = sum(
+        float(qty) * float(st.world.last_price(goods))
+        for goods, qty in rule["good_need"].items()
+    )
+    _close(rule["good_cost"], expected_cost)
+    shown_cost = f"≈{round(expected_cost, 1):g} 现金"
+    assert f"优秀档总花费{shown_cost}" in note, f"note 缺口粮总花费：{note}"
+    assert f"优秀档总花费{shown_cost}" in text, f"[口粮规则] 缺口粮总花费：\n{text}"
+    assert "按上季价" in text, text
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -613,7 +626,7 @@ def test_strategy_block_sits_between_recommended_and_build():
     assert "strategy_lines" in cap, "describe_capabilities 必须给 strategy_lines 键"
     lines = cap["strategy_lines"]
     assert isinstance(lines, list) and lines, lines
-    assert len(lines) <= 4, f"最多 4 行（[策略提示] 的合同）：{lines}"
+    assert len(lines) <= 5, f"最多 5 行（[策略提示] 的合同）：{lines}"
 
     text = format_capabilities(cap)
     i_rec = text.index("[推荐空地]")
@@ -629,14 +642,15 @@ def test_strategy_block_sits_between_recommended_and_build():
     assert block[0] == "[策略提示]", block
     content = [line for line in block[1:] if line.strip()]
     assert content, "有内容时不能让块空着"
-    assert len(content) <= 4, content
+    assert len(content) <= 5, content
     for line in content:
         assert line.startswith("- "), f"块内每行必须 `- ` 开头：{line!r}"
 
-    # 这一局四件事都有：服务（3 邻）/ 升级（G→H-*）/ 市场余量 / 现金红线
+    # 这一局五件事都有：服务（3 邻）/ 升级（G→H-*）/ 市场余量 / 建议预留 / 现金红线
     assert any("建议在 5,5" in line for line in content), content
     assert any("升级 " in line for line in content), content
     assert any("市场余量" in line for line in content), content
+    assert any("建议预留" in line for line in content), content
     assert any("总扣款" in line for line in content), content
 
 
@@ -660,8 +674,8 @@ def test_strategy_block_never_absent():
     assert "\n- " not in text, f"没有内容时不许有 `- ` 行：\n{text}"
 
 
-def test_strategy_block_caps_at_four_bullets():
-    """渲染器自己也要截断：给 6 条只出 4 条（防止上游多塞把上下文撑爆）。"""
+def test_strategy_block_caps_at_five_bullets():
+    """渲染器自己也要截断：给 6 条只出 5 条（防止上游多塞把上下文撑爆；第九轮 4→5）。"""
     minimal = {
         "cash": 0,
         "quarter": 1,
@@ -672,8 +686,8 @@ def test_strategy_block_caps_at_four_bullets():
     text = format_capabilities(minimal)
     block = text.split("[策略提示]", 1)[1].split("[可建]", 1)[0]
     bullets = [line for line in block.splitlines() if line.startswith("- ")]
-    assert len(bullets) == 4, bullets
-    assert bullets[0] == "- 第1条" and bullets[-1] == "- 第4条", bullets
+    assert len(bullets) == 5, bullets
+    assert bullets[0] == "- 第1条" and bullets[-1] == "- 第5条", bullets
 
 
 def _run_all() -> int:

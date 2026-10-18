@@ -403,8 +403,8 @@ window.APP = window.APP || {};
     const IS_BAKED_3X3 = horizSpan > 2.5;
 
     if (IS_BAKED_3X3){
-      /* glb 自带 3×3 → 单摆。0.95 缩到 plot_span。 */
-      const scale = (0.95 * CELL_SPACING) / horizSpan;
+      /* glb 自带 3×3 → 单摆。0.80 缩到 plot_span(空出 0.20 缝铺柏油路)。 */
+      const scale = (0.80 * CELL_SPACING) / horizSpan;
       inst.position.set(-center.x, -center.y, -center.z);
       const wrapper = new THREE.Group();
       wrapper.add(inst);
@@ -418,7 +418,8 @@ window.APP = window.APP || {};
          取该宽的 0.95 ≈ 0.317。考虑模型在屏幕上的可读性,把所有 plot 都
          缩到只占 cell 的 0.9,3×3 子阵每子格 0.3,单件渲染尺寸按 0.285。 */
       const SUB = CELL_SPACING / 3;
-      const SUB_TARGET = SUB * 0.95;
+      /* 整格窄化为 0.80 给路让缝:每子格仍占整格的 0.80/3,单件 0.95 缩进 */
+      const SUB_TARGET = SUB * 0.80;
       const scale = SUB_TARGET / horizSpan;
       /* 子中心相对 plot 中心 (0,0) 的偏移：3×3 阵两轴各 -SUB, 0, +SUB */
       const offsets = [-SUB, 0, SUB];
@@ -623,12 +624,16 @@ window.APP = window.APP || {};
         const stripeMat = new THREE.MeshBasicMaterial({
           color: 0xf5edaf,
         });
-        /* 路宽严格 = 两模型之间的物理缝（不可加宽，会盖住模型边缘 0.025/边）*/
-        const ROAD_W = 0.05 * 0.92;    /* 略缩 8%，避免与模型边缘"刚好相切"看起来脏 */
+        /* 路宽 = 模型占格 0.80 后剩下的物理缝 0.20,留 4% 让边。*/
+        const ROAD_W = 0.20 * 0.96;    /* 缝 0.20 用满 96% */
         const roadY = 0.004;            /* 略高于底盘 0，低于 Plot 模型底 0.02 */
         const roadH = 0.02;
         const stripeY = roadY + roadH + 0.002;
         const stripeH = 0.002;
+        /* 虚线等比例跟路宽:细 = 路宽/40(原 1/24),短 = 路宽/4(原 5/6)。
+           用户 2026-10-18 拍板:"虚线变细且大幅度变短" */
+        const STRIPE_W = ROAD_W / 40;    /* ≈0.005 @ 0.192 */
+        const STRIPE_L = ROAD_W / 4;     /* ≈0.048 @ 0.192,比旧 0.16 短 3 倍多 */
 
         /* 已经建成的压缩后格子集合（用 placedCells 即可，它就是真实 plot 坐标）*/
         const placedSet = new Set();
@@ -645,10 +650,10 @@ window.APP = window.APP || {};
           road.position.set(xMid, roadY, z1);
           road.receiveShadow = true;
           _roadGroup.add(road);
-          /* 中心虚线：两段 */
+          /* 中心虚线：两段,位置误差 ±0.22(在 0.96 路段内) */
           [-0.22, 0.22].forEach(dz => {
             const stripe = new THREE.Mesh(
-              new THREE.BoxGeometry(0.008, stripeH, 0.10),
+              new THREE.BoxGeometry(STRIPE_W, stripeH, STRIPE_L),
               stripeMat
             );
             stripe.position.set(xMid, stripeY, z1 + dz);
@@ -668,7 +673,7 @@ window.APP = window.APP || {};
           _roadGroup.add(road);
           [-0.22, 0.22].forEach(dx => {
             const stripe = new THREE.Mesh(
-              new THREE.BoxGeometry(0.10, stripeH, 0.008),
+              new THREE.BoxGeometry(STRIPE_L, stripeH, STRIPE_W),
               stripeMat
             );
             stripe.position.set(x1 + dx, stripeY, zMid);
@@ -748,6 +753,183 @@ window.APP = window.APP || {};
     }
   }
 
+  /* ── 机位切换（2026-10-18 拍板：俯视 + 街景） ──────────────────────
+     两个共享 helper：
+       · _qr_collectBuiltCells()  —— 已建成 plot 的压缩后坐标 + 高度
+       · _qr_applyCamera()        —— 不锁 OrbitControls，set pos/target 后 update；
+                                    下次渲前用户一拖即自然接管 = 自由视角恢复 */
+  function _qr_collectBuiltCells(){
+    if (typeof STATE === 'undefined' || !STATE) return [];
+    const cellById = {};
+    (MAP.cells || []).forEach(c => { if (c && c.plot_id) cellById[c.plot_id] = c; });
+    const rowsS = new Set(), colsS = new Set();
+    (STATE.plots || []).forEach(p => {
+      if (!p || !p.plot_id) return;
+      const parts = String(p.plot_id).split(',');
+      const r = parseInt(parts[0], 10), c = parseInt(parts[1], 10);
+      if (isNaN(r) || isNaN(c)) return;
+      rowsS.add(r); colsS.add(c);
+    });
+    const rl = Array.from(rowsS).sort((a,b)=>a-b);
+    const cl = Array.from(colsS).sort((a,b)=>a-b);
+    const rc = _compactAxisCoords(rl), cc = _compactAxisCoords(cl);
+    const rowMap = rc.map, colMap = cc.map;
+    const out = [];
+    (STATE.plots || []).forEach(p => {
+      if (!p || !p.plot_id) return;
+      const cell = cellById[p.plot_id];
+      if (!cell || !cell.asset) return;
+      if ((p.status === 'constructing') || (cell.status === 'constructing')) return;
+      const parts = String(p.plot_id).split(',');
+      const r = parseInt(parts[0], 10), c = parseInt(parts[1], 10);
+      if (isNaN(r) || isNaN(c)) return;
+      const newR = rowMap[r], newC = colMap[c];
+      if (newR === undefined || newC === undefined) return;
+      out.push({ row: newR, col: newC });   /* 压缩后（显示层），跟 _renderCity 一致 */
+    });
+    return out;
+  }
+
+  /* 量 _plotGroup 里某个压缩后 plot 的实际最高 y（bbox top）。若无返回 0.6 兜底。 */
+  function _qr_plotTopY(centerX, centerZ){
+    if (!_plotGroup) return 0.6;
+    let top = 0;
+    const half = CELL_SPACING * 0.45;   /* plot 占 0.80，半径 0.40,稍放宽取 0.45 */
+    _plotGroup.children.forEach(node => {
+      const dx = node.position.x - centerX;
+      const dz = node.position.z - centerZ;
+      if (Math.abs(dx) > half || Math.abs(dz) > half) return;
+      const bb = new THREE.Box3().setFromObject(node);
+      if (bb && bb.max && isFinite(bb.max.y) && bb.max.y > top) top = bb.max.y;
+    });
+    return top > 0 ? top : 0.6;
+  }
+
+  /* 把相机挪到 (px,py,pz) lookAt (tx,ty,tz)，OrbitControls 不锁旋转 ——
+     用户一拖即自然"接管"，无需第三个按钮。 */
+  function _qr_applyCamera(px, py, pz, tx, ty, tz){
+    if (!_camera || !_controls) return;
+    _camera.position.set(px, py, pz);
+    _camera.up.set(0, 1, 0);
+    _camera.lookAt(tx, ty, tz);
+    _controls.target.set(tx, ty, tz);
+    _controls.update();
+  }
+
+  /* ① 俯视：从 (cx, H, cz) 正上方往下看，网格 side 撑满视口。
+     FOV 45° → tan(22.5°) ≈ 0.4142；canvas 纵横比 1200/750 = 1.6，
+     横边 = tan(fov/2)*aspect*dist。取 side/2 与 side/2/aspect 两维度的大者
+     反推 dist；加 5% 余量；最后夹在 controls.min/maxDistance 内。 */
+  function _qr_goTopView(){
+    if (!_camera || !_controls) return;
+    if (!_plotGroup) return;
+    const cells = _qr_collectBuiltCells();
+    const view = _cityViewBBox(cells);
+    const cx = view ? view.cx : GRID_CENTER;
+    const cz = view ? view.cz : GRID_CENTER;
+    const side = view ? view.side : 10;
+    const half = side / 2;
+    const aspect = CANVAS_W / CANVAS_H;
+    const tanHalfFov = Math.tan((_camera.fov * Math.PI / 180) / 2);
+    /* 纵边要容纳 half → d1；横边要容纳 half → d2（横 fov 更大,d2 更小）。
+       取 max 保证两边都内切。 */
+    const d1 = half / tanHalfFov;
+    const d2 = half / (tanHalfFov * aspect);
+    let H = Math.max(d1, d2) * 1.05;
+    H = Math.max(3, Math.min(38, H));   /* 与 maxDistance=40 留安全边 */
+    _qr_applyCamera(cx, H, cz, cx, 0, cz);
+  }
+
+  /* ② 街景：随机选一个已建成 plot，相机 = 其角上偏移 + 抬高（不穿模）。
+     方向从 8 方位取一；抬升 = 该 plot 最高 + 0.42（在 0.3–0.5 区间内）。 */
+  function _qr_goStreetView(){
+    if (!_camera || !_controls || !_plotGroup) return;
+    const cells = _qr_collectBuiltCells();
+    if (!cells.length) return;
+    const picked = cells[Math.floor(Math.random() * cells.length)];
+    const px = picked.col * CELL_SPACING + CELL_SPACING / 2;
+    const pz = picked.row  * CELL_SPACING + CELL_SPACING / 2;
+    const topY = _qr_plotTopY(px, pz);
+    /* 世界网格中心（按已建成 bbox；全无则兜底 GRID_CENTER） */
+    const view = _cityViewBBox(cells);
+    const cx = view ? view.cx : GRID_CENTER;
+    const cz = view ? view.cz : GRID_CENTER;
+    /* 8 方位随机 */
+    const k = Math.floor(Math.random() * 8);
+    const ang = k * Math.PI / 4;
+    const dx = Math.cos(ang), dz = Math.sin(ang);
+    const R = 0.6;                                  /* 水平偏出 0.6,出格 0.8/2=0.4 缝外 */
+    const lift = topY + 0.42;                       /* 该楼最高 + 0.42（防穿模）*/
+    _qr_applyCamera(px + dx * R, lift, pz + dz * R, cx, 1.0, cz);
+  }
+
+  /* 把俩新按钮插到 .cm-head（紧贴 ✕ 前），样式 = inline 版 .cm-close。
+     只能改 city-modal.js 这一个文件 → 容器/按钮 JS 里懒创建，inline style 复刻
+     的 .cm-close 视觉：var(--panel2) 底 / var(--line) 边 / 6px 圆角 / hover 换色。 */
+  function _ensureQrButtons(){
+    const head = document.querySelector('#city-modal .cm-head');
+    if (!head) return;
+    if (document.getElementById('btn-cm-top')) return;
+    const closeBtn = document.getElementById('btn-city-close');
+
+    const wrap = document.createElement('div');
+    wrap.id = 'cm-qr-buttons';
+    wrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-right:8px;';
+
+    const styleFor = b => {
+      b.style.cssText =
+        'background:var(--panel2);color:var(--ink);' +
+        'border:1px solid var(--line);border-radius:6px;' +
+        'padding:4px 10px;cursor:pointer;font-size:13px;font-weight:500;' +
+        'transition:background 0.15s;';
+      b.addEventListener('mouseenter', () => { b.style.background = 'var(--line)'; });
+      b.addEventListener('mouseleave', () => { b.style.background = 'var(--panel2)'; });
+    };
+
+    const topBtn = document.createElement('button');
+    topBtn.id = 'btn-cm-top';
+    topBtn.textContent = '📐 俯视';
+    topBtn.title = '切到垂直俯视图（拖拽鼠标可回自由视角）';
+    styleFor(topBtn);
+    topBtn.addEventListener('click', _qr_goTopView);
+
+    const stBtn = document.createElement('button');
+    stBtn.id = 'btn-cm-street';
+    stBtn.textContent = '🏙 街景';
+    stBtn.title = '随机挑一栋建成的楼,从楼顶外一点看全城';
+    styleFor(stBtn);
+    stBtn.addEventListener('click', _qr_goStreetView);
+
+    /* ③ 截图:强制渲染一帧后抓 PNG buffer(不依赖 preserveDrawingBuffer)。
+       下载名带 game_id + 时间戳,便于多档分类。*/
+    function _qr_exportPng(){
+      if (!_renderer || !_scene || !_camera) return;
+      _renderer.render(_scene, _camera);          /* 强制刷一帧 */
+      const url = _renderer.domElement.toDataURL('image/png');
+      const a = document.createElement('a');
+      const gid = (typeof STATE !== 'undefined' && STATE && STATE.game_id) ? STATE.game_id : 'city';
+      const ts = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+      a.href = url;
+      a.download = `city_${gid}_${ts}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    const pngBtn = document.createElement('button');
+    pngBtn.id = 'btn-cm-png';
+    pngBtn.textContent = '📷 截图';
+    pngBtn.title = '把当前 3D 画面导出为 PNG';
+    styleFor(pngBtn);
+    pngBtn.addEventListener('click', _qr_exportPng);
+
+    wrap.appendChild(topBtn);
+    wrap.appendChild(stBtn);
+    wrap.appendChild(pngBtn);
+    if (closeBtn && closeBtn.parentElement === head) head.insertBefore(wrap, closeBtn);
+    else head.appendChild(wrap);
+  }
+
   function _bind(){
     const btn = document.getElementById('btn-city-view');
     if (btn) btn.onclick = _open;
@@ -772,6 +954,8 @@ window.APP = window.APP || {};
         if (_labelGroup) _labelGroup.visible = _labelVisible;
       });
     }
+    /* ★ 2026-10-18 机位切换：俯视 / 街景（只改本文件,JS 懒创建注入 .cm-head） */
+    _ensureQrButtons();
   }
 
   if (document.readyState === 'loading'){

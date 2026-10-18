@@ -28,16 +28,35 @@
 
   <div id="setup" class="panel">
     <h2>🎮 开局 / 读档</h2>
-    <div class="row">
-      <input id="in-game" value="g1" style="max-width:200px" placeholder="对局 ID（字母数字_-）">
-      <button id="btn-new" class="primary">开新局</button>
-      <button id="btn-load">读档</button>
-      <select id="sel-games" style="max-width:220px"></select>
+    <div class="setup-grid">
+
+      <div class="setup-card">
+        <p class="cap">🎮 开新局</p>
+        <div class="row">
+          <input id="in-game" value="g1" placeholder="新建对局 ID（字母数字_-）">
+          <button id="btn-new" class="primary">开新局</button>
+        </div>
+        <ul class="setup-note">
+          <li>开局现金 <b>1200</b>、零地块</li>
+          <li>季初补贴：Q1–Q7 各 <b>1200</b>，Q8 起 <b>300</b></li>
+          <li>地图上全是空地，点一格即可建造（§5.3）</li>
+        </ul>
+      </div>
+
+      <div class="setup-card">
+        <p class="cap">📂 读取存档</p>
+        <div class="row">
+          <select id="sel-games"></select>
+          <button id="btn-load">读档</button>
+        </div>
+        <ul class="setup-note">
+          <li>选择左侧下拉中的存档，点 <kbd>读档</kbd> 载入</li>
+          <li>存档列表由服务器自动刷新</li>
+          <li>读档后即刻回到该对局当前季度</li>
+        </ul>
+      </div>
+
     </div>
-    <p class="muted" style="margin:8px 0 0">
-      开新局：开局现金 <b>1200</b>、<b>零地块</b>；Q1–Q7 季初再发 <b>1200</b>（Q8 起 300），
-      地图上全是可建空地，先在地图上点一格建造（《规则基线》§5.3）。
-    </p>
   </div>
 
   <div id="main" class="hidden">

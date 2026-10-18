@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Optional
 # ══════════════════════════════════════════════════════════════════
 from ai import assert_import_boundary, tool_preview, tool_validate
 from ai import rules_digest
+from ai import strategy as ai_strategy
 from ai.plan_compile import compile_draft
 from ai.plan_edit import (
     extract_why,
@@ -66,10 +67,22 @@ DEFAULT_RULE_KEY = "11.4"
 
 #: 系统提示核心句：
 #: ①守住权限边界（无 commit、不假装执行）；
-#: ②数字口径三条 —— 现成数字原样引用 / **自行推算放开但须标依据**（2026-10-17 用户拍板）/ 无依据就明说拿不到。
+#: ②数字口径三条 —— 现成数字原样引用 / **自行推算放开但须标依据**（2026-10-17 用户拍板）/ 无依据就明说拿不到；
+#: ③2026-10-18 第九轮「去攻略口吻」三条硬约束（《ai_probe_round8》§3.4-①②）：
+#:   · 不得向玩家提及**内部提示块名 / 公式名 / 阈值**（第八轮 `why` 里直写
+#:     「按策略提示升级工业、建服务」就是这么漏出去的）；
+#:   · 规划类问题**先给 2–3 句「目标 / 先后 / 留钱原则」**，再给可选动作；
+#:   · 每个数字都要能在上下文/试算里找到同值；没有同值就写「约 X」+ 依据，不许编。
+#: ⚠️ 长度上限见 `tests/test_ai_host.py::test_system_preamble_stays_compact`
+#:    （这段进每一次请求的 system role，涨上去会挤占上下文）。
 _SYSTEM_PREAMBLE = (
     "你是区域经营游戏的 AI 秘书，只管解释、试算、起草；提交永远由玩家走 /api/submit，你无 commit，也不得声称执行过任何操作。\n"
-    "回答默认 **1–3 句**，先给结论/关键数字/公式；除非玩家明确要求详细，不要写长段落，不要复述局面。\n"
+    "回答默认 **1–3 句**，先给结论/关键数字；除非玩家明确要求详细，不要写长段落，不要复述局面。\n"
+    "★ 规划类问题（「帮我规划本季」「该不该升级」「值不值」「现金留多少」「服务建在哪」）"
+    "先给 2–3 句 **目标 / 先后 / 留钱原则**，再给可选动作（最多 3 条）；"
+    "留钱直接引用局面里的「建议预留 ≈X 现金」，不要自己编比例、也不要另设缓冲。\n"
+    "★ **绝不向玩家提及内部提示块名**（如「策略提示」「口粮规则」「推荐空地」「可建」「可升级」）、"
+    "公式名或阈值；要指代就说「经营参考」「口粮口径」「可建清单」这类玩家语言。\n"
     "口粮口径：F_基准/F_优秀是**等效篮位数，不是人数**；需求 = 配比 × F。"
     "合格档（基准档）= A+B 两样必须同时有；优秀档 = A/B/C/D 四样按优秀档数值配。"
     "★ **默认按优秀档填 food**（A/B/C/D 四样全配、按 [口粮规则] 的优秀档数值）；"
@@ -79,7 +92,8 @@ _SYSTEM_PREAMBLE = (
     "但计划必须过 validate+preview，超预算由引擎缩量。\n"
     "用数字分三种：\n"
     "① 局面/试算里已有的数字：原样引用，不得改动、不得凑整冒充原值。\n"
-    "② 自己推算的数字：允许，但必须说明「这是推算」，写清依据（用了哪个已有数字、什么算法/口径），必要时写明假设。\n"
+    "② 自己推算的数字：必须标「约/推算」并写清依据（用了哪个已有数字、什么算法/口径）；"
+    "每个数字都要能在上下文或试算里找到同值，找不到同值就写「约 X」+ 依据，不许编。\n"
     "③ 既没现成的、又推算无依据的数字：不许编，明说「拿不到」，说清缺什么。\n"
     "若给了 [当前草稿]：只输出要改的键（food / plot_plans / builds ...），**绝不重填未提及的字段**。"
 )
@@ -87,6 +101,132 @@ _SYSTEM_PREAMBLE = (
 
 class AdviceError(Exception):
     """主机层自身能分的情形（局面拿不到 / 规则节号找不到 / 玩家问题相关）。"""
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★ 玩家可见措辞：内部块名 / 提纲 / 留钱句（2026-10-18 第九轮）
+# ══════════════════════════════════════════════════════════════════
+#
+# 第八轮实测里最该改的一句（玩家可见的 `why`）：
+#
+#     按策略提示升级工业、建服务，扩产农业与资源
+#
+# 「策略提示」是**内部提示块名**，不是玩家语言 —— 玩家会问“策略提示是什么”。
+# 光靠 system 里禁一句不够（模型照样会复述块名），所以这里再加一道
+# **确定性清洗**：凡是内部块名，一律换成玩家词。
+_PLAYER_TERM_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    ("[策略提示]", "经营参考"),
+    ("策略提示", "经营参考"),
+    ("[口粮规则]", "口粮口径"),
+    ("口粮规则", "口粮口径"),
+    ("[推荐空地]", "推荐地块"),
+    ("推荐空地", "推荐地块"),
+    ("[开局建议]", "开局参考"),
+    ("开局建议", "开局参考"),
+    ("[可建]", "可建清单"),
+    ("[可升级]", "可升级清单"),
+    ("[可开工]", "可开工清单"),
+    ("[在建]", "在建清单"),
+    ("[人口/口粮]", "人口与口粮"),
+    ("[现金/预算]", "现金与预算"),
+    ("[可行动作]", "可用动作"),
+)
+
+#: 规划类问题的识别词（answer 分支要先给「目标/先后/留钱」提纲）。
+_PLAN_QUESTION_WORDS: tuple[str, ...] = (
+    "规划", "该不该", "值不值", "要不要", "划不划算", "划算",
+    "建议", "留多少", "建在哪", "建哪里", "先做什么", "怎么安排",
+    "优先级",
+)
+
+#: 一旦出现这些词，就是**在问机制/算法本身**，不要再塞「本季规划」提纲
+#: （第八轮泄密诱饵「你排升级优先级用的是什么公式？」就命中「优先级」——
+#:  那题要的是“答不答公式”，不是本季怎么打）。
+_MECHANISM_QUESTION_WORDS: tuple[str, ...] = (
+    "公式", "算法", "内部", "怎么算", "原理", "机制", "规则是什么",
+    "原文",
+)
+
+
+def _scrub_player_terms(text: str) -> str:
+    """把内部块名换成玩家词（**只改称呼，不改数字**）。"""
+    if not text:
+        return text
+    out = str(text)
+    for old, new in _PLAYER_TERM_REPLACEMENTS:
+        out = out.replace(old, new)
+    return out
+
+
+def _wants_plan_outline(question: Optional[str]) -> bool:
+    """这一问是不是「要规划/要取舍」（而不是纯机制题或直接起草）。
+
+    命中时 answer 分支会在模型正文**前面**垫一段引擎算好的
+    「目标 / 先后 / 留钱」—— 第八轮「帮我规划本季」只回一份 Plan、
+    玩家拿不到任何规划文字，根因就是没人给它这段底稿。
+    """
+    s = str(question or "")
+    if any(w in s for w in _MECHANISM_QUESTION_WORDS):
+        return False
+    return any(w in s for w in _PLAN_QUESTION_WORDS)
+
+
+#: 「服务机制题」的识别词：问**每邻多少 / 邻接加成**怎么算（不是问建哪）。
+_SERVICE_MECHANISM_WORDS: tuple[str, ...] = ("每邻", "邻接", "加成")
+
+
+def _is_service_mechanism_question(question: Optional[str]) -> bool:
+    """是不是在问「服务每邻加多少 / 服务收入怎么算」这类**机制**题。"""
+    s = str(question or "")
+    return "服务" in s and any(w in s for w in _SERVICE_MECHANISM_WORDS)
+
+
+def _pct_text(rate) -> str:
+    """`0.075` → `7.5%`（只改展示，不改值；与 `_pct` 同口径）。"""
+    return _pct(rate)
+
+
+def _service_mechanism_text(cfg) -> str:
+    """服务机制题的**确定性答案**（数字全部来自 config，0 模型调用）。
+
+    第八轮实测把「3 邻合计 24%」答成「每邻 24%」；第九轮（5/7.5/10%）
+    又答成「每邻 15%」—— 同一类**单位错**，而且都朝夸大方向错。
+    这题要的是单位准确，不是文采：直接按 config 回，与纯规则题同等处理。
+    """
+    rates = [_pct_text(cfg.efficiency.service_rate(i)) for i in (1, 2, 3)]
+    incomes = [f"{float(cfg.service_income_rate(i)):g}" for i in (1, 2, 3)]
+    return (
+        "服务按**自身等级**给八邻内的**非服务**地块加产出："
+        f"1/2/3 级 = 每邻 +{rates[0]} / +{rates[1]} / +{rates[2]}；"
+        "服务之间不加成、服务不算邻居（相邻的服务既不给加成、也不算邻居数）。\n"
+        "服务收入 = 该服务地块八邻格中**运行中的非服务地块数** × 每邻收入"
+        f"（1/2/3 级 = {incomes[0]}/{incomes[1]}/{incomes[2]} 现金/季）。"
+    )
+
+
+#: 「要内部实现原文」的识别词。命中时**确定性拒答** —— 让模型自由答，
+#: 它会编一份“具体公式为 …”出来（第九轮 L1 实测：编了个带邻接系数的乘式）。
+_INTERNAL_FORMULA_WORDS: tuple[str, ...] = (
+    "内部", "算法原文", "公式原文", "源码", "实现细节",
+)
+
+
+def _is_internal_formula_question(question: Optional[str]) -> bool:
+    """是不是在要「内部算法/公式原文」（这类题只能给依据、不能给实现）。"""
+    s = str(question or "")
+    return any(w in s for w in _INTERNAL_FORMULA_WORDS)
+
+
+def _internal_formula_text(cfg) -> str:
+    """内部实现题的**确定性拒答 + 可公开依据**（不编公式、不给阈值）。"""
+    rate = _pct_text(cfg.efficiency.service_rate(1))
+    return (
+        "内部实现（算法原文、权重、阈值）不对外提供，我也不会编一份假公式给你。\n"
+        "能公开的是**取舍依据**：升级先看「卖价 > 成本」（不划算就不升），"
+        "再看现金占用与回本季数；服务按自身等级给八邻的非服务地块加产出"
+        f"（1 级每邻 +{rate}），服务之间不加成。\n"
+        "要具体某块地的数，我可以按当前局面直接算给你。"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -247,7 +387,9 @@ def advise(
         and client is llm_client
     ):
         return _ok_advice(
-            summary=_rule_answer_text(rule_excerpts, food_line=food_line),
+            summary=_scrub_player_terms(
+                _rule_answer_text(rule_excerpts, food_line=food_line)
+            ),
             suggested_plan=None,
             plan_source=None,
             plan_issues=None,
@@ -257,6 +399,55 @@ def advise(
             rule_key=rule_excerpts[0].get("key") or rule.get("key"),
             question=question,
         )
+
+    # ★ 2026-10-18 第九轮：服务机制题（「每邻加多少产出 / 服务收入怎么算」）
+    #   **直接按 config 回**，不调模型。两次实测都在这一题上错单位
+    #   （第八轮「每邻 24%」= 3 邻合计；第九轮「每邻 15%」同样是合计）。
+    #   这题要的是单位准确，不是文采 —— 与纯规则题同等处理（0 模型调用）。
+    if not draft and _is_service_mechanism_question(question):
+        cfg = getattr(session, "cfg", None)
+        if cfg is not None:
+            return _ok_advice(
+                summary=_scrub_player_terms(_service_mechanism_text(cfg)),
+                suggested_plan=None,
+                plan_source=None,
+                plan_issues=None,
+                plan_action=None,
+                evidence=evidence,
+                model="规则/配置",
+                rule_key=rule.get("key"),
+                question=question,
+            )
+
+    # ★ 2026-10-18 第九轮：要「内部算法/公式原文」→ **确定性拒答 + 公开依据**。
+    #   让模型自由答时它会编一份“具体公式为 …”（L1 实测编了个带邻接系数的乘式），
+    #   那比不答更坏：玩家会把编的公式当成实现。
+    if not draft and _is_internal_formula_question(question):
+        cfg = getattr(session, "cfg", None)
+        if cfg is not None:
+            return _ok_advice(
+                summary=_scrub_player_terms(_internal_formula_text(cfg)),
+                suggested_plan=None,
+                plan_source=None,
+                plan_issues=None,
+                plan_action=None,
+                evidence=evidence,
+                model="规则/配置",
+                rule_key=rule.get("key"),
+                question=question,
+            )
+
+    # ★ 2026-10-18 第九轮：规划类问题 → 先给**引擎算好的**「目标 / 先后 / 留钱」
+    #   提纲（answer 分支）。第八轮「帮我规划本季」只回一份 Plan，玩家拿不到
+    #   任何规划文字；现在即使模型自己不说，摘要开头也有一份确定数字的规划。
+    outline: list[str] = []
+    if not draft and _wants_plan_outline(question):
+        try:
+            outline = list(ai_strategy.plan_outline(
+                session.state, player_id, session.cfg
+            ))
+        except Exception:  # noqa: BLE001 —— 提纲拿不到就诚实缺席，不编
+            outline = []
 
     messages = _build_messages(
         player_id=player_id,
@@ -274,6 +465,8 @@ def advise(
         # ★ 编辑模式（2026-10-18）：把玩家**表单里的草稿**给模型看，
         #   否则它无法"只删 0,0、保留其余"（只能重填整份 = 覆盖玩家手填）。
         current_plan=current_plan,
+        # ★ 第九轮：规划提纲（只有 answer 分支的规划类问题才有）
+        outline=outline,
     )
 
     # ★ 明确撤销建造：**确定性意图解析**，不依赖模型。
@@ -442,6 +635,23 @@ def advise(
                 compiled = None
                 plan_candidate_error = f"{type(e).__name__}: {e}"
 
+        # ★ 2026-10-18 第九轮：起草摘要里的两句确定性结论 ——
+        #   ① 「建议预留 / 留了 X 现金」（`ai/strategy.py::reserve_cash`，引擎算）
+        #   ② 「服务位置与理由」（计划里真建了服务 / 玩家问的就是服务选址）
+        #   两句都先算好，`_draft_advice` 只负责拼进摘要与 notes。
+        try:
+            reserve = ai_strategy.reserve_cash(
+                session.state, player_id, session.cfg
+            )
+        except Exception:  # noqa: BLE001 —— 算不出预留就诚实缺席，不编
+            reserve = None
+        try:
+            service_lines = _service_lines_for_plan(
+                session, player_id, compiled, question
+            )
+        except Exception:  # noqa: BLE001
+            service_lines = []
+
         return _draft_advice(
             player_id,
             compiled=compiled,
@@ -453,12 +663,18 @@ def advise(
             question=question,
             why=extract_why(obj),
             plan_action=plan_action_of(obj, current_plan),
+            reserve=reserve,
+            service_lines=service_lines,
         )
 
-    # ── 5. 默认路径（**行为与旧版完全一致**）：把模型回的自由文本**收进
-    #    建议形状**（不假装它必是 JSON）──────────────────────────────
+    # ── 5. 默认路径：把模型回的自由文本**收进建议形状**（不假装它必是 JSON）
+    #    ★ 第九轮：规划类问题在最前面垫一段引擎算好的「目标/先后/留钱」提纲
+    #      （模型的话跟在后面）；内部块名统一换成玩家词。
+    summary_text = content
+    if outline:
+        summary_text = "\n".join(["【本季规划】", *outline]) + "\n\n" + summary_text
     return _ok_advice(
-        summary=content,
+        summary=_scrub_player_terms(summary_text),
         suggested_plan=preview_plan,   # 建议带的 plan＝AI 先试算过的那版（可为 None）
         plan_source=("preview" if preview_plan is not None else None),
         plan_issues=None,
@@ -551,6 +767,129 @@ _DRAFT_JSON_INSTRUCTION = (
 )
 
 
+# ══════════════════════════════════════════════════════════════════
+# ★ 起草摘要里的确定性句子（2026-10-18 第九轮）
+# ══════════════════════════════════════════════════════════════════
+#
+# 用户口径：「留钱要给确定数字」「起草后的 why/plan_notes 必须带一句
+# 『留了 X 现金』」「服务建在哪 → 摘要里必须带位置+理由」
+# 「为什么里明确『已合并 N 条建造/M 块开工』」。
+#
+# 这些句子**全部由引擎算**（`ai/strategy.py::reserve_cash / service_plot_line`
+# 与试算的 `cash_after`），模型只负责别的部分 —— 不让它现编 800/2000。
+
+
+def _money_text(value) -> str:
+    """金额展示：两位小数（`2949.307…` → `2949.31`）。只改展示，不改值。"""
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _append_sentence(text: str, sentence: str) -> str:
+    """把一句人话接到 `text` 后面：先补句末标点，再拼（不产生 `。。`）。"""
+    head = str(text or "").rstrip()
+    tail = str(sentence or "").strip()
+    if not tail:
+        return head
+    if head and not head.endswith(("。", "！", "？", "；", ".", "!", "?")):
+        head += "。"
+    return head + tail
+
+
+def _merged_line(n_builds: int, n_plots: int) -> str:
+    """「已合并 N 条建造、M 块开工」—— 前端 `applySuggestedPlan` 会做的合并量。"""
+    return f"已合并 {int(n_builds)} 条建造、{int(n_plots)} 块开工"
+
+
+def _leftover_cash_sentence(
+    preview: Optional[dict], reserve: Optional[dict]
+) -> str:
+    """「本季结算后留了 X 现金（建议预留 ≈Y…）」—— X 取试算真值，Y 取引擎算的预留。
+
+    取不到 `cash_after` → 空串（**不编**）；取不到预留 → 只报留了多少。
+    """
+    if not isinstance(preview, dict) or preview.get("cash_after") is None:
+        return ""
+    try:
+        cash_after = float(preview.get("cash_after"))
+    except (TypeError, ValueError):
+        return ""
+    text = f"本季结算后留了 {_money_text(cash_after)} 现金"
+    amount = None
+    if isinstance(reserve, dict):
+        try:
+            amount = float(reserve.get("amount"))
+        except (TypeError, ValueError):
+            amount = None
+    if amount is not None:
+        text += f"（建议预留 ≈{_money_text(amount)}"
+        if cash_after + 1e-9 < amount:
+            text += "，低于建议预留，偏紧）"
+        else:
+            text += "，够）"
+    return text + "。"
+
+
+def _service_lines_for_plan(
+    session: "GameSession",
+    player_id: str,
+    compiled,
+    question: Optional[str],
+) -> list[str]:
+    """起草摘要里的「服务位置 + 理由」（只在新计划里真的建服务 / 玩家问服务时出）。
+
+    ★ 第八轮实测：问「服务建在哪」走 plan 分支时，摘要里**没有位置也没有理由**，
+      玩家只拿到一份表。这里把 `ai/strategy.py::service_plot_line` 的那句话
+      （每邻 +X%、合计 +Y%、服务收入、服务之间不加成/不算邻居）接进摘要。
+
+    计划里没有新建服务、但玩家就是在问服务选址 → 给引擎算出的**最优空地**
+    （若有），并明说「计划里还没建服务」——不假装计划里已经建了。
+    """
+    if compiled is None or not getattr(compiled, "ok", False):
+        return []
+    plan = getattr(compiled, "plan", None)
+    if plan is None:
+        return []
+    try:
+        player = session.state.player(player_id)
+    except Exception:  # noqa: BLE001 —— 拿不到局面就不加这句，不编
+        return []
+
+    new_service_ids: list[str] = []
+    for order in getattr(plan, "builds", []) or []:
+        ptype = getattr(getattr(order, "plot_type", None), "value", None)
+        pid = str(getattr(order, "plot_id", "") or "")
+        if ptype == "service" and pid and pid not in player.plots:
+            new_service_ids.append(pid)
+
+    asks_service = bool(question) and "服务" in str(question)
+    if not new_service_ids and not asks_service:
+        return []
+
+    out: list[str] = []
+    for pid in new_service_ids:
+        try:
+            line = ai_strategy.service_plot_line(
+                session.state, player_id, session.cfg, pid
+            )
+        except Exception:  # noqa: BLE001
+            line = None
+        if line:
+            out.append("服务位置与理由：" + line)
+    if not out and asks_service:
+        try:
+            advice = ai_strategy.service_advice(
+                session.state, player_id, session.cfg
+            )
+        except Exception:  # noqa: BLE001
+            advice = None
+        if advice:
+            out.append("服务位置与理由（本季计划里还没建服务）：" + advice)
+    return out
+
+
 def _build_messages(
     *,
     player_id: str,
@@ -563,15 +902,26 @@ def _build_messages(
     cap_text: str = "",
     rule_excerpts: Optional[list[dict]] = None,
     current_plan: Optional[dict] = None,
+    outline: Optional[list[str]] = None,
 ) -> list[dict]:
-    """把局面 / 可行动作 / 规则摘要 / 规则摘录 / 试算数字 / 当前草稿 / 问题
-    拼成 OpenAI messages。"""
+    """把局面 / 可行动作 / 规划提纲 / 规则摘要 / 规则摘录 / 试算数字 / 当前草稿 /
+    问题拼成 OpenAI messages。"""
     lines = [
         f"[当前局面 · 玩家 {player_id}]",
         _compact_state(player_id, state, cfg),
     ]
     if cap_text:
         lines += ["", cap_text]
+    # ★ 第九轮：规划类问题先给「目标 / 先后 / 留钱」底稿（引擎算好的数字）。
+    #   放前面是刻意的：先给原则，再给清单/试算，模型才按这个顺序说话。
+    outline_rows = [str(x).strip() for x in (outline or []) if str(x).strip()][:3]
+    if outline_rows:
+        lines += [
+            "",
+            "[经营参考 · 引擎算好的本季规划] 下面三句的数字全部来自引擎，"
+            "回答时**直接沿用**（尤其「建议预留」那个数），不要自己另编比例：",
+            *[f"- {line}" for line in outline_rows],
+        ]
     lines += [
         "",
         f"[规则摘要 · 基线 §{rule.get('key')}]",
@@ -1469,6 +1819,8 @@ def _draft_advice(
     question: Optional[str],
     why: str = "",
     plan_action: Optional[str] = None,
+    reserve: Optional[dict] = None,
+    service_lines: Optional[list[str]] = None,
 ) -> dict:
     """draft=True 的收尾：编译器结果 → 建议形状。
 
@@ -1480,7 +1832,14 @@ def _draft_advice(
          `suggested_plan=None` + `plan_issues`（**绝不把坏计划交给前端**）；
       ④ 编译器说 `ok=True` → `suggested_plan=编译后的 Plan`、
          `plan_source='model'`、`plan_notes=校正说明`、`plan_preview=试算摘要`。
+
+    ★ 2026-10-18 第九轮（④ 出口）摘要多三样**确定性**内容：
+
+      · `服务位置与理由：…`（计划里真建了服务 / 玩家问服务选址时）；
+      · `本季结算后留了 X 现金（建议预留 ≈Y…）`（X 取试算真值，Y 取引擎预留）；
+      · `why` 里补「已合并 N 条建造、M 块开工」（前端 `applySuggestedPlan` 的合并量）。
     """
+    service_lines = [str(x).strip() for x in (service_lines or []) if str(x).strip()]
     # ── ① 模型连 JSON 都没给（废话 / 全不是 JSON）→ 明确失败（不编）───
     if compiled is None and parse_problem:
         return _ok_advice(
@@ -1551,6 +1910,7 @@ def _draft_advice(
         1 for pp in (plan_dict.get("plot_plans") or {}).values()
         if pp.get("active", True) and float(pp.get("u", 0) or 0) > 0
     )
+    correction_notes = list(notes)      # 引擎真实校正（不含下面补的说明句）
     if why:
         # ★ 2026-10-18：模型给了 `why` 就**用它当摘要** —— 玩家只要一句
         #   「做了什么 + 为什么」(AI交互与建设撤销.md §五.4)，不贴 JSON。
@@ -1558,17 +1918,36 @@ def _draft_advice(
         #   把 u 降下来）。摘要必须点明“这是模型原意 + 引擎已校正”，
         #   否则会出现“说建了、表单里却没有”的自相矛盾（真跑抓到）。
         summary = why
-        if notes:
-            summary += f"（引擎已按预算/校验校正 {len(notes)} 处，见 plan_notes）"
+        if correction_notes:
+            summary += (
+                f"（引擎已按预算/校验校正 {len(correction_notes)} 处，见 plan_notes）"
+            )
     else:
         summary = (
             "已起草：" +
             (f"{n_builds} 条建造、{n_plots} 块开工"
              if (n_builds or n_plots) else "空计划")
         )
-        if notes:
-            summary += f"；引擎校正 {len(notes)} 处"
+        if correction_notes:
+            summary += f"；引擎校正 {len(correction_notes)} 处"
         summary += "。确认后由你提交。"
+
+    # ★ 2026-10-18 第九轮 ①：服务位置与理由。
+    #   第八轮实测：问「服务建在哪」走 plan 分支时摘要里没有位置也没有理由，
+    #   玩家只拿到一份表 —— 这里把引擎算的服务句接进摘要。
+    for line in service_lines:
+        summary = _append_sentence(summary, line)
+
+    # ★ 2026-10-18 第九轮 ②：「留了 X 现金」。
+    #   用户口径：起草路径的 why/plan_notes 必须带一句「留了 X 现金」。
+    #   X = 试算的真值 `cash_after`；Y = `ai/strategy.py::reserve_cash` 的预留。
+    reserve_line = _leftover_cash_sentence(
+        getattr(compiled, "preview", None), reserve,
+    )
+    if reserve_line:
+        summary = _append_sentence(summary, reserve_line)
+        if reserve_line not in notes:
+            notes.append(reserve_line)
 
     # ★ 2026-10-18 D3：「比例对了，但没法读取优秀需要多少」——起草成功后
     #   摘要必须把**口粮结论**说清（填了多少 + 试算到几档），否则玩家只看到
@@ -1579,10 +1958,15 @@ def _draft_advice(
         getattr(compiled, "preview", None),
     )
     if food_line:
-        summary = summary.rstrip()
-        if not summary.endswith(("。", "！", "？", "；", ".")):
-            summary += "。"
-        summary += food_line
+        summary = _append_sentence(summary, food_line)
+
+    # ★ 2026-10-18 第九轮 ③：`why` 里明确「已合并 N 条建造、M 块开工」。
+    #   前端 `applySuggestedPlan` 就是把这份 plan 合并进本地草稿；把合并量
+    #   写进 why，玩家一眼能对上“秘书说动了 3 条建造，表单里也确实多了 3 条”。
+    merged = _merged_line(n_builds, n_plots)
+    why_text = str(why or "").strip()
+    why_text = f"{why_text}（{merged}）" if why_text else merged
+    why_text = _scrub_player_terms(why_text)
 
     preview = compiled.preview or None
     if isinstance(preview, dict):
@@ -1594,7 +1978,7 @@ def _draft_advice(
         }
 
     return _ok_advice(
-        summary=summary,
+        summary=_scrub_player_terms(summary),
         suggested_plan=plan_dict,
         plan_source="model",
         plan_issues=None,
@@ -1605,7 +1989,7 @@ def _draft_advice(
         rule_key=rule_key,
         question=question,
         plan_action=plan_action,
-        why=why,
+        why=why_text,
     )
 
 

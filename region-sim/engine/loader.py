@@ -128,7 +128,9 @@ class EfficiencyConfig:
     """
 
     adjacency_per_neighbor: float = 0.05
-    adjacency_cap: float = 0.40
+    # ★ 2026-10-18 第九轮：用户裁定「加成封顶删掉」→ 默认值也改成 `None`（不封顶）。
+    #   代码与 config 都必须支持 None；旧档/旧配置里显式写了 0.40 的照用。
+    adjacency_cap: Optional[float] = None
 
     # 服务给邻居的加成率，按【服务自身等级】索引。
     # 例：{1: 0.05, 2: 0.075, 3: 0.10}
@@ -177,7 +179,6 @@ class EfficiencyConfig:
         if self.service_cap is not None:
             bonus = min(bonus, self.service_cap)
         return 1.0 + bonus
-
     def ramp_factor(self, running_quarters: int) -> float:
         """磨合系数：第 1 季 0.5、第 2 季 0.75、第 3 季起 1.0。
 
@@ -679,7 +680,9 @@ def load_config(path: str | Path | None = None) -> Config:
     adj = eff.get("adjacency", {})
     cfg.efficiency = EfficiencyConfig(
         adjacency_per_neighbor=float(adj.get("per_neighbor", 0.05)),
-        adjacency_cap=float(adj.get("cap", 0.40)),
+        adjacency_cap=(
+            None if adj.get("cap") is None else float(adj.get("cap", 0.40))
+        ),
         service_rate_by_level={
             int(k): float(v)
             for k, v in (adj.get("service_rate_by_level") or {}).items()

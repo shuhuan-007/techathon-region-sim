@@ -8,7 +8,7 @@
 2026-10-16 第 4 步抽到 `engine/finance.py`，为的是**能单独对账**。
 
 ★ 本文件最重要的一条是 `test_wages_are_not_intermediate_input`：
-  **工资不能当中间投入扣掉** —— 写错这条，甲区增加值会从 66 变成 30。
+  **工资不能当中间投入扣掉** —— 写错这条，甲区增加值会从 42 变成 6。
 """
 
 from __future__ import annotations
@@ -88,11 +88,13 @@ def test_pipeline_records_tax_as_refund():
     assert abs(r.wage_tax_refund - 3.6) < TOL, (
         f"工资税回流应为 3.6，实得 {r.wage_tax_refund}"
     )
-    # 期末现金 = 1000 − 66 + 94.72 + 3.60 = 1032.32（M1 锚点，运营口径）
+    # 期末现金 = 1000 − 66 + 71.04 + 3.60 = 1008.64（M1 锚点，运营口径）
+    # ★ 2026-10-18 第八轮 P0：F 24→18 → 甲区成交价 23.68→17.76，
+    #   sales_revenue = 4 × 17.76 = 71.04（旧 94.72）。
     # ★ 2026-10-18 S1：补贴改为季初发放、不进结算 → 账面 = 运营锚点本身。
     assert abs(r.subsidy) < 1e-9, f"S1 起结算报告 subsidy 应为 0，实得 {r.subsidy}"
-    assert abs(st.players["p1"].cash - 1032.32) < 1e-9, (
-        f"期末现金应为 1032.32（S1 起补贴不进账），实得 {st.players['p1'].cash}"
+    assert abs(st.players["p1"].cash - 1008.64) < 1e-9, (
+        f"期末现金应为 1008.64（S1 起补贴不进账），实得 {st.players['p1'].cash}"
     )
 
 
@@ -119,21 +121,21 @@ def test_tax_is_not_baked_into_deduction():
 def test_wages_are_not_intermediate_input():
     """★★ **工资不能当中间投入扣掉**（§7.5）—— 本项目最容易写反的一条。
 
-    甲区：产出价值 96（F×4 @ P0=24）− 原料 0 − 经营费 30 − 粮食 0 = **66**。
+    甲区：产出价值 72（F×4 @ P0=18）− 原料 0 − 经营费 30 − 粮食 0 = **42**。
 
-    ⚠️ 若把工资 36 也扣掉 → 30 ≠ 66，**M1 锚点立刻对不上**。
+    ⚠️ 若把工资 36 也扣掉 → 6 ≠ 42，**M1 锚点立刻对不上**。
        GDP 的"增加值"法里，工资属于**增加值**（劳动者报酬），
        不是中间消耗 —— 它不是"买来的东西"。
     """
     st, r = run_quarter(PlotType.RESOURCE, 1)
 
-    assert abs(r.value_added - 66.0) < TOL, (
-        f"★ 甲区增加值应为 66，实得 {r.value_added}\n"
-        f"  ⚠️ 若实得 30，说明工资被当成中间投入扣掉了（36 = 66 − 30）。"
+    assert abs(r.value_added - 42.0) < TOL, (
+        f"★ 甲区增加值应为 42，实得 {r.value_added}\n"
+        f"  ⚠️ 若实得 6，说明工资被当成中间投入扣掉了（36 = 42 − 6）。"
     )
 
     # 直接断言"不是把工资扣掉的那个数"
-    wrong = 66.0 - 36.0
+    wrong = 42.0 - 36.0
     assert abs(r.value_added - wrong) > 1.0, "增加值不该等于「产出 − 原料 − 经营 − 工资」"
 
 
@@ -145,7 +147,7 @@ def test_value_added_formula_is_output_minus_materials():
     out_v = F.output_value(r.production, cfg)
     mat_v = F.material_value(r, cfg)
 
-    assert abs(out_v - 96.0) < TOL, f"产出价值（F×4 @24）应为 96，实得 {out_v}"
+    assert abs(out_v - 72.0) < TOL, f"产出价值（F×4 @18）应为 72，实得 {out_v}"
     assert abs(mat_v - 30.0) < TOL, f"中间投入（经营费 30）应为 30，实得 {mat_v}"
     assert abs(F.value_added(r, cfg) - (out_v - mat_v)) < TOL
     assert abs(F.value_added(r, cfg) - r.value_added) < TOL, (
@@ -156,42 +158,45 @@ def test_value_added_formula_is_output_minus_materials():
 def test_value_added_uses_p0_not_settlement_price():
     """★ GDP 用**固定参考价 `P0`**，不随季度成交价变（§7.5）。
 
-    甲区结算价 23.68 ≠ P0 24。若有人误用成交价，
-    产出价值会变成 `4 × 23.68 = 94.72`（那是**销售收入**，不是 GDP）。
+    甲区结算价 17.76 ≠ P0 18。若有人误用成交价，
+    产出价值会变成 `4 × 17.76 = 71.04`（那是**销售收入**，不是 GDP）。
     """
     cfg = load_config()
     st, r = run_quarter(PlotType.RESOURCE, 1)
 
-    assert abs(r.sales_revenue - 94.72) < 1e-9, "销售收入按成交价 23.68 算"
-    assert abs(F.output_value(r.production, cfg) - 96.0) < TOL, (
-        "★ GDP 的产出价值必须按 P0=24 算，不是成交价 23.68"
+    assert abs(r.sales_revenue - 71.04) < 1e-9, "销售收入按成交价 17.76 算"
+    assert abs(F.output_value(r.production, cfg) - 72.0) < TOL, (
+        "★ GDP 的产出价值必须按 P0=18 算，不是成交价 17.76"
     )
-    assert abs(F.output_value(r.production, cfg) - r.sales_revenue) > 1.0, (
-        "统计口径与现金口径是两个数，不该相等"
+    # 统计口径与现金口径是两个数：差额恰 = 数量 × (P0 − 成交价) = 4 × 0.24 = 0.96
+    gap = F.output_value(r.production, cfg) - r.sales_revenue
+    assert abs(gap - 4.0 * (cfg.price_of("F") - r.prices["F"]["price"])) < TOL, (
+        "统计口径（P0）与现金口径（成交价）必须各用各的价"
     )
+    assert gap > TOL, "统计口径与现金口径不该相等"
 
 
 def test_yi_value_added_matches_anchor():
-    """乙区增加值 = **110**（M1 锚点）。
+    """乙区增加值 = **142**（M1 锚点）。
 
-    产出价值 280（G×5 @56）− 原料 130（C2/D1/F3）− 经营费 40 − 粮食 0 = 110。
+    产出价值 280（G×5 @56）− 原料 98（C2/D1/F3 @12/20/18）− 经营费 40 − 粮食 0 = 142。
 
     ⚠️ 这一条同时验"**原料要扣**"：漏扣原料会得到 240。
     """
     cfg = load_config()
     st, r = run_quarter(PlotType.INDUSTRY, 1, product="G")
 
-    assert abs(r.value_added - 110.0) < TOL, (
-        f"乙区增加值应为 110，实得 {r.value_added}\n"
-        f"  ⚠️ 若实得 240，说明原料 130 没扣。"
+    assert abs(r.value_added - 142.0) < TOL, (
+        f"乙区增加值应为 142，实得 {r.value_added}\n"
+        f"  ⚠️ 若实得 240，说明原料 98 没扣。"
     )
-    assert abs(F.material_value(r, cfg) - 170.0) < TOL, (
-        f"乙区中间投入应为 原料 130 + 经营费 40 = 170，实得 {F.material_value(r, cfg)}"
+    assert abs(F.material_value(r, cfg) - 138.0) < TOL, (
+        f"乙区中间投入应为 原料 98 + 经营费 40 = 138，实得 {F.material_value(r, cfg)}"
     )
 
 
-def test_total_value_added_is_176():
-    """★ M1 验收锚点：**增加值合计 = 176**（甲 66 + 乙 110）。"""
+def test_total_value_added_is_184():
+    """★ M1 验收锚点：**增加值合计 = 184**（甲 42 + 乙 142）。"""
     cfg = load_config()
     total = 0.0
     for ptype, level, product in ((PlotType.RESOURCE, 1, None),
@@ -199,7 +204,7 @@ def test_total_value_added_is_176():
         st, r = run_quarter(ptype, level, product=product)
         total += r.value_added
 
-    assert abs(total - 176.0) < TOL, f"增加值合计应为 176，实得 {total}"
+    assert abs(total - 184.0) < TOL, f"增加值合计应为 184，实得 {total}"
 
 
 def test_service_contributes_no_output_value():
@@ -224,9 +229,9 @@ def test_value_added_includes_service_revenue():
     """★ 2026-10-18 服务/市场重做：GDP = 产出价值 + **服务收入** − 中间投入。
 
     一块二级服务 + 3 个运行中的非服务邻居：
-        服务收入 = 3 × 9 = 27
+        服务收入 = 3 × 20 = 60（第八轮每邻收入 9→20）
         中间投入 = 经营费 16（服务 c=16，E=1.0 → 0.7×16 + 0.3×16 = 16）
-        增加值   = 0 + 27 − 16 = **11**
+        增加值   = 0 + 60 − 16 = **44**
 
     ⚠️ 服务收入是**服务业增加值**，必须进 GDP；但它不是商品产出，
        不能塞进 `output_value()`（那会混淆统计口径）。
@@ -256,17 +261,17 @@ def test_value_added_includes_service_revenue():
     pipeline.advance(st, {"p1": plan}, cfg)
     r = st.raw_reports["p1"]
 
-    assert abs(r.service_revenue - 27.0) < TOL, (
-        f"服务收入应为 3×9=27，实得 {r.service_revenue}"
+    assert abs(r.service_revenue - 60.0) < TOL, (
+        f"服务收入应为 3×20=60，实得 {r.service_revenue}"
     )
     assert abs(F.output_value(r.production, cfg) - 0.0) < TOL, "服务不产商品"
     assert abs(F.material_value(r, cfg) - 16.0) < TOL, (
         f"中间投入应只有经营费 16，实得 {F.material_value(r, cfg)}"
     )
-    assert abs(F.value_added(r, cfg) - 11.0) < TOL, (
-        f"★ GDP 应含服务收入：0 + 27 − 16 = 11，实得 {F.value_added(r, cfg)}"
+    assert abs(F.value_added(r, cfg) - 44.0) < TOL, (
+        f"★ GDP 应含服务收入：0 + 60 − 16 = 44，实得 {F.value_added(r, cfg)}"
     )
-    assert abs(r.value_added - 11.0) < TOL, "报告里的增加值必须与 finance 重算一致"
+    assert abs(r.value_added - 44.0) < TOL, "报告里的增加值必须与 finance 重算一致"
 
     # 旧报告（没有 service_revenue 字段）→ getattr 兜底 0，不炸
     class _OldReport:
@@ -361,8 +366,8 @@ def test_finance_summary_shape():
     assert abs(s["wages"] - 36.0) < TOL
     assert abs(s["wage_tax"] - 3.6) < TOL
     assert abs(s["wage_net"] - 32.4) < TOL
-    assert abs(s["value_added"] - 66.0) < TOL
-    assert abs(s["output_value_at_p0"] - 96.0) < TOL
+    assert abs(s["value_added"] - 42.0) < TOL
+    assert abs(s["output_value_at_p0"] - 72.0) < TOL
 
 
 def test_finance_summary_does_not_recompute_pipeline_values():

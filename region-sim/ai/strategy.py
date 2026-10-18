@@ -5,10 +5,11 @@
 ═══════════════════════════════════════════════════════════════════
 
 本轮引擎把**服务**做成「给八邻格里的非服务地块按自身等级加 5%/7.5%/10%、
-并给每邻 6/9/12 现金/季」的基础设施，市场也放大了（Q0 变大、研究线
-6→4 / 8→5 季）。但秘书 AI 的上下文只有「可建 / 可升级 / 推荐空地」——
-**没有任何经济判断**：不会算升级划不划算、不会摆服务、不知道市场还能吃
-多少。模型于是只能拍脑袋（第七轮用户原话：「注意到你不怎么喜欢升级」）。
+并给每邻 12/20/28 现金/季（原 6/9/12）」的基础设施，市场也放大了（Q0 变大、
+研究线 1→2 与 2→3 两段各 3 季，原 6→4 / 8→5）。但秘书 AI 的上下文只有
+「可建 / 可升级 / 推荐空地」——**没有任何经济判断**：不会算升级划不划算、
+不会摆服务、不知道市场还能吃多少。模型于是只能拍脑袋（第七轮用户原话：
+「注意到你不怎么喜欢升级」）。
 
 本模块补的正是这一层：**代码算数，模型只读结论**。
 
@@ -26,7 +27,7 @@
     · **不替引擎判合法性**：那是 `engine/validate.py` 的事。
 
 ═══════════════════════════════════════════════════════════════════
-四个函数 + 一个合成器
+六个纯函数 + 两个合成器（2026-10-18 第九轮又加了「建议预留」与「规划提纲」）
 ═══════════════════════════════════════════════════════════════════
 
     service_hint(state, player_id, cfg) -> str|None
@@ -43,9 +44,23 @@
     cash_ceiling_hint(state, player_id, cfg) -> str|None
         上季总扣款 vs 当前现金：本季还能再加多少现金的工程。
 
-    strategy_lines(state, player_id, cfg, *, limit=4) -> list[str]
-        把上面四个压成 ≤4 行（每行一句），`ai/plan_context.py` 的
+    service_plot_line(state, player_id, cfg, plot_id) -> str|None
+        「在 plot_id 建 1 级服务」的一句话（位置 + 每邻/合计 + 收入 + 口径）；
+        `service_hint` 与起草摘要都用它，保证同一件事只有**一套单位口径**。
+
+    reserve_cash(state, player_id, cfg) -> dict
+        本季**建议预留多少现金**（确定性）：上季经常性支出 × 1.0；
+        取不到上季财报就退回「现金 × 15%」。不留给模型自己编 800/2000。
+
+    strategy_lines(state, player_id, cfg, *, limit=5) -> list[str]
+        把上面几项压成 ≤5 行（每行一句），`ai/plan_context.py` 的
         `[策略提示]` 直接拿来渲染（块内每行以 `- ` 开头）。
+        ★ 2026-10-18 第九轮：4 → 5 行，新增「建议预留」那一条
+          （服务 → 升级 → 市场 → 预留 → 现金红线）。
+
+    plan_outline(state, player_id, cfg) -> list[str]
+        「目标 / 先后 / 留钱」三句**规划提纲**（解答「帮我规划本季」这类
+        问题时的确定性底稿：先给原则，再给可选动作）。
 
 ═══════════════════════════════════════════════════════════════════
 口径（三处最容易算错的地方）
@@ -73,7 +88,7 @@
 ③ **服务自己不吃邻接加成**（§3.6）：服务之间也不加成。所以服务那块地
    的「价值」只体现在 ①给邻居的加成 + ②服务收入，本模块照此口径算。
 
-⚠️ 本模块**不评估「服务升级」**（L1→L2 的 6→9 收入、5%→7.5% 加成）——
+⚠️ 本模块**不评估「服务升级」**（L1→L2 的 12→20 收入、5%→7.5% 加成）——
    任务书只要求「服务选址提示」，升级经济性只覆盖产商品的地块。
    需要时可以在此加一个分支，别在别处偷偷算。
 """
@@ -117,6 +132,13 @@ NEUTRAL_EFFICIENCY: float = 1.0
 
 #: 上季总扣款达到现金的这个比例 → 提前告警（>=100% 是**已超支**，另说）。
 CASH_WARN_RATIO: float = 0.9
+
+#: 「建议预留」= 上季经常性支出 × 这个倍数（《ai_probe_round8》§3.4-②：
+#: 给留钱一个**确定性数字**，别让模型现编 800 / 2000）。
+CASH_RESERVE_MULTIPLE: float = 1.0
+
+#: 取不到上季财报时的兜底口径：现金 × 15%。
+CASH_RESERVE_FALLBACK_RATIO: float = 0.15
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -216,8 +238,96 @@ def unit_cost(
 # ══════════════════════════════════════════════════════════════════
 
 
-def service_hint(state: GameState, player_id: str, cfg: Config) -> Optional[str]:
-    """「现在该在哪建一块一级服务」——一句话；不值得建就说 `None`。
+def _running_neighbors(
+    state: GameState, player_id: str, plot_id: str
+) -> list[Plot]:
+    """`plot_id` 八邻格里「自己运行中的**非服务**地块」。
+
+    服务之间互不加成，也不吃邻居的位置（§3.6）—— 所以服务不算邻居。
+    与 `engine.efficiency.compute_adjacency` 同一个口径。
+    """
+    player = state.player(player_id)
+    out: list[Plot] = []
+    for neighbor_id in state.world.neighbor_ids(plot_id):
+        neighbor = player.plots.get(neighbor_id)
+        if neighbor is None or not neighbor.is_running:
+            continue
+        if neighbor.plot_type is PlotType.SERVICE:
+            continue
+        out.append(neighbor)
+    return out
+
+
+def _service_marginal_gain(
+    state: GameState,
+    player_id: str,
+    cfg: Config,
+    neighbors: list[Plot],
+) -> tuple[float, float]:
+    """新建 1 级服务让 `neighbors` 多出的 GDP，以及它自己的每季收入。
+
+    返回 `(gain_gdp, income)`。
+    「≈ N GDP/季」怎么来：每个**已经运行中**的邻居产出涨 `rate`
+    （配置 5%）—— 涨的那部分按 **P0** 计价就是 GDP 增量（GDP 用固定统计价，
+    见 `finance.output_value`）。
+    ⚠️ 有封顶时已经触顶的邻居不会再涨，按 `min(rate, cap − 已有)` 逐块扣；
+       `cap is None`（第九轮「加成封顶删掉」）时全额计入。
+    """
+    rate = float(cfg.efficiency.service_rate(1))
+    raw_cap = getattr(cfg.efficiency, "adjacency_cap", None)
+    cap = float(raw_cap) if raw_cap is not None else None
+    gain_gdp = 0.0
+    for neighbor in neighbors:
+        recipe = _recipe_for(cfg, neighbor)
+        if recipe is None or not recipe.output or recipe.e <= 0:
+            continue
+        breakdown = E.compute_efficiency(state, player_id, neighbor, cfg)
+        if cap is None:
+            delta_rate = rate
+        else:
+            delta_rate = max(0.0, min(rate, cap - float(breakdown.adjacency_bonus)))
+        gain_gdp += (
+            float(recipe.e)
+            * float(breakdown.efficiency)
+            * delta_rate
+            * float(cfg.price_of(recipe.output))
+        )
+    income = len(neighbors) * float(cfg.service_income_rate(1))
+    return gain_gdp, income
+
+
+def service_plot_line(
+    state: GameState, player_id: str, cfg: Config, plot_id: str
+) -> Optional[str]:
+    """「在 `plot_id` 建 1 级服务」的**一句话**：位置 + 每邻/合计 + 收入 + 口径。
+
+    单位口径（第八轮实测的通病：「3 邻合计 24%」被答成「每邻 24%」）：
+
+        · 写清「每邻 +5%」（一级服务给每个邻居的产出加成，数字按 cfg）；
+        · 再写「合计 +15%」（3 个邻居的名义加成之和 = 每邻 × 邻居数）；
+        · 并注明「服务之间不加成、服务不算邻居」。
+
+    没有邻居 → `None`（不给空话）。数字全部来自引擎。
+    """
+    neighbors = _running_neighbors(state, player_id, plot_id)
+    if not neighbors:
+        return None
+    rate = float(cfg.efficiency.service_rate(1))
+    gain_gdp, income = _service_marginal_gain(state, player_id, cfg, neighbors)
+    nominal_pct = rate * 100.0 * len(neighbors)
+    return (
+        f"在 {plot_id} 建 1 级服务：邻 {len(neighbors)} 块"
+        f"（每邻 +{fmt_num(rate * 100.0, 0)}%、合计 +{fmt_num(nominal_pct, 0)}% "
+        f"产出 ≈ {fmt_num(gain_gdp, 0)} GDP/季，"
+        f"服务收入 {fmt_num(income, 0)}/季；"
+        f"服务之间不加成、服务不算邻居）"
+    )
+
+
+def service_advice(
+    state: GameState, player_id: str, cfg: Config
+) -> Optional[str]:
+    """「现在该在哪建一块一级服务」的一句话（**不带「建议」前缀**）。
 
     判定（全部来自引擎，不另立规则）：
 
@@ -228,12 +338,6 @@ def service_hint(state: GameState, player_id: str, cfg: Config) -> Optional[str]
       · 邻居 < `SERVICE_NEIGHBOR_MIN`（3）→ `None`（占一格不划算）；
       · 自己已有 ≥ `SERVICE_PLOT_CAP`（3）块服务 → `None`；
       · 地图已满（没有空地）→ `None`。
-
-    「≈ N GDP/季」怎么来：这些邻居里每一块**已经运行中**的地块，新建的
-    一级服务会让它的产出涨 `rate`（默认 5%）—— 涨的那部分按 **P0** 计价
-    就是 GDP 增量（GDP 用固定统计价，见 `finance.output_value`）。
-    ⚠️ 已经吃到 40% 封顶的邻居**不会**再涨，这里按 `min(rate, cap − 已有)`
-      逐块扣过；显示的「+X% 产出」仍是名义值 `邻居数 × rate`（方便读）。
     """
     player = state.player(player_id)
 
@@ -256,49 +360,23 @@ def service_hint(state: GameState, player_id: str, cfg: Config) -> Optional[str]
     if not empty:
         return None
 
-    rate = float(cfg.efficiency.service_rate(1))
-    cap = float(cfg.efficiency.adjacency_cap)
-    income_rate = float(cfg.service_income_rate(1))
-
     best_plot_id: Optional[str] = None
     best_neighbors: list[Plot] = []
     for plot_id in empty:                      # all_plot_ids() 已按行列顺序
-        neighbors: list[Plot] = []
-        for neighbor_id in state.world.neighbor_ids(plot_id):
-            neighbor = player.plots.get(neighbor_id)
-            if neighbor is None or not neighbor.is_running:
-                continue
-            if neighbor.plot_type is PlotType.SERVICE:
-                continue
-            neighbors.append(neighbor)
+        neighbors = _running_neighbors(state, player_id, plot_id)
         if len(neighbors) > len(best_neighbors):
             best_plot_id = plot_id
             best_neighbors = neighbors
 
     if best_plot_id is None or len(best_neighbors) < SERVICE_NEIGHBOR_MIN:
         return None
+    return service_plot_line(state, player_id, cfg, best_plot_id)
 
-    gain_gdp = 0.0
-    for neighbor in best_neighbors:
-        recipe = _recipe_for(cfg, neighbor)
-        if recipe is None or not recipe.output or recipe.e <= 0:
-            continue
-        breakdown = E.compute_efficiency(state, player_id, neighbor, cfg)
-        delta_rate = max(0.0, min(rate, cap - float(breakdown.adjacency_bonus)))
-        gain_gdp += (
-            float(recipe.e)
-            * float(breakdown.efficiency)
-            * delta_rate
-            * float(cfg.price_of(recipe.output))
-        )
 
-    income = len(best_neighbors) * income_rate
-    nominal_pct = rate * 100.0 * len(best_neighbors)
-    return (
-        f"建议在 {best_plot_id} 建 1 级服务：邻 {len(best_neighbors)} 块"
-        f"（+{fmt_num(nominal_pct, 0)}% 产出 ≈ {fmt_num(gain_gdp, 0)} GDP/季，"
-        f"服务收入 {fmt_num(income, 0)}/季）"
-    )
+def service_hint(state: GameState, player_id: str, cfg: Config) -> Optional[str]:
+    """`[策略提示]` 用的服务句：`建议` + `service_advice()`；不值得建 → `None`。"""
+    line = service_advice(state, player_id, cfg)
+    return f"建议{line}" if line else None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -591,8 +669,17 @@ def _report_entry(state: GameState, player_id: str) -> Optional[dict]:
     （`pipeline` 第 9 步写的），读档后 `storage.unpack` 原样放回；
     活会话里也是 dict。这里额外容忍直接给一个 `QuarterReport` 对象
     （有些调用方会拿 `preview()` 的报告来问「这版计划扛不扛得住」）。
+
+    ★ 2026-10-18 第九轮：① 加读 `state.world.report`（口径与 `state.report`
+      相同：`{player_id: report}`）—— 有的调用方把上一季报告挂在 world 上；
+      ② 对象形状补回 `wages / operating / materials_cost`，
+      「建议预留」在 `total_deduction` 缺失时要用这三项求和。
     """
     report = getattr(state, "report", None)
+    if not report:
+        report = getattr(getattr(state, "world", None), "report", None)
+    if not report:
+        return None
     if isinstance(report, dict):
         entry = report.get(player_id)
         if isinstance(entry, dict):
@@ -600,15 +687,94 @@ def _report_entry(state: GameState, player_id: str) -> Optional[dict]:
         if "total_deduction" in report:      # 直接就是一份报告
             return report
         return None
-    if report is None:
-        return None
     owner = getattr(report, "player_id", None)
     if owner not in (None, player_id):
         return None
     return {
         "total_deduction": getattr(report, "total_deduction", 0.0),
         "construction_cash": getattr(report, "construction_cash", 0.0),
+        "wages": getattr(report, "wages", 0.0),
+        "operating": getattr(report, "operating", 0.0),
+        "materials_cost": getattr(report, "materials_cost", 0.0),
     }
+
+
+def _as_float(value) -> Optional[float]:
+    """一个数字字段 → float；缺失 / 转不了 → `None`（不猜成 0）。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def reserve_cash(state: GameState, player_id: str, cfg: Config) -> dict:
+    """本季**建议预留多少现金**（确定性，不让模型现编 800/2000）。
+
+    口径（《ai_probe_round8》§3.4-②）：
+
+        · 有上季财报 → 建议预留 = **上季经常性支出 × 1.0**
+          （经常性支出 = `total_deduction − construction_cash`；工程现金是投资，
+           不算经常性。`total_deduction` 缺失时退回 `wages + operating + materials_cost`）；
+        · 取不到财报 / 经常性支出为 0 → **当前现金 × 15%**（并写明这是兜底口径）。
+
+    返回：`{amount, recurring, cash, basis, fallback, source}`。纯只读。
+    """
+    cash = float(state.player(player_id).cash)
+    entry = _report_entry(state, player_id)
+    recurring: Optional[float] = None
+    source = ""
+
+    if entry:
+        total = _as_float(entry.get("total_deduction")) or 0.0
+        construction = _as_float(entry.get("construction_cash")) or 0.0
+        if total > 0.0:
+            recurring = max(0.0, total - construction)
+            source = "上季总扣款 − 工程现金"
+        else:
+            parts = [
+                _as_float(entry.get(k)) or 0.0
+                for k in ("wages", "operating", "materials_cost")
+            ]
+            if sum(parts) > 0.0:
+                recurring = sum(parts)
+                source = "上季工资 + 经营费 + 原料"
+
+    if recurring is None or recurring <= 0.0:
+        amount = max(0.0, cash * CASH_RESERVE_FALLBACK_RATIO)
+        return {
+            "amount": amount,
+            "recurring": None,
+            "cash": cash,
+            "basis": f"现金 {fmt_num(cash)} × 15%（上季财报取不到）",
+            "fallback": True,
+            "source": "fallback",
+        }
+
+    return {
+        "amount": recurring * CASH_RESERVE_MULTIPLE,
+        "recurring": recurring,
+        "cash": cash,
+        "basis": (
+            f"上季经常性支出 {fmt_num(recurring)} × "
+            f"{CASH_RESERVE_MULTIPLE:.1f}"
+        ),
+        "fallback": False,
+        "source": source,
+    }
+
+
+def format_reserve_line(res: dict) -> str:
+    """「建议预留」压成一句话：`建议预留 ≈500 现金（= 上季经常性支出 500 × 1.0）`。"""
+    amount = float(res.get("amount") or 0.0)
+    cash = float(res.get("cash") or 0.0)
+    if res.get("fallback"):
+        text = f"建议预留 ≈{fmt_num(amount)} 现金（= 现金 × 15%，上季财报取不到）"
+    else:
+        text = f"建议预留 ≈{fmt_num(amount)} 现金（= 上季经常性支出 × 1.0）"
+    if amount > cash + 1e-9:
+        text += "；已超过当前现金，本季应先减支"
+    return text
+
 
 
 def cash_ceiling_hint(state: GameState, player_id: str, cfg: Config) -> Optional[str]:
@@ -662,7 +828,7 @@ def cash_ceiling_hint(state: GameState, player_id: str, cfg: Config) -> Optional
 
 
 # ══════════════════════════════════════════════════════════════════
-# 七、合成器：给 `[策略提示]` 用的 ≤4 行
+# 七、合成器：给 `[策略提示]` 用的 ≤5 行 + 规划提纲
 # ══════════════════════════════════════════════════════════════════
 
 
@@ -671,15 +837,20 @@ def strategy_lines(
     player_id: str,
     cfg: Config,
     *,
-    limit: int = 4,
+    limit: int = 5,
 ) -> list[str]:
-    """四个函数各出**至多一行**，按「服务 → 升级 → 市场 → 现金」排，最多 4 行。
+    """各项各出**至多一行**，按「服务 → 升级 → 市场 → 预留 → 现金」排，最多 5 行。
 
     固定顺序的理由（不是随意的）：
 
       · 服务 / 升级是**本季能做的事**，先说；
       · 市场余量解释「为什么值得做」；
-      · 现金红线是**刹车**，放最后一句，正好压住前面三条的建议。
+      · 「建议预留」是**留钱原则**（确定性数字），压在动作之后；
+      · 现金红线是**刹车**，放最后一句，正好压住前面几条的建议。
+
+    ★ 2026-10-18 第九轮：4 → 5 行。多出来的那一行是
+      `建议预留 ≈X 现金（= 上季经常性支出 × 1.0）` —— 第八轮实测里模型
+      自己编了 800 / 2000 / 15000，没有一个是可复核的；现在由引擎给数。
 
     没内容的那一条**整行不出**（不写「暂无」）——整块都空时由
     `plan_context` 写 `[策略提示] 暂无`（与其它块同口径）。
@@ -700,6 +871,9 @@ def strategy_lines(
     if line:
         lines.append(line)
 
+    # ★ 留钱原则：确定性数字（上季经常性支出 × 1.0；无财报 → 现金 × 15%）。
+    lines.append(format_reserve_line(reserve_cash(state, player_id, cfg)))
+
     line = cash_ceiling_hint(state, player_id, cfg)
     if line:
         lines.append(line)
@@ -707,17 +881,83 @@ def strategy_lines(
     return lines[: max(0, int(limit))]
 
 
+def plan_outline(
+    state: GameState,
+    player_id: str,
+    cfg: Config,
+) -> list[str]:
+    """本季**规划提纲**：目标 / 先后 / 留钱 三句（确定性，不靠模型发挥）。
+
+    给「帮我规划本季」「该不该升级」「现金要留多少」这类**要规划、不要表**
+    的问题垫底：`server/ai_host.py` 把它放在答案最前面，模型的话跟在后面。
+
+    三句的数字全部来自引擎：
+
+        · 目标：`可动用 = max(0, cash − 建议预留)`，说清能拿多少做工程；
+        · 先后：`service_advice()`（建哪块服务、每邻 +5%/合计 +15%）
+                ＋ `format_upgrade_line()`（最划算的那条升级）；
+        · 留钱：`format_reserve_line()`（上季经常性支出 × 1.0）。
+
+    没有可说的动作时「先后」明说「没有更划算的新工程，先开满现有地块」——
+    **不许留空**（否则玩家看到的规划缺一块）。
+    """
+    res = reserve_cash(state, player_id, cfg)
+    cash = float(res.get("cash") or 0.0)
+    amount = float(res.get("amount") or 0.0)
+    free = max(0.0, cash - amount)
+
+    lines: list[str] = []
+    if free > 0.0:
+        lines.append(
+            f"目标：本季最多拿 ≈{fmt_num(free)} 现金做工程"
+            f"（现金 {fmt_num(cash)} − 建议预留 {fmt_num(amount)}），"
+            f"优先补产出、再谈铺新地。"
+        )
+    else:
+        lines.append(
+            f"目标：本季现金（{fmt_num(cash)}）已不够覆盖建议预留"
+            f"（≈{fmt_num(amount)}），先保住现有开工与口粮，暂不新增工程。"
+        )
+
+    steps: list[str] = []
+    service = service_advice(state, player_id, cfg)
+    if service:
+        steps.append(service)
+    upgrade = format_upgrade_line(
+        upgrade_economics(state, player_id, cfg, limit=50)
+    )
+    if upgrade:
+        steps.append(upgrade)
+    if steps:
+        lines.append("先后：" + "；".join(steps))
+    else:
+        lines.append(
+            "先后：本季没有明显更划算的新工程，先把现有地块开满、"
+            "口粮按档买齐，把现金留到下季。"
+        )
+
+    lines.append("留钱：" + format_reserve_line(res))
+    return lines
+
+
 __all__ = [
     "SERVICE_NEIGHBOR_MIN",
     "SERVICE_PLOT_CAP",
     "HEADROOM_GOODS",
     "CASH_WARN_RATIO",
+    "CASH_RESERVE_MULTIPLE",
+    "CASH_RESERVE_FALLBACK_RATIO",
     "service_hint",
+    "service_advice",
+    "service_plot_line",
     "upgrade_economics",
     "format_upgrade_line",
     "market_headroom",
     "format_market_line",
     "cash_ceiling_hint",
+    "reserve_cash",
+    "format_reserve_line",
+    "plan_outline",
     "materials_cash",
     "unit_cost",
     "fmt_num",
