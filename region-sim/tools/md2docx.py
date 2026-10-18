@@ -298,14 +298,17 @@ def plan_column_widths(header, rows, usable_cm, size_pt):
                         "hdr": _text_width_units(header[ci], size_pt) + pad})
 
     # 序号类短列（表头 1–2 字、内容全是数字）：按最长数字位数给足宽度
+    index_cols = set()
     for ci in range(ncols):
         cells = [header[ci]] + [(r[ci] if ci < len(r) else "") for r in rows]
         body = [c for c in cells[1:] if c.strip()]
         if (len(header[ci].strip()) <= 2 and body
                 and all(re.fullmatch(r"[\d.]+", c.strip()) for c in body)):
-            need = max(_text_width_units(c.strip(), size_pt) for c in body) + 0.46
+            need = max(_text_width_units(c.strip(), size_pt) for c in body) + 0.62
             details[ci]["hdr"] = max(details[ci]["hdr"], need)
             details[ci]["tok"] = max(details[ci]["tok"], need)
+            details[ci]["full"] = max(details[ci]["full"], need)
+            index_cols.add(ci)
 
     def floor_w(n):
         # 下限：表头不可断 + 最短可读宽度（单位 cm）
@@ -343,10 +346,25 @@ def plan_column_widths(header, rows, usable_cm, size_pt):
         extra = usable_cm - total
         tot = sum(w)
         w = [x + extra * (x / tot) for x in w]
+    # 收尾：保证总宽 = 版心宽。序号列不参与二次压缩（否则两位数又被挤成两行）。
+    guard = {ci: max(0.75, details[ci]["hdr"]) for ci in index_cols}
+    rest_total = sum(x for ci, x in enumerate(w) if ci not in index_cols)
+    rest_target = usable_cm - sum(guard.values())
+    if rest_total > 0 and rest_target > 0:
+        w = [(guard[ci] if ci in index_cols else x * rest_target / rest_total)
+             for ci, x in enumerate(w)]
     w = [max(0.55, x) for x in w]
-    scale = usable_cm / sum(w)
-    if abs(scale - 1.0) > 1e-6:
-        w = [x * scale for x in w]
+    total = sum(w)
+    if abs(total - usable_cm) > 1e-6:
+        if index_cols:
+            fixed = sum(w[ci] for ci in index_cols)
+            rest = total - fixed
+            target = usable_cm - fixed
+            if rest > 0 and target > 0:
+                w = [(w[ci] if ci in index_cols else w[ci] * target / rest)
+                     for ci in range(len(w))]
+        else:
+            w = [x * usable_cm / total for x in w]
     if f <= 0.7:
         size = 8.5
     elif f <= 0.9:
