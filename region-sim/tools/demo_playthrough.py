@@ -849,16 +849,100 @@ DEMO_MD_TEMPLATE = """# DEMO · 20 季运行实录
 def render_demo_md(runner: PlaythroughRunner) -> str:
     """把 PlaythroughRunner 抓到的快照渲染成 demo.md 文本。
 
-    由下一阶段实现 —— 要做的小事：
-      1. 从 runner.snapshots_a / snapshots_b / finale_a 拿数字；
-      2. 把 ACT1/ACT2/ACT3 的 narrate 串成段落；
-      3. 每幕的 table 行通过 `| Q{n} | {cash} | {gdp} | {h} | {备注} |` 拼出；
-      4. table_branch_compare 走 verify_determinism 的结果画 √ / ×；
-      5. slot_listing 列出 runner.slots_dir 下所有 JSON 文件名；
-      6. 返回 DEMO_MD_TEMPLATE.format(...)。
+    最小可用实现（2026-10-18 · 收官补齐）：
+      · 三幕 narrate 由 ACT1/ACT2/ACT3 直接串段
+      · 三幕 table 行 = 从 snapshots_a 抠出对应季度的 cash / gdp / h
+      · branch_verdict 由 verify_determinism 结果画 √ / ×
+      · slot_listing 直接 ls slots_dir
+      · 模板里的存档点名以"任务书定名"为准（**本函数不再硬编码**）
     """
-    # TODO: 由下一阶段实现
-    raise NotImplementedError("由下一阶段实现")
+    import datetime as _dt
+
+    def _narrate(scripts):
+        return "\n\n".join(
+            f"**Q{s.quarter}**　{s.narrate}" for s in scripts if s.narrate
+        ) or "（无）"
+
+    def _table_rows(snaps):
+        rows = []
+        for s in snaps:
+            try:
+                h = float(s.state.get("happiness") or 0.0)
+            except Exception:
+                h = 0.0
+            rows.append(
+                f"| Q{s.quarter} | {s.cash_after:.2f} | "
+                f"{s.gdp_this_quarter:.2f} | {h:.2f} | "
+                f"{s.slot_saved or ''} |"
+            )
+        return "\n".join(rows) or "| — | — | — | — | — |"
+
+    # ── 把 snapshots_a 拆三幕 ────────────────────────────────
+    snaps_a = list(runner.snapshots_a)
+    act1_snaps = [s for s in snaps_a if 1 <= s.quarter <= 5]
+    act2_snaps = [s for s in snaps_a if 6 <= s.quarter <= 12]
+    act3_snaps = [s for s in snaps_a if 13 <= s.quarter <= 20]
+
+    # ── 分支对比表 ───────────────────────────────────────────
+    b_map = {s.quarter: s for s in runner.snapshots_b}
+    compare_rows = []
+    for s in act3_snaps:
+        sb = b_map.get(s.quarter)
+        if sb is None:
+            compare_rows.append(
+                f"| Q{s.quarter} | {s.cash_after:.2f} | — | "
+                f"{s.gdp_this_quarter:.2f} | — | ⚠️ B 线缺 |"
+            )
+            continue
+        cash_ok = abs(s.cash_after - sb.cash_after) < 1e-6
+        gdp_ok = abs(s.gdp_this_quarter - sb.gdp_this_quarter) < 1e-6
+        mark = "✅" if (cash_ok and gdp_ok) else "❌"
+        compare_rows.append(
+            f"| Q{s.quarter} | {s.cash_after:.2f} | {sb.cash_after:.2f} | "
+            f"{s.gdp_this_quarter:.2f} | {sb.gdp_this_quarter:.2f} | {mark} |"
+        )
+    table_branch = "\n".join(compare_rows) or "| — | — | — | — | — | — |"
+
+    # ── 终局（finale_a）摘要 ────────────────────────────────
+    fa = getattr(runner, "finale_a", None) or {}
+    finale_lines = [
+        f"- 总季数：{fa.get('total_quarters', 20)}",
+        f"- 终局概览 keys：{sorted(fa.keys())[:8]}",
+    ]
+    if isinstance(fa.get("overview"), dict):
+        ov = fa["overview"]
+        for k in ("cash", "value_added_total", "gdp_total", "happiness_final"):
+            if k in ov:
+                finale_lines.append(f"- {k}：{ov[k]}")
+    finale_text = "\n".join(finale_lines)
+
+    # ── 分支结论 ────────────────────────────────────────────
+    mismatches = runner.verify_determinism()
+    verdict = (
+        "✅ 通过：B 线 Q13-Q20 与 A 线数字分毫不差（铁证）。"
+        if not mismatches else
+        f"❌ 失败：{', '.join(mismatches)} 数字对不上（详见上表）。"
+    )
+
+    # ── slot 文件清单 ──────────────────────────────────────
+    slots_files = sorted(
+        p.name for p in runner.slots_dir.glob("*.json")
+    ) if runner.slots_dir.exists() else []
+    slot_listing = "\n".join(slots_files) or "（无）"
+
+    return DEMO_MD_TEMPLATE.format(
+        timestamp=_dt.datetime.now().isoformat(timespec="seconds"),
+        narrative_act1=_narrate(ACT1),
+        narrative_act2=_narrate(ACT2),
+        narrative_act3=_narrate(ACT3) if ACT3 else "（A/B 线均空盘重放 Q13-Q20）",
+        table_act1=_table_rows(act1_snaps),
+        table_act2=_table_rows(act2_snaps),
+        table_act3=_table_rows(act3_snaps),
+        finale=finale_text,
+        table_branch_compare=table_branch,
+        branch_verdict=verdict,
+        slot_listing=slot_listing,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────

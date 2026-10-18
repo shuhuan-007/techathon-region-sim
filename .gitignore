@@ -34,3 +34,7 @@ region-sim/web/assets/plots/*.glb
 
 # 临时调试产物归档（2026-10-18 收尾清理）
 docs/99-历史版本/_临时产物-*/
+
+# 启动验证日志（演示期 python server 实例残留、轮次结束后会停）
+region-sim/.startup-verify.log
+region-sim/.startup-verify.log.err
