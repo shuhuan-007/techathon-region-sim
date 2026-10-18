@@ -303,9 +303,18 @@ def test_unknown_plot_plan_is_dropped_but_valid_build_kept():
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_missing_food_defaults_to_baseline_need():
+def test_missing_food_defaults_to_good_tier_need():
+    """★ 2026-10-18 AI-food-default-excellent：模型完全不写 food 时，
+    新默认 = `_fill_baseline_food` → `_fill_good_food` 接力，最终把
+    A/B/C/D 补到**优秀档** `good_quota × F_优秀`。
+
+    （原版本断言「按基准档补 A+B」——与新默认直接冲突，按新语义改写；
+    基准档路径见 `test_baseline_only_via_flag`。）
+    """
     cfg = load_config()
     state = _mid_state(cfg)
+    # 避开 shrink 干扰，直接看数值（与其他优秀档用例同口径）
+    state.player("p1").cash = 10000.0
     raw = _raw(plot_plans={})  # 模型完全没提口粮
     result = compile_draft(raw, state, "p1", cfg)
     _assert_compiled_ok(result, state, cfg)
@@ -313,25 +322,44 @@ def test_missing_food_defaults_to_baseline_need():
     from engine.population import compute_population
 
     pop = compute_population(state, "p1", {}, cfg)
-    assert pop.baseline_food > 0
-    for g, ratio in cfg.food.baseline_quota.items():
-        want = ratio * pop.baseline_food
+    assert pop.good_food > 0
+    # A/B/C/D 四样都必须到优秀档
+    for g, quota in cfg.food.good_quota.items():
+        want = quota * pop.good_food
         assert abs(result.plan.food.get(g, 0.0) - want) < TOL, (
-            f"口粮 {g} 应按基准档补 {want}，实得 {result.plan.food.get(g)}"
+            f"口粮 {g} 应默认到优秀档 {want}，实得 {result.plan.food.get(g)}"
         )
     assert any("口粮" in n for n in result.notes), result.notes
 
 
-def test_model_food_is_not_overwritten():
-    """模型明确给了口粮 → 不要用默认值覆盖它（只做合法性过滤）。"""
+def test_model_food_below_good_tier_is_topped_up():
+    """★ 2026-10-18 AI-food-default-excellent：模型给的低于优秀档的口粮，
+    在新默认下会被 `_fill_good_food` **向上补到优秀档**（只补不足，不削已有）。
+
+    （原版本断言「模型值原样保留」——与新默认直接冲突；「给高了不被压低」
+    见 `test_include_excellent_food_does_not_cut_existing_food`。）
+    """
     cfg = load_config()
     state = _mid_state(cfg)
+    # 避开 shrink 干扰
+    state.player("p1").cash = 10000.0
+    # A=2.0 < 优秀档 2.64；B=1.0 < 优秀档 1.32；C/D 没给
     raw = _raw(food={"A": 2.0, "B": 1.0})
     result = compile_draft(raw, state, "p1", cfg)
     _assert_compiled_ok(result, state, cfg)
-    assert abs(result.plan.food["A"] - 2.0) < TOL
-    assert abs(result.plan.food["B"] - 1.0) < TOL
-    assert "C" not in result.plan.food and "D" not in result.plan.food
+
+    from engine.population import compute_population
+    pop = compute_population(state, "p1", {}, cfg)
+
+    # A/B 都被向上补到优秀档；C/D 也从 0 补到优秀档
+    for g, quota in cfg.food.good_quota.items():
+        want = quota * pop.good_food
+        assert abs(result.plan.food.get(g, 0.0) - want) < TOL, (
+            f"模型给低的 {g} 应被向上补到优秀档 {want}，"
+            f"实得 {result.plan.food.get(g)}"
+        )
+    # 不会被削：模型给的 A=2.0 至少是下限
+    assert result.plan.food["A"] >= 2.0 - TOL
 
 
 def test_include_excellent_food_fills_good_quota_for_all_four():
@@ -369,24 +397,55 @@ def test_include_excellent_food_fills_good_quota_for_all_four():
     )
 
 
-def test_default_does_not_fill_good_tier_regression():
-    """★ 不传 include_excellent_food（默认 False）→ 只补基准档 A+B，不碰 C/D。
+def test_default_fills_good_tier_by_default():
+    """★ 2026-10-18 AI-food-default-excellent：不传 include_excellent_food
+    时默认 True —— 与旧的「显式 True」路径完全一致：A/B/C/D 四样补到
+    `good_quota × F_优秀`，并留下「按优秀档补口粮」note。
 
-    老行为回归：2026-10-18 之前 compile_draft 永远不会自己加 C/D，
-    现在加一个开关也不能把默认行为改掉。
+    原回归测试「默认不加 C/D」与新默认直接冲突，按新语义改写。
     """
+    cfg = load_config()
+    state = _mid_state(cfg)
+    # 与 test_include_excellent_food_fills_good_quota_for_all_four 同理，
+    # 把现金留足避开 shrink 干扰，直接看数值。
+    state.player("p1").cash = 10000.0
+
+    from engine.population import compute_population
+    pop = compute_population(state, "p1", {}, cfg)
+
+    result = compile_draft(_raw(), state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+
+    # 四样口粮都必须达到优秀档需求：good_quota[g] × F_优秀
+    for g, quota in cfg.food.good_quota.items():
+        want = quota * pop.good_food
+        got = result.plan.food.get(g, 0.0)
+        assert abs(got - want) < TOL, (
+            f"默认（True）时口粮 {g} 应补到优秀档 {want}，实得 {got}"
+        )
+    # 与基准档的区分：C/D 基准档没有、优秀档必须有
+    assert result.plan.food.get("C", 0.0) > 0, "默认就必须有 C"
+    assert result.plan.food.get("D", 0.0) > 0, "默认就必须有 D"
+    assert any("按优秀档补口粮" in n for n in result.notes), (
+        f"默认必须留下「按优秀档补口粮」的说明：{result.notes}"
+    )
+
+
+def test_baseline_only_via_flag():
+    """★ 2026-10-18 AI-food-default-excellent：显式传 False → 只补基准档
+    A+B，C/D 一律不进 plan.food。"""
     cfg = load_config()
     state = _mid_state(cfg)
     state.player("p1").cash = 10000.0
 
-    result = compile_draft(_raw(), state, "p1", cfg)
+    result = compile_draft(_raw(), state, "p1", cfg, include_excellent_food=False)
     _assert_compiled_ok(result, state, cfg)
-    assert "C" not in result.plan.food, "默认不许自动加 C"
-    assert "D" not in result.plan.food, "默认不许自动加 D"
+    assert "C" not in result.plan.food, "显式 False 不许加 C"
+    assert "D" not in result.plan.food, "显式 False 不许加 D"
     assert not any("按优秀档补口粮" in n for n in result.notes), (
-        f"默认不该出现优秀档 note：{result.notes}"
+        f"显式 False 不该出现优秀档 note：{result.notes}"
     )
-    # A/B 仍按基准档补（基准档只到 A+B 就是合格，不是优秀）
+    # A/B 仍按基准档补
     from engine.population import compute_population
     pop = compute_population(state, "p1", {}, cfg)
     for g, quota in cfg.food.baseline_quota.items():
