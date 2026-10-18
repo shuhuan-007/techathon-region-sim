@@ -692,6 +692,34 @@ def _baseline_food(state: GameState, player_id: str, cfg: Config) -> dict[str, f
     return {g: ratio * pop.baseline_food for g, ratio in quotas.items() if ratio > 0}
 
 
+def _fill_baseline_food(
+    food: dict[str, float],
+    state: GameState,
+    player_id: str,
+    cfg: Config,
+    notes: list[str],
+) -> dict[str, float]:
+    """把模型**漏掉的基准口粮**补齐（A、B 至少都要有）。
+
+    2026-10-18 真跑：模型只回 `food: {"A": 9.2}`，缺 B → 居民只吃到 A，
+    基准档永远无法达标。这里只补**基准档缺口**，不强行把 C/D 加到优秀档
+    （优秀档是玩家的成本选择；模型可以自己填，漏了不罚）。
+    """
+    base = _baseline_food(state, player_id, cfg)
+    if not base:
+        return food
+    added: dict[str, float] = {}
+    for g, qty in base.items():
+        current = float(food.get(g, 0.0) or 0.0)
+        if current + 1e-9 < qty:
+            food[g] = round(qty, 6)
+            added[g] = round(qty - current, 6)
+    if added:
+        parts = "、".join(f"{g}×{q:.2f}" for g, q in sorted(added.items()))
+        _append_note(notes, f"口粮缺基准档，已补：{parts}。")
+    return food
+
+
 def _cap_food_to_need(
     food: dict[str, float],
     state: GameState,
@@ -1142,14 +1170,9 @@ def compile_draft(
     )
     # ★ 先把“人数当口粮数”的常见误解压回（多买的没有仓库，结算会丢弃）
     food = _cap_food_to_need(food, state, player_id, cfg, notes)
-    if not food and default_baseline_food:
-        food = _baseline_food(state, player_id, cfg)
-        if food:
-            parts = "、".join(f"{g}×{q:.2f}" for g, q in sorted(food.items()))
-            _append_note(
-                notes,
-                f"模型没给口粮；按当前人口（只算已建成地块）补了基准档：{parts}。",
-            )
+    # ★ 模型经常只给 A、忘了 B；基准档必须 A+B 同时有，否则永远吃不饱。
+    if default_baseline_food:
+        food = _fill_baseline_food(food, state, player_id, cfg, notes)
 
     # ── 5. 模型可能带的合同 / 其它字段：单人局一律丢弃 ──
     if raw.get("contracts"):

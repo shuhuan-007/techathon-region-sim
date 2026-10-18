@@ -421,6 +421,8 @@ class Plot:
             "target_level": self.target_level,
             "construction_materials": dict(self.construction_materials),
             "product": self.product,
+            # ★ 2026-10-18 地块中文名（None / 中文串，UI 兜底 plot_id）
+            "name": self.name,
         }
 
     @classmethod

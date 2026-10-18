@@ -274,7 +274,19 @@ const FOODS = ["A","B","C","D"];
 const FOOD_QUOTA_B = {A:0.4, B:0.2};
 const FOOD_QUOTA_G = {A:0.4, B:0.2, C:0.1, D:0.02};
 
-function _foodNeeds(){
+function _foodNeeds(simFood){
+  /* ★ 2026-10-18 修复：有本季试算时，需求必须用**试算报告**里的
+     baseline_need/good_need——它会算上本季完工的新地块（人口/胃口变大）。
+     之前一直读 STATE.food_need（当前状态，未含当季完工），
+     于是玩家按旧需求填满四项，结算却判“优秀未达标”。 */
+  if (simFood && (simFood.baseline_need != null || simFood.good_need != null)){
+    const baseF = Number(simFood.baseline_need || 0);
+    const goodF = Number(simFood.good_need || 0);
+    const baseline = {}, good = {};
+    Object.entries(FOOD_QUOTA_B).forEach(([g, q]) => { baseline[g] = q * baseF; });
+    Object.entries(FOOD_QUOTA_G).forEach(([g, q]) => { good[g]     = q * goodF; });
+    return { baseline, good };
+  }
   const fn = (STATE && STATE.food_need) || null;
   if (fn && (fn.baseline || fn.good)){
     return {
@@ -299,7 +311,7 @@ function renderFood(){
        玩家看不到「我这么改下季会不会更幸福」。 */
   const simFood = (SIM && SIM.last && SIM.last.food) ? SIM.last.food : null;
   const food = simFood || (STATE.projection && STATE.projection.food) || null;
-  const needs = _foodNeeds();
+  const needs = _foodNeeds(food);
 
   $("food-body").innerHTML = FOODS.map(g => {
     const baseNeed = needs.baseline[g];                 // A/B 有值；C/D 无 → 显示 "—"
@@ -1314,7 +1326,7 @@ $("btn-ai-send").onclick = async () => {
 
   const sendBtn = $("btn-ai-send"), status = $("ai-status");
   sendBtn.disabled = true;
-  status.textContent = "秘书在想…（真调模型可能要几十秒，请稍候，页面没死）";
+  status.textContent = "秘书在想…";
   status.style.color = "var(--warn)";
 
   /* ★ 带上当前草稿与模式（新契约，后端可缺省忽略）：

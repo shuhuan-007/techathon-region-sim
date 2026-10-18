@@ -999,8 +999,11 @@ def test_current_plan_edit_does_not_default_run_all():
         assert pid not in plan["plot_plans"], (
             f"★ {pid} 没被任何一方提到，不许默认全开工"
         )
-    # 编辑模式不补基准口粮（草稿里 food 是空的）
-    assert plan["food"] == {}, f"编辑模式不许替玩家补口粮：{plan['food']}"
+    # ★ 2026-10-18 用户反馈：AI 自动化不能忘口粮。
+    #   编辑模式也应补基准档 A+B（否则玩家只开一部分地也会饿肚子）。
+    assert plan["food"].get("A", 0) > 0 and plan["food"].get("B", 0) > 0, (
+        f"编辑模式必须补基准口粮 A+B：{plan['food']}"
+    )
 
 
 def test_current_plan_is_shown_to_model_in_edit_mode():

@@ -382,12 +382,11 @@ def advise(
                     if isinstance(pid, str) and pid.strip():
                         protected_ids.add(pid.strip())
             default_run_all = not bool(current_plan.get("plot_plans"))
-            # 只写了 builds（连 plot_plans 都没有）时，才补基准口粮；
-            # 玩家已经排了开工、只是没填 food → 尊重“这季不买口粮”。
-            default_baseline_food = (
-                not bool(current_plan.get("plot_plans"))
-                and not bool(current_plan.get("food"))
-            )
+            # ★ 2026-10-18：只要玩家当前草稿**没有 food**，就让编译器补基准档。
+            #   旧逻辑还要求 plot_plans 为空才补；但前端现在默认全开工，
+            #   plot_plans 永远非空 → AI 自动化永远不买口粮。这是用户实测的
+            #   “秘书规划不会考虑粮食”的根因之一。
+            default_baseline_food = not bool(current_plan.get("food"))
         if obj is not None:
             try:
                 if editing:
@@ -507,8 +506,8 @@ _DRAFT_JSON_INSTRUCTION = (
     "· ★ 开局（自己 0–1 块地、现金够 1000+）优先规划 **3–4 块地**——"
     "至少 1 农业 + 1 资源 + 1 工业，**不要只给 2 块**就收手；"
     "总成本仍必须 ≤ 现金，引擎会给超预算的部分缩量；\n"
-    "· 口粮可省略（引擎按 [人口/口粮] 的基准档补）；想冲优秀档就按优秀档填 "
-    "A/B/C/D；\n"
+    "· 口粮**至少写 A、B**（基准档必须同时有；只写 A 会永远吃不饱）；想冲优秀档再按 "
+    "A/B/C/D 四样填；新建成地块会增加人口/胃口，口粮要跟着加；\n"
     "· 用不到的字段可以省略或留空，但 **player_id 必须写「{player_id}」**。\n"
     "★ 两个**可选**字段（玩家要撤销 / 要一句解释时很有用）：\n"
     '· "why": "一句话：做了什么 + 为什么"（**只进聊天摘要，不参与规则**）；\n'
