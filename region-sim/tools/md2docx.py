@@ -297,6 +297,16 @@ def plan_column_widths(header, rows, usable_cm, size_pt):
                         "tok": longest_tok + pad,
                         "hdr": _text_width_units(header[ci], size_pt) + pad})
 
+    # 序号类短列（表头 1–2 字、内容全是数字）：按最长数字位数给足宽度
+    for ci in range(ncols):
+        cells = [header[ci]] + [(r[ci] if ci < len(r) else "") for r in rows]
+        body = [c for c in cells[1:] if c.strip()]
+        if (len(header[ci].strip()) <= 2 and body
+                and all(re.fullmatch(r"[\d.]+", c.strip()) for c in body)):
+            need = max(_text_width_units(c.strip(), size_pt) for c in body) + 0.46
+            details[ci]["hdr"] = max(details[ci]["hdr"], need)
+            details[ci]["tok"] = max(details[ci]["tok"], need)
+
     def floor_w(n):
         # 下限：表头不可断 + 最短可读宽度（单位 cm）
         return min(n["full"], max(n["hdr"], n["tok"], 0.55))
