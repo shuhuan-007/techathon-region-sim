@@ -14,9 +14,19 @@
 > | 路演 PPT | [`提交材料/路演PPT-建设特区-Techathon2026.pptx`](提交材料/路演PPT-建设特区-Techathon2026.pptx) |
 >
 > **30 秒跑起来**：双击 `region-sim/start.bat`（Windows），或 `cd region-sim && python server/app.py` → <http://127.0.0.1:8000/>
-> **跑测试**：`cd region-sim && python -m pytest -q` → **611 passed / 0 failed**
+> **跑测试**：`cd region-sim && python -m pytest -q` → 本机 **611 passed / 0 failed**（干净克隆 610 passed / 1 skipped：唯一 skip 是「21 个 glb 是否就位」那条，按设计跳过）
 >
-> 两项刻意不入 git 的东西：`region-sim/.env`（API key，见 .gitignore）与 `region-sim/web/assets/plots/*.glb`（21 个 3D 模型共 533 MB，超单文件上限；缺失时前端自动退化为 2D，**不影响任何数值**）。
+> **3D 模型怎么拿（重要）**：21 个地块模型共 533 MB，**不放在 git 里**（会让克隆从 6 MB 变 540 MB），改为挂在 **Release 附件**，`HTTP 200` 匿名可下：
+>
+> **[⬇ 下载 RegionSim-3D-Models-21glb.zip（502 MB）](../../releases/download/v1.0-3d-models/RegionSim-3D-Models-21glb.zip)**　·　[Release 说明页](../../releases/tag/v1.0-3d-models)
+>
+> ```bash
+> # 放进游戏后即可在「点地块 → 3D 视角」看到模型
+> unzip RegionSim-3D-Models-21glb.zip -d region-sim/web/assets/plots/
+> ```
+>
+> **不下载也能玩**：缺模型时前端自动退化为 2D 地块格子，**规则与结算数值分毫不变**。
+> 另一项不入 git 的是 `region-sim/.env`（AI key，见 .gitignore）——缺它只是 AI 叙事不可用，游戏照跑。
 
 ---
 
