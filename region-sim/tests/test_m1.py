@@ -194,18 +194,22 @@ def test_yi_material_cost_is_130():
 
 
 def test_market_depth_high_tier_is_shallow():
-    """★ 市场深度：高级商品的市场极浅（结构性事实，供调平衡参考）。
+    """★ 市场深度：高级商品的市场相对较浅（结构性事实，供调平衡参考）。
 
     临界量（价格打到地板所需的净供给）= `0.9 × (Es+|Ed|) × Q0`。
 
+    ★ 2026-10-18 第七轮：用户要求"市场放大、升级要有意义"，Q0 上调
+    （G 200→300、H-* 30→150、H-*+ 10→60、I 15→60、C/D/F 上调）。
+    本测试同步新 Q0 的临界量。
+
     ⚠️ 这条**不是断言"设计对"**，而是把数值后果**固定下来**：
-    `I` 与 `H+` 只要 18~19 单位就触底（约 5 块满负荷三级地块一季的产量）；
-    而农产品 A 要 1800 单位。这个梯度来自 `Q0` 的设定（10~15 vs 2000）。
+    `I` 75.6、`H-A+` 108 单位才触底（分别约 13 / 19 块满负荷三级地块一季）；
+    而农产品 A 要 1800 单位。这个梯度仍来自 `Q0` 的设定（60 vs 2000）。
     """
     cfg = load_config()
     cases = {
-        "A": 1800.0, "F": 180.0, "G": 324.0,
-        "H-A": 72.9, "I": 18.9, "H-A+": 18.0,
+        "A": 1800.0, "F": 270.0, "G": 486.0,
+        "H-A": 364.5, "I": 75.6, "H-A+": 108.0,
     }
     for g, expected in cases.items():
         c = cfg.market[g]
@@ -215,8 +219,8 @@ def test_market_depth_high_tier_is_shallow():
             f"{g} 的临界供给量应为 {expected}，实得 {crit}"
         )
 
-    # 高级商品确实比农产品浅得多
-    assert cases["H-A+"] < cases["F"] / 5, "H+ 市场应远浅于资源市场"
+    # 高级商品确实比农产品浅得多（H-A+ 仍不到 A 的 1/10）
+    assert cases["H-A+"] < cases["A"] / 10, "H+ 市场应远浅于农产品市场"
 
 
 def test_price_floor_still_sells_everything():
@@ -423,9 +427,9 @@ def test_m1_full_account():
     cfg = load_config()
     cases = [
         # 名称, 类型, 等级, 产出, 结算价, 销售收入, 期末现金, 增加值
-        ("甲", PlotType.RESOURCE, 1, None, 23.52, 94.08, 1031.68, 66.0),
-        ("乙", PlotType.INDUSTRY, 1, "G", 55.22222222222222,
-         276.1111111111111, 1065.611111111111, 110.0),
+        ("甲", PlotType.RESOURCE, 1, None, 23.68, 94.72, 1032.32, 66.0),
+        ("乙", PlotType.INDUSTRY, 1, "G", 55.48148148148148,
+         277.4074074074074, 1066.9074074074074, 110.0),
     ]
 
     for name, ptype, level, product, price, revenue, cash, va in cases:
@@ -478,9 +482,9 @@ def test_m1_subsidy_is_transfer_not_output():
     assert abs(r.subsidy) < 1e-9, (
         f"报告里的补贴应为 0（S1 起季初发放、结算不记），实得 {r.subsidy}"
     )
-    # 甲区运营锚点：销售收入 94.08、增加值 66 —— 都不含补贴
-    assert abs(r.sales_revenue - 94.08) < 1e-9, (
-        f"★ 补贴不得混进销售收入：应为 94.08，实得 {r.sales_revenue}"
+    # 甲区运营锚点：销售收入 94.72、增加值 66 —— 都不含补贴
+    assert abs(r.sales_revenue - 94.72) < 1e-9, (
+        f"★ 补贴不得混进销售收入：应为 94.72，实得 {r.sales_revenue}"
     )
     assert abs(r.value_added - 66.0) < TOL, (
         f"★ 补贴不得混进增加值：应为 66，实得 {r.value_added}"
@@ -539,7 +543,7 @@ def test_pipeline_subsidy_always_zero():
         f"S1 起结算报告 subsidy 应恒 0（Q1 也不例外），实得 {r1.subsidy}"
     )
     # Q1（early 档）的 sales_revenue / value_added 不受补贴影响
-    assert abs(r1.sales_revenue - 94.08) < 1e-9, "Q1 销售收入不含补贴"
+    assert abs(r1.sales_revenue - 94.72) < 1e-9, "Q1 销售收入不含补贴"
     assert abs(r1.value_added - 66.0) < TOL, "Q1 增加值不含补贴"
 
     # ── preview 同源（试算也必须给 0）─────────────────
@@ -558,7 +562,7 @@ def test_pipeline_subsidy_always_zero():
         f"S1 起 Q{cfg.early_subsidy_quarters + 1}（基准档）结算报告 subsidy 也应为 0，"
         f"实得 {r8.subsidy}"
     )
-    assert abs(r8.sales_revenue - 94.08) < 1e-9, "Q8+ 销售收入不受补贴影响"
+    assert abs(r8.sales_revenue - 94.72) < 1e-9, "Q8+ 销售收入不受补贴影响"
     assert abs(r8.value_added - 66.0) < TOL, "Q8+ 增加值不受补贴影响"
 
 
@@ -645,7 +649,7 @@ def _print_reconciliation() -> None:
     print("  按 §11.6，应重新生成 M1 预期，不迁就旧数字。")
     print("-" * 70)
     print("\n价格一步：弹性已到位（2026-10-16），结算价与期末现金已在上方断言真算。")
-    print("  对应的完整账（上方第六节断言：甲 23.52/1031.68、乙 55.222222/1065.611111）：")
+    print("  对应的完整账（上方第六节断言：甲 23.68/1032.32、乙 55.481481/1066.907407）：")
     print("    甲：期末现金 = 1000 − 66  + 4·P_F + 3.60")
     print("    乙：期末现金 = 1000 − 215 + 5·P_G + 4.50")
     for g in ("F", "G"):

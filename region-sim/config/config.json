@@ -14,13 +14,11 @@
     "数据源：docs/01-规范/规则基线.md §2.3 / §3.5 / §5.2 / §8.5",
     "        docs/04-交接/规则细化交接书.md §一"
   ],
-
   "meta": {
     "config_version": "0.1.0",
     "rules_baseline": "V7",
     "note": "M1 阶段：只填了 M1 需要的部分。弹性、建设表、开局名额等待填。"
   },
-
   "world": {
     "rows": 10,
     "cols": 10,
@@ -29,25 +27,113 @@
     "opening_cash": 1200,
     "_comment_opening_cash": "✅ 2026-10-16 定案：开局现金 1200（基线 §11.9.1，队友 v1.1 交付已采纳）。⚠️ M1 夹具仍按各 1000——那是【测试题设】，不是正式开局值，不得把 1200 当 M1 输入。"
   },
-
   "goods": {
-    "A":     { "name": "主粮",           "P0": 10,  "Q0": 2000, "Es": 0.5, "Ed": -0.5 },
-    "B":     { "name": "杂粮",           "P0": 7,   "Q0": 2200, "Es": 0.5, "Ed": -0.5 },
-    "C":     { "name": "油料",           "P0": 16,  "Q0": 200,  "Es": 0.5, "Ed": -0.5 },
-    "D":     { "name": "纤维",           "P0": 26,  "Q0": 150,  "Es": 0.5, "Ed": -0.5 },
-    "F":     { "name": "资源原料",       "P0": 24,  "Q0": 200,  "Es": 0.5, "Ed": -0.5 },
-    "G":     { "name": "工业基础材料",   "P0": 56,  "Q0": 200,  "Es": 1.0, "Ed": -0.8 },
-    "H-A":   { "name": "农业机械",       "P0": 64,  "Q0": 30,   "Es": 1.5, "Ed": -1.2 },
-    "H-F":   { "name": "资源机械",       "P0": 68,  "Q0": 30,   "Es": 1.5, "Ed": -1.2 },
-    "H-G":   { "name": "工业机械",       "P0": 73,  "Q0": 30,   "Es": 1.5, "Ed": -1.2 },
-    "H-J":   { "name": "服务机械",       "P0": 64,  "Q0": 30,   "Es": 1.5, "Ed": -1.2 },
-    "I":     { "name": "高技术产品",     "P0": 225, "Q0": 15,   "Es": 0.8, "Ed": -0.6 },
-    "H-A+":  { "name": "自动化农业机械", "P0": 277, "Q0": 10,   "Es": 1.0, "Ed": -1.0 },
-    "H-F+":  { "name": "自动化资源机械", "P0": 283, "Q0": 10,   "Es": 1.0, "Ed": -1.0 },
-    "H-G+":  { "name": "自动化工业机械", "P0": 289, "Q0": 10,   "Es": 1.0, "Ed": -1.0 },
-    "H-J+":  { "name": "自动化服务机械", "P0": 277, "Q0": 10,   "Es": 1.0, "Ed": -1.0 }
+    "A": {
+      "name": "主粮",
+      "P0": 10,
+      "Q0": 2000,
+      "Es": 0.5,
+      "Ed": -0.5
+    },
+    "B": {
+      "name": "杂粮",
+      "P0": 7,
+      "Q0": 2200,
+      "Es": 0.5,
+      "Ed": -0.5
+    },
+    "C": {
+      "name": "油料",
+      "P0": 16,
+      "Q0": 260.0,
+      "Es": 0.5,
+      "Ed": -0.5
+    },
+    "D": {
+      "name": "纤维",
+      "P0": 26,
+      "Q0": 200.0,
+      "Es": 0.5,
+      "Ed": -0.5
+    },
+    "F": {
+      "name": "资源原料",
+      "P0": 24,
+      "Q0": 300.0,
+      "Es": 0.5,
+      "Ed": -0.5
+    },
+    "G": {
+      "name": "工业基础材料",
+      "P0": 56,
+      "Q0": 300.0,
+      "Es": 1.0,
+      "Ed": -0.8
+    },
+    "H-A": {
+      "name": "农业机械",
+      "P0": 64,
+      "Q0": 150.0,
+      "Es": 1.5,
+      "Ed": -1.2
+    },
+    "H-F": {
+      "name": "资源机械",
+      "P0": 68,
+      "Q0": 150.0,
+      "Es": 1.5,
+      "Ed": -1.2
+    },
+    "H-G": {
+      "name": "工业机械",
+      "P0": 73,
+      "Q0": 150.0,
+      "Es": 1.5,
+      "Ed": -1.2
+    },
+    "H-J": {
+      "name": "服务机械",
+      "P0": 64,
+      "Q0": 150.0,
+      "Es": 1.5,
+      "Ed": -1.2
+    },
+    "I": {
+      "name": "高技术产品",
+      "P0": 225,
+      "Q0": 60.0,
+      "Es": 0.8,
+      "Ed": -0.6
+    },
+    "H-A+": {
+      "name": "自动化农业机械",
+      "P0": 277,
+      "Q0": 60.0,
+      "Es": 1.0,
+      "Ed": -1.0
+    },
+    "H-F+": {
+      "name": "自动化资源机械",
+      "P0": 283,
+      "Q0": 60.0,
+      "Es": 1.0,
+      "Ed": -1.0
+    },
+    "H-G+": {
+      "name": "自动化工业机械",
+      "P0": 289,
+      "Q0": 60.0,
+      "Es": 1.0,
+      "Ed": -1.0
+    },
+    "H-J+": {
+      "name": "自动化服务机械",
+      "P0": 277,
+      "Q0": 60.0,
+      "Es": 1.0,
+      "Ed": -1.0
+    }
   },
-
   "_comment_goods": [
     "★ 2026-10-16：弹性 Es/Ed 已由规则同学提供（源文件 docs/05-原始资料/队友弹性参数.docx）。",
     "   这批数据把『价格一步』解锁了 —— 结算价与期末现金从此可以真算。",
@@ -58,65 +144,261 @@
     "       农产品 A/B/C/D 与资源 F 是 0.5/-0.5（最钝）",
     "★ 2026-10-16：external_purchase（H*/I 的 30/15/10 固定收购）已【全部停用】，字段已移除。",
     "   用户裁定『暂时没有固定采购』。所有商品一律只走供需曲线。",
+    "★ 2026-10-18 市场放大（用户：『市场得再大一点，特别是高精尖』）：只动 Q0，P0 与 Es/Ed 不动。",
+    "   G 200→300；H-A/H-F/H-G/H-J 30→150；H-A+/H-F+/H-G+/H-J+ 10→60；",
+    "   I 15→60；C 200→260；D 150→200；F 200→300；A/B 不动。",
+    "   价格斜率 = P0/((Es+|Ed|)·Q0)：Q0 放大 → 价格更稳、升级才有意义。",
     "⚠️ 不要建 J/J2/J3（服务 0→0，不是商品）。",
     "⚠️ 不要建 A2/A3（不分等级，共用同一编码）。"
   ],
-
   "recipes": {
     "_comment": "字段含义：input/c/d/e 都是【基准满负荷一个季度】的整批值，不是生产 1 单位的投入。",
-
     "agriculture": {
       "_comment": "农业 0 商品投入，只烧钱和劳动。输出 A/B/C/D，各三级。【E1 2026-10-18】c 全线 ×0.8：A 20/32/48→16/25.6/38.4；B 15/24/36→12/19.2/28.8；C 25/40/60→20/32/48；D 30/48/72→24/38.4/57.6。",
-      "A": { "1": { "input": {}, "c": 16.0,  "d": 2,   "e": 5  },
-             "2": { "input": {}, "c": 25.6,  "d": 2,   "e": 8  },
-             "3": { "input": {}, "c": 38.4,  "d": 1.5, "e": 12 } },
-      "B": { "1": { "input": {}, "c": 12.0,  "d": 1.5, "e": 6  },
-             "2": { "input": {}, "c": 19.2,  "d": 1.5, "e": 9  },
-             "3": { "input": {}, "c": 28.8,  "d": 1.2, "e": 14 } },
-      "C": { "1": { "input": {}, "c": 20.0,  "d": 2.5, "e": 4  },
-             "2": { "input": {}, "c": 32.0,  "d": 2.5, "e": 6  },
-             "3": { "input": {}, "c": 48.0,  "d": 2,   "e": 9  } },
-      "D": { "1": { "input": {}, "c": 24.0,  "d": 3,   "e": 3  },
-             "2": { "input": {}, "c": 38.4,  "d": 3,   "e": 5  },
-             "3": { "input": {}, "c": 57.6,  "d": 2.5, "e": 7  } }
+      "A": {
+        "1": {
+          "input": {},
+          "c": 16.0,
+          "d": 2,
+          "e": 5
+        },
+        "2": {
+          "input": {},
+          "c": 25.6,
+          "d": 2,
+          "e": 8
+        },
+        "3": {
+          "input": {},
+          "c": 38.4,
+          "d": 1.5,
+          "e": 12
+        }
+      },
+      "B": {
+        "1": {
+          "input": {},
+          "c": 12.0,
+          "d": 1.5,
+          "e": 6
+        },
+        "2": {
+          "input": {},
+          "c": 19.2,
+          "d": 1.5,
+          "e": 9
+        },
+        "3": {
+          "input": {},
+          "c": 28.8,
+          "d": 1.2,
+          "e": 14
+        }
+      },
+      "C": {
+        "1": {
+          "input": {},
+          "c": 20.0,
+          "d": 2.5,
+          "e": 4
+        },
+        "2": {
+          "input": {},
+          "c": 32.0,
+          "d": 2.5,
+          "e": 6
+        },
+        "3": {
+          "input": {},
+          "c": 48.0,
+          "d": 2,
+          "e": 9
+        }
+      },
+      "D": {
+        "1": {
+          "input": {},
+          "c": 24.0,
+          "d": 3,
+          "e": 3
+        },
+        "2": {
+          "input": {},
+          "c": 38.4,
+          "d": 3,
+          "e": 5
+        },
+        "3": {
+          "input": {},
+          "c": 57.6,
+          "d": 2.5,
+          "e": 7
+        }
+      }
     },
     "_comment_D3": "⚠️ 三级 D 产量：配方v3 说 7，草稿2 说 7.5。交接书 §五.2 裁定以 v3 为准 = 7。已按 7 填。",
-
     "resource": {
       "_comment": "资源只产 F。M1 区域甲用的就是这条。",
-      "F": { "1": { "input": {}, "c": 30, "d": 3,   "e": 4 },
-             "2": { "input": {}, "c": 48, "d": 3,   "e": 6 },
-             "3": { "input": {}, "c": 72, "d": 2.5, "e": 9 } }
+      "F": {
+        "1": {
+          "input": {},
+          "c": 30,
+          "d": 3,
+          "e": 4
+        },
+        "2": {
+          "input": {},
+          "c": 48,
+          "d": 3,
+          "e": 6
+        },
+        "3": {
+          "input": {},
+          "c": 72,
+          "d": 2.5,
+          "e": 9
+        }
+      }
     },
-
     "industry": {
       "_comment": "工业按等级与路线区分。M1 区域乙用的就是 G_L1。",
-      "G_L1":  { "input": { "C": 2, "D": 1, "F": 3 },              "c": 40,  "d": 3, "e": 5 },
-      "H-A_L2": { "input": { "G": 3, "F": 2 },                     "c": 80,  "d": 4, "e": 8 },
-      "H-F_L2": { "input": { "G": 3, "F": 3 },                     "c": 80,  "d": 4, "e": 8 },
-      "H-G_L2": { "input": { "G": 4, "F": 2 },                     "c": 80,  "d": 4, "e": 8 },
-      "H-J_L2": { "input": { "G": 3, "F": 2 },                     "c": 80,  "d": 4, "e": 8 },
-      "I_L3":   { "input": { "F": 3, "G": 2, "H-G": 1 },           "c": 120, "d": 6, "e": 4 },
-      "H-A+_L3": { "input": { "F": 2, "G": 2, "I": 1, "H-A": 4 },  "c": 100, "d": 4, "e": 4 },
-      "H-F+_L3": { "input": { "F": 2, "G": 2, "I": 1, "H-F": 4 },  "c": 100, "d": 4, "e": 4 },
-      "H-G+_L3": { "input": { "F": 2, "G": 2, "I": 1, "H-G": 4 },  "c": 100, "d": 4, "e": 4 },
-      "H-J+_L3": { "input": { "F": 2, "G": 2, "I": 1, "H-J": 4 },  "c": 100, "d": 4, "e": 4 }
+      "G_L1": {
+        "input": {
+          "C": 2,
+          "D": 1,
+          "F": 3
+        },
+        "c": 40,
+        "d": 3,
+        "e": 5
+      },
+      "H-A_L2": {
+        "input": {
+          "G": 3,
+          "F": 2
+        },
+        "c": 80,
+        "d": 4,
+        "e": 8
+      },
+      "H-F_L2": {
+        "input": {
+          "G": 3,
+          "F": 3
+        },
+        "c": 80,
+        "d": 4,
+        "e": 8
+      },
+      "H-G_L2": {
+        "input": {
+          "G": 4,
+          "F": 2
+        },
+        "c": 80,
+        "d": 4,
+        "e": 8
+      },
+      "H-J_L2": {
+        "input": {
+          "G": 3,
+          "F": 2
+        },
+        "c": 80,
+        "d": 4,
+        "e": 8
+      },
+      "I_L3": {
+        "input": {
+          "F": 3,
+          "G": 2,
+          "H-G": 1
+        },
+        "c": 120,
+        "d": 6,
+        "e": 4
+      },
+      "H-A+_L3": {
+        "input": {
+          "F": 2,
+          "G": 2,
+          "I": 1,
+          "H-A": 4
+        },
+        "c": 100,
+        "d": 4,
+        "e": 4
+      },
+      "H-F+_L3": {
+        "input": {
+          "F": 2,
+          "G": 2,
+          "I": 1,
+          "H-F": 4
+        },
+        "c": 100,
+        "d": 4,
+        "e": 4
+      },
+      "H-G+_L3": {
+        "input": {
+          "F": 2,
+          "G": 2,
+          "I": 1,
+          "H-G": 4
+        },
+        "c": 100,
+        "d": 4,
+        "e": 4
+      },
+      "H-J+_L3": {
+        "input": {
+          "F": 2,
+          "G": 2,
+          "I": 1,
+          "H-J": 4
+        },
+        "c": 100,
+        "d": 4,
+        "e": 4
+      }
     },
     "_comment_industry": "I_L3 每季消耗 H-G×1 —— 解释为专用设备模块的更新耗损，与建厂时安装的 H-G 是两笔不同用途的投入，不算重复收费（基线 §2.4）。⚠️ 这条解释必须保留在注释里。",
-
     "service": {
       "_comment": "★ 服务 0→0：不产出商品、不采购物资，纯资金流。output = null。【E1 2026-10-18】c: 20/32/48 → 10/16/24。",
-      "1": { "input": {}, "c": 10, "d": 3,   "e": 0, "output": null },
-      "2": { "input": {}, "c": 16, "d": 3,   "e": 0, "output": null },
-      "3": { "input": {}, "c": 24, "d": 2.5, "e": 0, "output": null }
+      "1": {
+        "input": {},
+        "c": 10,
+        "d": 3,
+        "e": 0,
+        "output": null
+      },
+      "2": {
+        "input": {},
+        "c": 16,
+        "d": 3,
+        "e": 0,
+        "output": null
+      },
+      "3": {
+        "input": {},
+        "c": 24,
+        "d": 2.5,
+        "e": 0,
+        "output": null
+      }
     },
-
     "research": {
       "_comment": "研究 0→0：烧钱出效率加成（+1%/块，玩家内封顶 +3%）。",
-      "maintain": { "input": {}, "c": 60, "d": 2, "e": 0, "output": null }
+      "maintain": {
+        "input": {},
+        "c": 60,
+        "d": 2,
+        "e": 0,
+        "output": null
+      }
     }
   },
-
   "wages": {
     "_comment": "工资/单位劳动/季（基线 §3.5）。M1 甲用 resource=12，乙用 industry_g=15。【E1 2026-10-18】agriculture 8→6、service 16→8；resource/industry_g/machine/high_tech 不动。",
     "agriculture": 6,
@@ -126,34 +408,50 @@
     "high_tech": 28,
     "service": 8
   },
-
   "efficiency": {
     "_comment": "效率四分量参数（基线 §3.1 / §3.2 / §3.3.5 / §3.6）。",
     "adjacency": {
       "per_neighbor": 0.05,
-      "cap": 0.40,
+      "cap": 0.4,
       "_comment_service": [
-        "★ 2026-10-16 改定：服务『给出去』的加成按【服务自身等级】取率，",
-        "   取代此前的『任何邻居一律 +10%』。",
-        "   原写法导致一级/三级服务收益相同、升级无意义。",
-        "✅ 2026-10-16 晚拍板：service_cap = 0.40，与普通地块的 +40% 上限一致。",
-        "   （原为 null『暂不封顶』，已作废——不封顶时三级服务 8 邻居会给出 +80%。）",
-        "⚠️ 已知取舍：封顶后 1/2/3 级在 ≥8 邻居时都撞 +40%，服务升级边际收益变小。"
+        "★ 2026-10-18 用户口述重做（推翻 2026-10-16 的口径）：",
+        "   服务区对【周围任何非服务地块】都有加成（八邻格），",
+        "   服务区之间【互不加成】，服务自己也不接收任何邻接加成。",
+        "   1/2/3 级分别给每个相邻非服务地块 +5% / +7.5% / +10%。",
+        "   普通地块的关联表加成（每邻 +5%）保留，两者相加后仍封顶 +40%。",
+        "   ⚠️ service_cap 字段保留只为兼容旧配置/旧调用，2026-10-18 起引擎",
+        "      不再使用它（总封顶统一走下面的 cap=0.40）。"
       ],
-      "service_rate_by_level": { "1": 0.05, "2": 0.075, "3": 0.10 },
-      "service_cap": 0.40,
+      "service_rate_by_level": {
+        "1": 0.05,
+        "2": 0.075,
+        "3": 0.1
+      },
+      "service_cap": 0.4,
       "table": {
-        "agriculture": ["agriculture", "resource"],
-        "resource":    ["resource", "industry"],
-        "industry":    ["industry", "resource"],
-        "service":     ["service", "agriculture", "industry"],
-        "research":    ["industry", "high_tech"]
+        "_comment": "服务【不在表里】（§3.6）：它只给出去、自己不接收，服务之间也不加成。",
+        "agriculture": [
+          "agriculture",
+          "resource"
+        ],
+        "resource": [
+          "resource",
+          "industry"
+        ],
+        "industry": [
+          "industry",
+          "resource"
+        ],
+        "research": [
+          "industry",
+          "high_tech"
+        ]
       }
     },
     "happiness": {
       "baseline_h": 0.6,
       "slope": 0.5,
-      "floor": 0.90,
+      "floor": 0.9,
       "initial_h": 0.6
     },
     "ramp_up": {
@@ -167,7 +465,18 @@
       "cap": 0.03
     }
   },
-
+  "service_income": {
+    "_comment": [
+      "★ 2026-10-18 用户口述新增（§3.6）：服务地块的少量经济收益。",
+      "   服务收入 = (八邻格中【运行中的非服务地块】数) × 每邻收入(服务等级)。",
+      "   只数非服务邻居（服务之间互不产生收入）；u=0 / 不在计划里 → 收入 0。",
+      "   进 QuarterReport.service_revenue 与玩家现金，并计入 GDP（finance.value_added）。",
+      "   汇率：现金/邻/季。"
+    ],
+    "1": 6,
+    "2": 9,
+    "3": 12
+  },
   "population": {
     "_comment": [
       "★ 2026-10-16：取消 round。N = L × r 直接保留小数（基线 §3.3.1）。",
@@ -182,19 +491,27 @@
     "base_baskets_per_person": 5,
     "good_tier_multiplier": 1.5
   },
-
   "food": {
     "_comment": "两档粮食需求（基线 §3.3.3）。注意 A/B 必须都有且可互换。",
-    "baseline_quota": { "A": 0.4, "B": 0.2 },
-    "good_quota":     { "A": 0.4, "B": 0.2, "C": 0.1, "D": 0.02 },
-    "replaceable_goods": ["A", "B"]
+    "baseline_quota": {
+      "A": 0.4,
+      "B": 0.2
+    },
+    "good_quota": {
+      "A": 0.4,
+      "B": 0.2,
+      "C": 0.1,
+      "D": 0.02
+    },
+    "replaceable_goods": [
+      "A",
+      "B"
+    ]
   },
-
   "tax": {
-    "wage_tax_rate": 0.10,
+    "wage_tax_rate": 0.1,
     "_comment": "工资税 10%：工资支出记税前总额，税记回流收入（基线 §10）。"
   },
-
   "production": {
     "_comment": [
       "经营费拆分（基线 §3.4）：",
@@ -206,7 +523,6 @@
     "operating_fixed_share": 0.7,
     "operating_variable_share": 0.3
   },
-
   "trade": {
     "_comment": [
       "  buy_price_source = last_settlement：买入按【上一季度结算价】记账。",
@@ -222,10 +538,13 @@
     "buy_price_source": "last_settlement",
     "sell_price_source": "current",
     "deduct_timing": "settlement",
-    "buy_volume_includes": ["production_input", "construction", "household_food"],
+    "buy_volume_includes": [
+      "production_input",
+      "construction",
+      "household_food"
+    ],
     "first_quarter_price_fallback": "P0"
   },
-
   "concurrency": {
     "_comment": [
       "★ 2026-10-16：限制并发（基线 §1.3.1）。",
@@ -238,7 +557,6 @@
     "serialize_submit": true,
     "lock_release_in_finally": true
   },
-
   "construction": {
     "_comment": [
       "✅ 2026-10-16 按《规则基线》§5.2 录入全表 14 行（数据源《草稿2》新版）。",
@@ -252,33 +570,175 @@
     "_comment_industry": [
       "工业是唯一需要按【路线】分岔的类型：",
       "  1→2 选『机械 H-*』→ ind_1_2_machine（2 季）",
-      "  1→2 选『研究线』  → ind_1_2_research（6 季）",
+      "  1→2 选『研究线』  → ind_1_2_research（★ 2026-10-18 起 4 季，原 6 季）",
       "  二级是机械 → 升三级走 ind_2_3_machine（4 季，出 H-*+）",
-      "  二级是研究 → 升三级走 ind_2_3_high（8 季，出 I）",
+      "  二级是研究 → 升三级走 ind_2_3_high（★ 2026-10-18 起 5 季，原 8 季，出 I）",
+      "  ★ 缩短两段工期是为了让 I 路线在一局 20 季内可玩（4+5=9 季研发）。",
       "⚠️ 启动循环例外（§5.1）：建最初的高技术/自动化线【可以用普通 H-G】，",
       "   不强制先消耗 H-G+ —— 否则『I 需要 H-G+，而 H-G+ 又需要 I』死循环。"
     ],
     "works": {
-      "agri_new":         { "label": "新建一级农业",     "plot_type": "agriculture", "from_level": 0, "to_level": 1, "cash": 80,  "materials": { "H-A": 1 }, "quarters": 1 },
-      "agri_1_2":         { "label": "农业 1→2",         "plot_type": "agriculture", "from_level": 1, "to_level": 2, "cash": 80,  "materials": { "H-A": 1 }, "quarters": 2 },
-      "agri_2_3":         { "label": "农业 2→3",         "plot_type": "agriculture", "from_level": 2, "to_level": 3, "cash": 100, "materials": { "H-A+": 1 }, "quarters": 3 },
-
-      "res_new":          { "label": "新建一级资源",     "plot_type": "resource",    "from_level": 0, "to_level": 1, "cash": 100, "materials": { "H-F": 1 }, "quarters": 1 },
-      "res_1_2":          { "label": "资源 1→2",         "plot_type": "resource",    "from_level": 1, "to_level": 2, "cash": 120, "materials": { "H-F": 2 }, "quarters": 2 },
-      "res_2_3":          { "label": "资源 2→3",         "plot_type": "resource",    "from_level": 2, "to_level": 3, "cash": 160, "materials": { "H-F+": 1 }, "quarters": 3 },
-
-      "ind_new":          { "label": "新建一级工业 G",   "plot_type": "industry",    "from_level": 0, "to_level": 1, "cash": 180, "materials": { "H-G": 2 }, "quarters": 2, "product": "G" },
-      "ind_1_2_machine":  { "label": "G→二级机械 H",     "plot_type": "industry",    "from_level": 1, "to_level": 2, "cash": 240, "materials": { "H-G": 3 }, "quarters": 2, "route": "machine" },
-      "ind_1_2_research": { "label": "G→二级研究",       "plot_type": "industry",    "from_level": 1, "to_level": 2, "cash": 300, "materials": { "H-G": 3 }, "quarters": 6, "route": "research" },
-      "ind_2_3_high":     { "label": "二级研究→三级 I",  "plot_type": "industry",    "from_level": 2, "to_level": 3, "cash": 500, "materials": { "H-G": 5 }, "quarters": 8, "route": "research" },
-      "ind_2_3_machine":  { "label": "二级机械→对应 H+", "plot_type": "industry",    "from_level": 2, "to_level": 3, "cash": 360, "materials": { "H-G": 3 }, "quarters": 4, "route": "machine" },
-
-      "srv_new":          { "label": "新建一级服务",     "plot_type": "service",     "from_level": 0, "to_level": 1, "cash": 80,  "materials": { "H-J": 1 }, "quarters": 1 },
-      "srv_1_2":          { "label": "服务 1→2",         "plot_type": "service",     "from_level": 1, "to_level": 2, "cash": 100, "materials": { "H-J": 1 }, "quarters": 2 },
-      "srv_2_3":          { "label": "服务 2→3",         "plot_type": "service",     "from_level": 2, "to_level": 3, "cash": 140, "materials": { "H-J+": 1 }, "quarters": 3 }
+      "agri_new": {
+        "label": "新建一级农业",
+        "plot_type": "agriculture",
+        "from_level": 0,
+        "to_level": 1,
+        "cash": 80,
+        "materials": {
+          "H-A": 1
+        },
+        "quarters": 1
+      },
+      "agri_1_2": {
+        "label": "农业 1→2",
+        "plot_type": "agriculture",
+        "from_level": 1,
+        "to_level": 2,
+        "cash": 80,
+        "materials": {
+          "H-A": 1
+        },
+        "quarters": 2
+      },
+      "agri_2_3": {
+        "label": "农业 2→3",
+        "plot_type": "agriculture",
+        "from_level": 2,
+        "to_level": 3,
+        "cash": 100,
+        "materials": {
+          "H-A+": 1
+        },
+        "quarters": 3
+      },
+      "res_new": {
+        "label": "新建一级资源",
+        "plot_type": "resource",
+        "from_level": 0,
+        "to_level": 1,
+        "cash": 100,
+        "materials": {
+          "H-F": 1
+        },
+        "quarters": 1
+      },
+      "res_1_2": {
+        "label": "资源 1→2",
+        "plot_type": "resource",
+        "from_level": 1,
+        "to_level": 2,
+        "cash": 120,
+        "materials": {
+          "H-F": 2
+        },
+        "quarters": 2
+      },
+      "res_2_3": {
+        "label": "资源 2→3",
+        "plot_type": "resource",
+        "from_level": 2,
+        "to_level": 3,
+        "cash": 160,
+        "materials": {
+          "H-F+": 1
+        },
+        "quarters": 3
+      },
+      "ind_new": {
+        "label": "新建一级工业 G",
+        "plot_type": "industry",
+        "from_level": 0,
+        "to_level": 1,
+        "cash": 180,
+        "materials": {
+          "H-G": 2
+        },
+        "quarters": 2,
+        "product": "G"
+      },
+      "ind_1_2_machine": {
+        "label": "G→二级机械 H",
+        "plot_type": "industry",
+        "from_level": 1,
+        "to_level": 2,
+        "cash": 240,
+        "materials": {
+          "H-G": 3
+        },
+        "quarters": 2,
+        "route": "machine"
+      },
+      "ind_1_2_research": {
+        "label": "G→二级研究",
+        "plot_type": "industry",
+        "from_level": 1,
+        "to_level": 2,
+        "cash": 300,
+        "materials": {
+          "H-G": 3
+        },
+        "quarters": 4,
+        "route": "research"
+      },
+      "ind_2_3_high": {
+        "label": "二级研究→三级 I",
+        "plot_type": "industry",
+        "from_level": 2,
+        "to_level": 3,
+        "cash": 500,
+        "materials": {
+          "H-G": 5
+        },
+        "quarters": 5,
+        "route": "research"
+      },
+      "ind_2_3_machine": {
+        "label": "二级机械→对应 H+",
+        "plot_type": "industry",
+        "from_level": 2,
+        "to_level": 3,
+        "cash": 360,
+        "materials": {
+          "H-G": 3
+        },
+        "quarters": 4,
+        "route": "machine"
+      },
+      "srv_new": {
+        "label": "新建一级服务",
+        "plot_type": "service",
+        "from_level": 0,
+        "to_level": 1,
+        "cash": 80,
+        "materials": {
+          "H-J": 1
+        },
+        "quarters": 1
+      },
+      "srv_1_2": {
+        "label": "服务 1→2",
+        "plot_type": "service",
+        "from_level": 1,
+        "to_level": 2,
+        "cash": 100,
+        "materials": {
+          "H-J": 1
+        },
+        "quarters": 2
+      },
+      "srv_2_3": {
+        "label": "服务 2→3",
+        "plot_type": "service",
+        "from_level": 2,
+        "to_level": 3,
+        "cash": 140,
+        "materials": {
+          "H-J+": 1
+        },
+        "quarters": 3
+      }
     }
   },
-
   "opening": {
     "_comment": [
       "★ 2026-10-16 用户正式裁定：每类 3 个名额、折扣 原价 × 0.50（独立建设现金费）。",
@@ -294,7 +754,6 @@
     },
     "discount_rate": 0.5
   },
-
   "economy": {
     "_comment": [
       "★ 2026-10-17 用户拍板：每季固定给每个玩家补贴（转移支付，不是产值）。",
@@ -315,7 +774,6 @@
     "early_quarterly_subsidy": 1200.0,
     "early_subsidy_quarters": 7
   },
-
   "policies": {
     "_comment": [
       "★ 政策系统（《规则基线》§11.9.3）。一局 20 季，每季开始抽 1 项，四项各 25%，",
@@ -329,38 +787,156 @@
     ],
     "mode": "random",
     "multipliers": {
-      "production_incentive": { "efficiency_multiplier": 1.10, "wage_multiplier": 1.15 },
-      "lean_operation":       { "efficiency_multiplier": 0.95, "operating_multiplier": 0.90 },
-      "livelihood_first":     { "wage_multiplier": 1.10 }
+      "production_incentive": {
+        "efficiency_multiplier": 1.1,
+        "wage_multiplier": 1.15
+      },
+      "lean_operation": {
+        "efficiency_multiplier": 0.95,
+        "operating_multiplier": 0.9
+      },
+      "livelihood_first": {
+        "wage_multiplier": 1.1
+      }
     }
   },
   "plot_names": {
     "_comment": [
-      "★ 地块名字库（2026-10-18 用户给定五种类型各 12 名）。",
+      "★ 地块名字库（2026-10-18 用户给定五种类型各 24 名）。",
       "地块建成时按 plot_type（研究地块＝industry L2 product='研究' 读 research 列）从本表分配一个。",
       "分配规则：①全局不重复（一局里同名只出现一次）；②按列表顺序取**下一名空闲**；",
-      "③12 名全部用尽 → 退化为「类型-Lxx」（研究=L2/L3、其他=L1/L2/L3）按位置去重。",
+      "③24 名全部用尽 → 退化为「类型-Lxx」（研究=L2/L3、其他=L1/L2/L3）按位置去重。",
       "名字只用于显示，不参与引擎计算/锚点/公式。"
     ],
     "agriculture": [
-      "禾丰农庄", "润田农场", "金穗田园", "裕农种植", "丰源生态", "利民农科",
-      "永盛田庄", "嘉禾农业", "民丰耕园", "长兴农圃", "兴农禾田", "顺发沃田"
+      "禾丰庄",
+      "润田圃",
+      "金穗园",
+      "裕农田",
+      "丰源圃",
+      "利民田",
+      "永盛庄",
+      "嘉禾园",
+      "禾丰农庄",
+      "润田农场",
+      "金穗田园",
+      "裕农种植",
+      "丰源生态",
+      "利民农科",
+      "永盛田庄",
+      "嘉禾农业",
+      "禾丰农业园",
+      "润田生态园",
+      "金穗种植园",
+      "裕农农科园",
+      "丰源农业园",
+      "利民种植园",
+      "永盛生态园",
+      "嘉禾农业园"
     ],
     "resource": [
-      "宏达资源", "恒通矿业", "鑫源能源", "盛达物资", "华泰林场", "润丰盐业",
-      "兴达水产", "昌盛砂石", "福源矿产", "德昌燃料", "瑞丰冶材", "安泰矿贸"
+      "宏达矿",
+      "恒通矿",
+      "鑫源矿",
+      "盛达矿",
+      "华泰林",
+      "润丰盐",
+      "兴达渔",
+      "昌盛砂",
+      "宏达资源",
+      "恒通矿业",
+      "鑫源能源",
+      "盛达物资",
+      "华泰林场",
+      "润丰盐业",
+      "兴达水产",
+      "昌盛砂石",
+      "福源矿产园",
+      "德昌燃料站",
+      "瑞丰冶材园",
+      "安泰矿贸园",
+      "宏达资源库",
+      "恒通能源站",
+      "鑫源物资站",
+      "盛达矿产园"
     ],
     "industry": [
-      "宏达工业", "恒通工贸", "鑫源实业", "盛达园区", "丰源厂区", "利民工园",
-      "永盛产业", "华泰基地", "润丰工贸", "兴达实业", "昌盛工业", "福源园区"
+      "宏达园",
+      "恒通园",
+      "鑫源园",
+      "盛达园",
+      "丰源园",
+      "利民园",
+      "永盛园",
+      "华泰园",
+      "宏达工业",
+      "恒通工贸",
+      "鑫源实业",
+      "盛达园区",
+      "丰源厂区",
+      "利民厂区",
+      "永盛产业",
+      "华泰基地",
+      "润丰工业园",
+      "兴达工贸园",
+      "昌盛实业园",
+      "福源产业园",
+      "德昌工业园",
+      "瑞丰工贸园",
+      "安泰实业园",
+      "正和产业园"
     ],
     "service": [
-      "顺达广场", "泰和商厦", "德昌商城", "瑞丰商都", "安泰中心", "正大广场",
-      "新源天地", "汇通生活", "联创广场", "天成商厦", "广源中心", "利达商城"
+      "顺达汇",
+      "泰和里",
+      "德昌坊",
+      "瑞丰汇",
+      "安泰里",
+      "正和坊",
+      "新源汇",
+      "汇通里",
+      "顺达广场",
+      "泰和商厦",
+      "德昌商城",
+      "瑞丰商都",
+      "安泰中心",
+      "正和广场",
+      "新源天地",
+      "汇通生活",
+      "顺达购物城",
+      "泰和商业街",
+      "德昌生活城",
+      "瑞丰购物城",
+      "安泰商业街",
+      "正和购物城",
+      "新源生活城",
+      "汇通商业街"
     ],
     "research": [
-      "恒丰研究", "鑫达科创", "盛源研发", "宏源科技", "金泰智研", "华丰技研",
-      "永利研创", "德源学研", "瑞达科工", "兴源实验", "正兴检测", "东升设计"
+      "恒丰所",
+      "鑫达院",
+      "盛源所",
+      "宏源院",
+      "金泰所",
+      "华丰院",
+      "永利所",
+      "德源院",
+      "恒丰研究",
+      "鑫达科创",
+      "盛源研发",
+      "宏源科技",
+      "金泰智研",
+      "华丰技研",
+      "永利研创",
+      "德源学研",
+      "瑞达科工园",
+      "兴源实验所",
+      "正兴检测院",
+      "东升设计院",
+      "恒丰研究院",
+      "鑫达科创园",
+      "盛源研发园",
+      "宏源科技园"
     ]
   }
 }

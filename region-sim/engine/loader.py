@@ -165,12 +165,13 @@ class EfficiencyConfig:
             ) from None
 
     def service_adjacency(self, service_level: int, neighbor_count: int) -> float:
-        """服务地块的 E_邻接（§3.6）。
+        """**旧公式（2026-10-18 起不再被引擎使用）**：服务自己的 E_邻接。
 
-            E_邻接(服务) = 1 + rate(服务等级) × 相邻地块数
-            rate: 1级 0.05 / 2级 0.075 / 3级 0.10
+            E_邻接(服务) = 1 + rate(服务等级) × 相邻地块数       ← 已作废
 
-        `service_cap` 为 None 时**不封顶**（8 邻居、三级服务理论上限 +80%）。
+        ★ 2026-10-18 用户重做 §3.6：**服务自己不吃邻接加成**、服务之间也不
+          加成；服务只把 rate 给**周围的非服务地块**。保留这个 helper 只为
+          不打断可能的旧调用方，`compute_adjacency()` **已经不再调它**。
         """
         bonus = self.service_rate(service_level) * neighbor_count
         if self.service_cap is not None:
@@ -327,6 +328,11 @@ class Config:
     population: PopulationConfig = field(default_factory=PopulationConfig)
     food: FoodConfig = field(default_factory=FoodConfig)
     trade: TradeConfig = field(default_factory=TradeConfig)
+
+    # ★ 2026-10-18 服务收入（§3.6）：{服务等级: 每邻每季现金}。
+    #   服务地块每季收入 = (八邻格中运行中的**非服务**地块数) × 本表[等级]。
+    #   ⚠️ 只有服务地块有收入；它**不看 E、不乘 u**（u=0 时为 0）。
+    service_income: dict[int, float] = field(default_factory=dict)
 
     # 经营费拆分（§3.4）：0.7c + 0.3c·u·E。**规则常量**，不是平衡数值。
     production_operating_fixed_share: float = 0.7
@@ -525,6 +531,21 @@ class Config:
         except KeyError:
             raise ConfigError(f"商品 {goods!r} 不在市场配置里") from None
 
+    def service_income_rate(self, level: int) -> float:
+        """服务地块每邻每季的现金收入（§3.6，2026-10-18）。
+
+        缺等级时**报错**，不退回默认值 —— 否则一级与三级服务会悄悄
+        算出同一个收入，与"升级要有意义"的裁定相悖。
+        """
+        try:
+            return self.service_income[level]
+        except KeyError:
+            raise ConfigError(
+                f"服务等级 {level} 没有配置服务收入。\n"
+                f"  已配置：{sorted(self.service_income)}\n"
+                f"  → 请检查 config.json 的 service_income"
+            ) from None
+
     # ── 补贴（2026-10-18 E1 拍板）─────────────────────
 
     def subsidy_for_quarter(self, quarter: int) -> float:
@@ -686,6 +707,16 @@ def load_config(path: str | Path | None = None) -> Config:
             "  → 这是 2026-10-16 定案的规则（§3.6：1级5% / 2级7.5% / 3级10%）。\n"
             "  → 不能省略：省略会让一级与三级服务算出同一个数。"
         )
+
+    # ★ 2026-10-18 服务收入（§3.6）：每个服务等级每邻每季的现金。
+    #    缺这一段 → 服务地块不会产生收入（值为空），但不影响其它地块结算；
+    #    真正用到时由 `Config.service_income_rate()` 明确报错。
+    svc_inc = raw.get("service_income") or {}
+    cfg.service_income = {
+        int(k): float(v)
+        for k, v in svc_inc.items()
+        if not str(k).startswith("_") and str(k).isdigit()
+    }
 
     # ── 人口 / 粮食 ─────────────────────────────────────
     pop = raw.get("population", {})
@@ -906,13 +937,16 @@ def _build_adjacency_table(cfg: Config, table: dict) -> None:
 
 def _validate(cfg: Config) -> None:
     """结构性校验 —— 只查"形状"，不查"数值填没填"。"""
-    # 关联表必须覆盖 5 个类型（交接书自检清单要求）
-    expected = set(PlotType)
+    # 关联表必须覆盖**非服务**的 4 个类型（服务不走关联表：它只给出去、
+    # 自己不接收，2026-10-18 §3.6 重做）。
+    # ⚠️ 别再把 service 加回来：config 里已删掉 `table.service` 行，
+    #    `compute_adjacency()` 对服务走独立分支。
+    expected = set(PlotType) - {PlotType.SERVICE}
     missing = expected - set(cfg.efficiency.adjacency_table)
     if missing:
         raise ConfigError(
             f"关联表缺少类型：{sorted(t.value for t in missing)}\n"
-            f"  关联表必须 5 个类型齐全（见交接书 §七 自检清单）。"
+            f"  关联表必须覆盖 4 个非服务类型（服务不走关联表，见 §3.6）。"
         )
 
     # 两档粮食配比的商品必须在市场里有

@@ -517,11 +517,11 @@ def test_operating_profit_jia_matches_anchor():
     """★ 甲区试算：operating_profit = sales−wages−operating+税回流（无建设物资）。
 
     甲（资源 1 级，无投入）：
-        sales_revenue = 94.08，wages = 36，operating = 30，
+        sales_revenue = 94.72，wages = 36，operating = 30，
         materials_cost = 0 → construction_materials_cost = 0
-        operating_profit = 94.08 − 36 − 30 + 3.6 = 31.68
-        （= 现金进账 − 现金出账 + 税回流）= 1031.68 − 1034.08? 不对 —— 校验算式：
-          94.08 − 36 − 30 − 0 + 3.6 = 31.68。M1 现金净值 1031.68 − 1000 = 31.68 ✓
+        operating_profit = 94.72 − 36 − 30 + 3.6 = 32.32
+        （= 现金进账 − 现金出账 + 税回流）= 1032.32 − 1034.08? 不对 —— 校验算式：
+          94.72 − 36 − 30 − 0 + 3.6 = 32.32。M1 现金净值 1032.32 − 1000 = 32.32 ✓
     """
     cfg = load_config()
     st = state_with(plot("0,0"))
@@ -534,8 +534,8 @@ def test_operating_profit_jia_matches_anchor():
     assert abs(proj["construction_materials_cost"] - 0.0) < TOL, (
         f"甲区无工程 → 建设物资成本应为 0，实得 {proj['construction_materials_cost']}"
     )
-    assert abs(proj["operating_profit"] - 31.68) < TOL, (
-        f"甲区经营盈亏应为 31.68（94.08−36−30+3.6），实得 {proj['operating_profit']}"
+    assert abs(proj["operating_profit"] - 32.32) < TOL, (
+        f"甲区经营盈亏应为 32.32（94.72−36−30+3.6），实得 {proj['operating_profit']}"
     )
 
     # 与预览的「净现金」自洽：无建设、无口粮时 operating_profit == net_cash

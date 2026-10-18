@@ -51,8 +51,8 @@ BASELINE_5_2 = [
     ("res_2_3",           160,  {"H-F+": 1}, 443, 3),
     ("ind_new",           180,  {"H-G": 2},  326, 2),
     ("ind_1_2_machine",   240,  {"H-G": 3},  459, 2),
-    ("ind_1_2_research",  300,  {"H-G": 3},  519, 6),
-    ("ind_2_3_high",      500,  {"H-G": 5},  865, 8),
+    ("ind_1_2_research",  300,  {"H-G": 3},  519, 4),
+    ("ind_2_3_high",      500,  {"H-G": 5},  865, 5),
     ("ind_2_3_machine",   360,  {"H-G": 3},  579, 4),
     ("srv_new",            80,  {"H-J": 1},  144, 1),
     ("srv_1_2",           100,  {"H-J": 1},  164, 2),
@@ -200,9 +200,9 @@ def test_industry_level_up_has_two_routes():
     """
     cfg = load_config()
     assert C.find_work(cfg, PlotType.INDUSTRY, 1, 2, "machine").quarters == 2
-    assert C.find_work(cfg, PlotType.INDUSTRY, 1, 2, "research").quarters == 6
+    assert C.find_work(cfg, PlotType.INDUSTRY, 1, 2, "research").quarters == 4
     assert C.find_work(cfg, PlotType.INDUSTRY, 2, 3, "machine").quarters == 4
-    assert C.find_work(cfg, PlotType.INDUSTRY, 2, 3, "research").quarters == 8
+    assert C.find_work(cfg, PlotType.INDUSTRY, 2, 3, "research").quarters == 5
 
 
 def test_ambiguous_route_is_not_guessed():
@@ -256,7 +256,7 @@ def test_build_order_route_resolution():
     # 一级 G 升二级，选研究线 → research（6 季）
     w = C.find_work_for_build(cfg, g1,
                               BuildOrder("0,0", PlotType.INDUSTRY, 2, product="研究"))
-    assert w.work_id == "ind_1_2_research" and w.quarters == 6
+    assert w.work_id == "ind_1_2_research" and w.quarters == 4
 
     # 二级机械升三级 → machine（4 季）
     mech = mature("0,0", PlotType.INDUSTRY, 2, product="H-A")
@@ -268,7 +268,7 @@ def test_build_order_route_resolution():
     res = mature("0,0", PlotType.INDUSTRY, 2, product=None)
     w = C.find_work_for_build(cfg, res,
                               BuildOrder("0,0", PlotType.INDUSTRY, 3, product="I"))
-    assert w.work_id == "ind_2_3_high" and w.quarters == 8
+    assert w.work_id == "ind_2_3_high" and w.quarters == 5
 
 
 # ══════════════════════════════════════════════════════════════════

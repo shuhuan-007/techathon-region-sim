@@ -26,7 +26,7 @@ AI 说的数会和真实结算不一致 —— 玩家按 AI 说的做、结果�
                             X_t = 本季产出 − 合同交付
      5. 一次性扣款     ★     物资款（按**上季价**）+ 工资 + 经营费
      6. 产品分配与工程投入    合同履约；本季产品投工程
-     7. 市场结算             **产出按 P_t 全部卖出**（不用申报）
+     7. 市场结算             **产出按 P_t 全部卖出**（不用申报）+ 服务收入入账
      7.5 粮食结算            扣 A/B/C/D → 得 H
      8. 税收与报告           工资税 10% 记回流收入
      9. 结转                 quarter += 1，保存本季 H
@@ -75,10 +75,10 @@ from engine import market as M
 from engine import policies as POL
 from engine import production as P
 from engine import settlement as S
-from engine.efficiency import EfficiencyBreakdown, compute_efficiency
+from engine.efficiency import EfficiencyBreakdown, compute_efficiency, compute_service_income
 from engine.naming import assign_plot_name
 from engine.loader import Config
-from engine.models import Contract, GameState, Plan, Plot, PlotStatus
+from engine.models import Contract, GameState, Plan, Plot, PlotStatus, PlotType
 from engine.population import PopulationResult, compute_population
 
 
@@ -122,7 +122,12 @@ class QuarterReport:
     total_deduction: float = 0.0          # ★ 第 5 步一次性扣款
     wage_tax_refund: float = 0.0
 
-    sales_revenue: float = 0.0            # 第 7 步
+    sales_revenue: float = 0.0            # 第 7 步（**只含公开市场成交额**）
+    # ★ 2026-10-18 服务收入（§3.6）：服务地块本季的少量现金收益。
+    #   服务收入 = Σ(该服务地块八邻格中运行中的非服务地块数) × 等级每邻收入
+    #   ⚠️ **单独一列**，不混进 `sales_revenue`（那不是市场成交额）；
+    #      但它是**服务业增加值**，要进 GDP —— 见 `finance.value_added()`。
+    service_revenue: float = 0.0
     clearing_revenue: float = 0.0         # 已废弃（没有仓库 → 没有季末清仓），恒为 0
     unsold_cleared: dict[str, float] = field(default_factory=dict)  # 触底卖不掉、被清理的量
     discarded: dict[str, float] = field(default_factory=dict)       # 买了但没吃掉的口粮
@@ -173,6 +178,7 @@ class QuarterReport:
             "total_deduction": self.total_deduction,
             "wage_tax_refund": self.wage_tax_refund,
             "sales_revenue": self.sales_revenue,
+            "service_revenue": self.service_revenue,
             "clearing_revenue": self.clearing_revenue,
             "unsold_cleared": dict(self.unsold_cleared),
             "discarded": dict(self.discarded),
@@ -329,6 +335,11 @@ def _run_body(
     # ══ 第 4 步：生产 ══════════════════════════════════════
     outcomes: dict[str, list[P.PlotOutcome]] = {}
     populations: dict[str, PopulationResult] = {}
+    # ★ 2026-10-18 服务收入（§3.6）：与生产同一时点计算（第 4 步），
+    #   第 7 步销售回款处再一并加到玩家现金。
+    #   ⚠️ 只认**本季开工（u>0）且运行中**的服务地块 —— 停工/不在计划里
+    #      的服务不产生收入（任务口径）；服务之间互不计数。
+    service_revenue_by_player: dict[str, float] = {}
 
     for player_id, plan in plans.items():
         player = state.players[player_id]
@@ -336,6 +347,17 @@ def _run_body(
 
         # 人口（§3.3）：必须在生产之前，供粮食判定用
         populations[player_id] = compute_population(state, player_id, u_map, cfg)
+
+        svc_rev = 0.0
+        for pid in sorted(player.plots):
+            plot = player.plots[pid]
+            if plot.plot_type is not PlotType.SERVICE:
+                continue
+            rev, _count, _rate = compute_service_income(
+                state, player_id, plot, u_map.get(pid, 0.0), cfg
+            )
+            svc_rev += rev
+        service_revenue_by_player[player_id] = svc_rev
 
         outs: list[P.PlotOutcome] = []
         for pid in sorted(player.plots):
@@ -646,8 +668,13 @@ def _run_body(
             #    价格碰地板只压低单价，**不减少销量**，所以这里不再截断。
             revenue += qty * pr.price
 
-        player.cash += revenue
+        # ★ 2026-10-18：服务收入在这里一并入账（§3.6）。
+        #   ⚠️ 它**不是**市场成交额 → 不进 `sales_revenue`、不进 `P_t`、
+        #      不进 `B_t/X_t`；只是服务业自己的现金回流，单独记一列。
+        svc_rev = service_revenue_by_player.get(player_id, 0.0)
+        player.cash += revenue + svc_rev
         rep.sales_revenue = revenue
+        rep.service_revenue = svc_rev
 
     # ══ 第 7.5 步：粮食结算 → H ═══════════════════════════
     #
@@ -694,6 +721,8 @@ def _run_body(
         player.cash += tax
         rep.wage_tax_refund = tax
         # GDP：有效产出价值（固定参考价）− 实际消耗的中间投入（§7.5）
+        # ★ 服务收入已在 `finance.value_added()` 里并入（用户 2026-10-18 第七轮）；
+        #   **不要在这里再加一次** —— 会双计。
         rep.value_added = F.value_added(rep, cfg)
 
         # ══ ★ 2026-10-18 S2：本季经营盈亏（新增两个报告字段）══════════
@@ -716,7 +745,7 @@ def _run_body(
             for g, qty in rep.construction.items()
         )
         rep.operating_profit = (
-            rep.sales_revenue
+            rep.sales_revenue + rep.service_revenue
             - (rep.wages + rep.operating
                + rep.materials_cost - rep.construction_materials_cost)
             + rep.wage_tax_refund

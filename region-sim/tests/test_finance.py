@@ -88,11 +88,11 @@ def test_pipeline_records_tax_as_refund():
     assert abs(r.wage_tax_refund - 3.6) < TOL, (
         f"工资税回流应为 3.6，实得 {r.wage_tax_refund}"
     )
-    # 期末现金 = 1000 − 66 + 94.08 + 3.60 = 1031.68（M1 锚点，运营口径）
+    # 期末现金 = 1000 − 66 + 94.72 + 3.60 = 1032.32（M1 锚点，运营口径）
     # ★ 2026-10-18 S1：补贴改为季初发放、不进结算 → 账面 = 运营锚点本身。
     assert abs(r.subsidy) < 1e-9, f"S1 起结算报告 subsidy 应为 0，实得 {r.subsidy}"
-    assert abs(st.players["p1"].cash - 1031.68) < 1e-9, (
-        f"期末现金应为 1031.68（S1 起补贴不进账），实得 {st.players['p1'].cash}"
+    assert abs(st.players["p1"].cash - 1032.32) < 1e-9, (
+        f"期末现金应为 1032.32（S1 起补贴不进账），实得 {st.players['p1'].cash}"
     )
 
 
@@ -156,15 +156,15 @@ def test_value_added_formula_is_output_minus_materials():
 def test_value_added_uses_p0_not_settlement_price():
     """★ GDP 用**固定参考价 `P0`**，不随季度成交价变（§7.5）。
 
-    甲区结算价 23.52 ≠ P0 24。若有人误用成交价，
-    产出价值会变成 `4 × 23.52 = 94.08`（那是**销售收入**，不是 GDP）。
+    甲区结算价 23.68 ≠ P0 24。若有人误用成交价，
+    产出价值会变成 `4 × 23.68 = 94.72`（那是**销售收入**，不是 GDP）。
     """
     cfg = load_config()
     st, r = run_quarter(PlotType.RESOURCE, 1)
 
-    assert abs(r.sales_revenue - 94.08) < 1e-9, "销售收入按成交价 23.52 算"
+    assert abs(r.sales_revenue - 94.72) < 1e-9, "销售收入按成交价 23.68 算"
     assert abs(F.output_value(r.production, cfg) - 96.0) < TOL, (
-        "★ GDP 的产出价值必须按 P0=24 算，不是成交价 23.52"
+        "★ GDP 的产出价值必须按 P0=24 算，不是成交价 23.68"
     )
     assert abs(F.output_value(r.production, cfg) - r.sales_revenue) > 1.0, (
         "统计口径与现金口径是两个数，不该相等"
@@ -220,7 +220,67 @@ def test_service_contributes_no_output_value():
     )
 
 
-def test_operating_cost_is_intermediate_input():
+def test_value_added_includes_service_revenue():
+    """★ 2026-10-18 服务/市场重做：GDP = 产出价值 + **服务收入** − 中间投入。
+
+    一块二级服务 + 3 个运行中的非服务邻居：
+        服务收入 = 3 × 9 = 27
+        中间投入 = 经营费 16（服务 c=16，E=1.0 → 0.7×16 + 0.3×16 = 16）
+        增加值   = 0 + 27 − 16 = **11**
+
+    ⚠️ 服务收入是**服务业增加值**，必须进 GDP；但它不是商品产出，
+       不能塞进 `output_value()`（那会混淆统计口径）。
+    """
+    from engine.models import Plan, Plot, PlotPlan, PlotStatus, PlotType
+
+    cfg = load_config()
+
+    def running(pid, ptype, level=1, product=None):
+        return Plot(
+            plot_id=pid, plot_type=ptype, level=level,
+            status=PlotStatus.RUNNING, running_quarters=99, product=product,
+        )
+
+    svc = running("1,1", PlotType.SERVICE, 2)
+    st = make_state(cfg, "p1", svc)
+    st.players["p1"].plots = {
+        "1,1": svc,
+        "1,0": running("1,0", PlotType.RESOURCE, 1),
+        "0,1": running("0,1", PlotType.AGRICULTURE, 1, product="A"),
+        "2,1": running("2,1", PlotType.INDUSTRY, 1, product="G"),
+    }
+    plan = Plan(
+        player_id="p1",
+        plot_plans={"1,1": PlotPlan(plot_id="1,1", active=True, u=1.0)},
+    )
+    pipeline.advance(st, {"p1": plan}, cfg)
+    r = st.raw_reports["p1"]
+
+    assert abs(r.service_revenue - 27.0) < TOL, (
+        f"服务收入应为 3×9=27，实得 {r.service_revenue}"
+    )
+    assert abs(F.output_value(r.production, cfg) - 0.0) < TOL, "服务不产商品"
+    assert abs(F.material_value(r, cfg) - 16.0) < TOL, (
+        f"中间投入应只有经营费 16，实得 {F.material_value(r, cfg)}"
+    )
+    assert abs(F.value_added(r, cfg) - 11.0) < TOL, (
+        f"★ GDP 应含服务收入：0 + 27 − 16 = 11，实得 {F.value_added(r, cfg)}"
+    )
+    assert abs(r.value_added - 11.0) < TOL, "报告里的增加值必须与 finance 重算一致"
+
+    # 旧报告（没有 service_revenue 字段）→ getattr 兜底 0，不炸
+    class _OldReport:
+        production = []
+        bought_breakdown = {}
+        operating = 0.0
+        food = None
+
+    assert abs(F.value_added(_OldReport(), cfg) - 0.0) < TOL, (
+        "value_added 必须能用 getattr 兜底旧报告"
+    )
+
+
+
     """经营费 `c` **算**中间投入（§7.5）。"""
     cfg = load_config()
     st, r = run_quarter(PlotType.RESOURCE, 1)

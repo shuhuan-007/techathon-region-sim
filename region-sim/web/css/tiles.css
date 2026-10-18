@@ -8,7 +8,7 @@
   /* 2026-10-18 · #map{position:relative} 仍要保留 —— .cell-tooltip 是
      absolute 定位,相对最近的 positioned 祖先;#map3d (S5 3D 层画布) 已
      随 map.js S5 段同步删除,不再需要。 */
-  #map{display:grid; gap:3px; margin-top:8px; position:relative;}
+  #map{display:grid; gap:6px; margin-top:8px; position:relative;}
 
   /* ── cell 基础 ────────────────────────────────────────── */
   .cell{

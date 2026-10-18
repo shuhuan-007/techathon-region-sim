@@ -585,6 +585,97 @@ def test_opening_advice_triggers_only_when_opening():
     assert "[开局建议]" not in format_capabilities(cap3)
 
 
+# ══════════════════════════════════════════════════════════════════
+# 十一、★ 第七轮 C：`[策略提示]` 块 — 存在、位置、行格式、不许缺席
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_strategy_block_sits_between_recommended_and_build():
+    """`[策略提示]` 必须排在 `[推荐空地]`（建哪）之后、`[可建]`（建什么）之前。
+
+    契约来源：第七轮 C 任务书「块名即契约，排在 [推荐空地] 后、[可建] 前」；
+    `server/ai_host.py` 的起草要求会按这个名字指代它。
+    """
+    cfg = load_config()
+    st = GameState(cfg.new_world(), players={"p1": cfg.new_player("p1")})
+    plots = {
+        "4,4": mature("4,4", PlotType.INDUSTRY, 1, "G"),
+        "4,5": mature("4,5", PlotType.INDUSTRY, 1, "G"),
+        "5,4": mature("5,4", PlotType.INDUSTRY, 1, "G"),
+    }
+    for plot_id, plot in plots.items():
+        st.player("p1").plots[plot_id] = plot
+    # 现金 950、上季总扣款 900（= 94.7% ≥ 90%）→ 现金红线那一条也会出
+    st.player("p1").cash = 950.0
+    st.report = {"p1": {"total_deduction": 900.0, "construction_cash": 0.0}}
+
+    cap = describe_capabilities(st, "p1", cfg)
+    assert "strategy_lines" in cap, "describe_capabilities 必须给 strategy_lines 键"
+    lines = cap["strategy_lines"]
+    assert isinstance(lines, list) and lines, lines
+    assert len(lines) <= 4, f"最多 4 行（[策略提示] 的合同）：{lines}"
+
+    text = format_capabilities(cap)
+    i_rec = text.index("[推荐空地]")
+    i_str = text.index("[策略提示]")
+    i_build = text.index("[可建]")
+    assert i_rec < i_str < i_build, (
+        f"块序必须是 [推荐空地] → [策略提示] → [可建]：\n{text}"
+    )
+    assert text.count("[策略提示]") == 1, "块名只该出现一次"
+
+    # 块内每行以 `- ` 开头（模型一眼能看出是条目）
+    block = text[i_str:i_build].strip().splitlines()
+    assert block[0] == "[策略提示]", block
+    content = [line for line in block[1:] if line.strip()]
+    assert content, "有内容时不能让块空着"
+    assert len(content) <= 4, content
+    for line in content:
+        assert line.startswith("- "), f"块内每行必须 `- ` 开头：{line!r}"
+
+    # 这一局四件事都有：服务（3 邻）/ 升级（G→H-*）/ 市场余量 / 现金红线
+    assert any("建议在 5,5" in line for line in content), content
+    assert any("升级 " in line for line in content), content
+    assert any("市场余量" in line for line in content), content
+    assert any("总扣款" in line for line in content), content
+
+
+def test_strategy_block_never_absent():
+    """没有可说的 → 整块写 `[策略提示] 暂无`（**不许缺席**，与其它块同口径）。"""
+    cfg = load_config()
+    cap0 = describe_capabilities(_opening_state(cfg), "p1", cfg)
+    text0 = format_capabilities(cap0)
+    assert "[策略提示]" in text0, f"开局也必须带 [策略提示]：\n{text0}"
+
+    # 直接喂一个空 strategy_lines 的最小 cap：渲染器只能写「暂无」
+    minimal = {
+        "cash": 0,
+        "quarter": 1,
+        "empty_total": 0,
+        "empty_cells": [],
+        "strategy_lines": [],
+    }
+    text = format_capabilities(minimal)
+    assert "[策略提示] 暂无" in text, text
+    assert "\n- " not in text, f"没有内容时不许有 `- ` 行：\n{text}"
+
+
+def test_strategy_block_caps_at_four_bullets():
+    """渲染器自己也要截断：给 6 条只出 4 条（防止上游多塞把上下文撑爆）。"""
+    minimal = {
+        "cash": 0,
+        "quarter": 1,
+        "empty_total": 0,
+        "empty_cells": [],
+        "strategy_lines": [f"第{i}条" for i in range(1, 7)],
+    }
+    text = format_capabilities(minimal)
+    block = text.split("[策略提示]", 1)[1].split("[可建]", 1)[0]
+    bullets = [line for line in block.splitlines() if line.startswith("- ")]
+    assert len(bullets) == 4, bullets
+    assert bullets[0] == "- 第1条" and bullets[-1] == "- 第4条", bullets
+
+
 def _run_all() -> int:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     mod = sys.modules[__name__]

@@ -10,9 +10,9 @@
         结构化快照。数字全部来自 engine / config，**不改任何状态**。
 
     format_capabilities(cap) -> str
-        紧凑中文文本，块名固定（`[现金/预算]` `[空地]` `[推荐空地]` `[可建]`
-        `[可开工]` `[可升级]` `[在建]` `[人口/口粮]` `[口粮规则]`），
-        供提示词直接拼接。
+        紧凑中文文本，块名固定（`[现金/预算]` `[空地]` `[推荐空地]`
+        `[策略提示]` `[可建]` `[可开工]` `[可升级]` `[在建]`
+        `[人口/口粮]` `[口粮规则]`），供提示词直接拼接。
 
     recommend_build_cells(state, player_id, cfg, *, limit=5, plot_type=None) -> list
         空地按**引擎真实邻接加成**排序（2026-10-18 新增）。
@@ -74,6 +74,10 @@ from engine import efficiency as E
 from engine.loader import Config
 from engine.models import GameState, Plot, PlotStatus, PlotType, parse_plot_id
 from engine.validate import buildable_products
+
+# ★ 2026-10-18 第七轮 C：「策略提示」层的四个纯函数（服务选址 / 升级经济性 /
+#   市场余量 / 现金红线）。本模块只负责**把它压成块**，不在这里重写公式。
+from ai import strategy as STRAT
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -645,6 +649,8 @@ def describe_capabilities(
         food_rule                      —— 口粮规则（F 与两档逐商品需求量 + 人话）
         opening_advice                 —— ★ 开局「至少 3 块、优先农+资+工」建议（不触发为 None）
         recommended_build_cells        —— 按邻接加成排序的推荐空地（前 5）
+        strategy_lines                 —— ★ 策略提示（服务选址 / 升级经济性 / 市场余量 /
+                                          现金红线，≤4 句；来源 `ai/strategy.py`）
 
     `max_empty` 只影响 `empty_cells` 的截断；`empty_total` 永远是全量。
     """
@@ -681,6 +687,8 @@ def describe_capabilities(
         "food_rule": _food_rule(population, food_need, cfg),
         "opening_advice": opening_advice(state, player_id, cfg),
         "recommended_build_cells": recommend_build_cells(state, player_id, cfg),
+        # ★ 2026-10-18 第七轮 C：经济判断（只读、纯函数，见 ai/strategy.py）。
+        "strategy_lines": STRAT.strategy_lines(state, player_id, cfg),
     }
 
 
@@ -688,8 +696,8 @@ def describe_capabilities(
 # 四、公开接口 2：紧凑中文文本（提示词直接拼）
 # ══════════════════════════════════════════════════════════════════
 #
-# ⚠️ 块名（[现金/预算] [空地] [推荐空地] [可建] [可开工] [可升级] [在建]
-#    [人口/口粮] [口粮规则]）是**契约**：主实现（server/ai_host.py 的起草
+# ⚠️ 块名（[现金/预算] [空地] [推荐空地] [策略提示] [可建] [可开工] [可升级]
+#    [在建] [人口/口粮] [口粮规则]）是**契约**：主实现（server/ai_host.py 的起草
 #    要求）会按这些名字指代，别改字；已有的 [人口/口粮] 块**不许删**
 #    （旧测试依赖）。
 # ⚠️ 文本里**不许**出现「起草」/「draft」：默认路径的回归测试要保证
@@ -864,6 +872,24 @@ def _opening_advice_lines(cap: dict) -> list[str]:
     ]
 
 
+def _strategy_lines(cap: dict) -> list[str]:
+    """`[策略提示]` —— 四个确定性判断（服务选址 / 升级经济性 / 市场余量 / 现金红线）。
+
+    ★ 2026-10-18 第七轮 C：秘书 AI 原来只有「能建什么」，没有「值不值得」。
+      这里把 `ai/strategy.py` 算好的 ≤4 句结论摆出来，**块名即契约**
+      （`server/ai_host.py` 的起草要求按这个名字指代）。
+
+    · 每行以 `- ` 开头（模型一眼能看出这是条目，不是数字表）；
+    · 最多 4 行（四个函数各至多一句）——够用，且不让上下文失控；
+    · 一条都没有时整块写 `[策略提示] 暂无`（**不许缺席**，与其它块同口径）。
+    """
+    rows = [str(line).strip() for line in (cap.get("strategy_lines") or [])]
+    rows = [line for line in rows if line]
+    if not rows:
+        return ["[策略提示] 暂无"]
+    return ["[策略提示]"] + [f"- {line}" for line in rows[:4]]
+
+
 def _food_rule_line(cap: dict) -> str:
     """`[口粮规则]` —— 当前数字 + 公式，专治「把 22 人写成 food={"A":22}」。"""
     rule = cap.get("food_rule") or {}
@@ -890,13 +916,17 @@ def format_capabilities(cap: dict) -> str:
     """把 `describe_capabilities()` 的 dict 压成**紧凑中文文本**（给提示词）。
 
     固定块序（主实现按块名引用）：[现金/预算] → [空地] → [推荐空地] →
-    [可建] → [可开工] → [可升级] → [在建] → [人口/口粮] → [口粮规则] →
-    [开局建议]（仅开局触发）→ 最后一句硬提示。
+    [策略提示] → [可建] → [可开工] → [可升级] → [在建] → [人口/口粮] →
+    [口粮规则] → [开局建议]（仅开局触发）→ 最后一句硬提示。
+
+    ⚠️ `[策略提示]` 的位置是**契约**（第七轮 C 任务书）：紧跟 `[推荐空地]`
+       （「建哪」）、在 `[可建]`（「建得起什么」）之前 —— 先给判断，再给清单。
     """
     lines = [
         _budget_line(cap),
         _empty_line(cap),
         *_recommended_lines(cap),
+        *_strategy_lines(cap),
         *_build_lines(cap),
         _running_line(cap),
         *_upgrade_lines(cap),

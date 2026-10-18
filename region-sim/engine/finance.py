@@ -107,7 +107,8 @@ def wage_tax_net(wages: float, cfg: Config) -> float:
 def output_value(production: list, cfg: Config) -> float:
     """有效产出价值 —— 按**固定参考价 `P0`** 算（§7.5）。
 
-    ⚠️ 服务与研究地块 `output_goods is None`，**跳过**：
+    ⚠️ 服务与研究地块 `output_goods is None`，**跳过产出侧**（★ 2026-10-18：
+       服务的**服务收入**由 `value_added()` 单独加，不混进产出价值）：
        它们 0→0 不产商品，其价值已经体现在**别的地块的效率**上，
        在这里再算一遍等于同一份价值收两次。
     """
@@ -141,7 +142,14 @@ def material_value(report, cfg: Config) -> float:
 
 
 def value_added(report, cfg: Config) -> float:
-    """GDP 增加值（§7.5）＝ 有效产出价值 − 中间投入价值。
+    """GDP 增加值（§7.5）＝ 有效产出价值 + 服务收入 − 中间投入价值。
+
+    ★ 2026-10-18：服务地块新增**服务收入**（§3.6）。它属于服务业的
+      增加值（`output_value` 那边服务仍为 0 —— 服务不产商品），所以
+      在这里**加**进分子，而不是塞进产出价值里（那会混淆两种口径）。
+
+    ⚠️ 用 `getattr(report, "service_revenue", 0.0)` 兜底旧报告/旧存档：
+        在本字段加入前生成的 `QuarterReport` 没有它，不能让 GDP 计算炸掉。
 
     ⚠️ **工资不在里面** —— 它属于增加值（劳动者报酬），不是中间消耗。
        见模块头表格。写错这条，甲区会从 66 变成 30。
@@ -149,7 +157,11 @@ def value_added(report, cfg: Config) -> float:
     ⚠️ 用**固定统计价 `P0`**，与 `report.sales_revenue`（按本季成交价）
        **是两个不同的数**，不要混：一个是统计口径，一个是现金流。
     """
-    return output_value(report.production, cfg) - material_value(report, cfg)
+    return (
+        output_value(report.production, cfg)
+        + getattr(report, "service_revenue", 0.0)
+        - material_value(report, cfg)
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -171,6 +183,7 @@ def finance_summary(report, cfg: Config) -> dict:
         "materials_cost": report.materials_cost,
         "total_deduction": report.total_deduction,
         "sales_revenue": report.sales_revenue,
+        "service_revenue": getattr(report, "service_revenue", 0.0),
         # GDP 用固定参考价，与 sales_revenue 口径不同，两个都给
         "output_value_at_p0": output_value(report.production, cfg),
         "material_value_at_p0": material_value(report, cfg),
