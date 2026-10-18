@@ -1,0 +1,434 @@
+SLIDE COUNT: 20
+
+========================================================================
+SLIDE 1
+========================================================================
+(layout: DEFAULT)
+[PICTURE name='Image 0']
+[TEXT name='Text 1'] SHANGHAITECH   /   TECHATHON 2026
+[TEXT name='Text 2'] 2026.10.16  ·  会议中心西厅
+[TEXT name='Text 4'] 联合主办
+[TEXT name='Text 5'] T.I.E   ×   GeekPie_
+--- NOTES ---
+各位老师、各位嘉宾，各位参赛同学，大家下午好！欢迎来到上海科技大学第一届黑客松 Techathon 2026 的开幕式现场。我是李翰泽。首先代表联合主办方——科技创业社 T.I.E 和 GeekPie，欢迎大家来到现场。接下来两天，希望大家把一个原本还停留在脑海中的想法，变成可以真正演示、真正体验的作品。现在，欢迎来到 Techathon 2026！
+
+========================================================================
+SLIDE 2
+========================================================================
+(layout: DEFAULT)
+[PICTURE name='Image 0']
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 开场
+[TEXT name='Text 2'] 02
+[PICTURE name='Image 1']
+[PICTURE name='Image 2']
+[TEXT name='Text 4'] 48 HOURS
+[TEXT name='Text 6'] 让想法成为一个能演示的作品
+[TEXT name='Text 7'] 请优先保证一个真正能跑的核心 Demo
+[PICTURE name='Image 2']
+--- NOTES ---
+为什么我们要用这样的方式组织黑客松？因为平时无论是技术讨论还是创意交流，我们都不缺好点子，真正稀缺的是集中时间把它完成。接下来大家会经历写代码、设计、调试、碰壁，也可能推翻一开始的方案。这都很正常。我们希望在最后，大家能拿出一个真正能运行、能演示、有自己想法的作品。作品不必面面俱到，但至少要有一个核心场景能稳定地跑起来。
+
+
+========================================================================
+SLIDE 3
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 开幕式流程
+[TEXT name='Text 2'] 03
+[TEXT name='Text 3'] 开幕式流程如下：
+[TEXT name='Text 5'] 01
+[TEXT name='Text 6'] 嘉宾致辞
+[TEXT name='Text 7'] 致谢与开场
+[TEXT name='Text 9'] 02
+[TEXT name='Text 10'] 赛事组织
+[TEXT name='Text 11'] 认识主办团队
+[TEXT name='Text 13'] 03
+[TEXT name='Text 14'] 赛制与评审
+[TEXT name='Text 15'] 三天如何推进、怎样评价
+[TEXT name='Text 17'] 04
+[TEXT name='Text 18'] 提交与保障
+[TEXT name='Text 19'] 交什么、什么时候交、现场找谁
+[TEXT name='Text 21'] 05
+[TEXT name='Text 22'] 启动仪式
+[TEXT name='Text 23'] 倒计时、合影、正式开工
+--- NOTES ---
+这是今天开幕式的安排：先请到场嘉宾致辞，接着介绍这次比赛的组织团队；随后我会把三天的时间安排、评分和作品提交规则讲清楚，再介绍组委会准备的技术资源及现场保障。最后我们一起完成启动倒计时。和大家最直接相关的是赛程与提交规则，尤其是最后一天的时间节点，请大家留意。
+
+
+========================================================================
+SLIDE 4
+========================================================================
+(layout: DEFAULT)
+[PICTURE name='Image 0']
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 嘉宾致辞
+[TEXT name='Text 2'] 04
+[PICTURE name='Image 1']
+[PICTURE name='Image 2']
+[TEXT name='Text 4'] 嘉宾致辞
+[TEXT name='Text 5'] TECHATHON 2026  /  OPENING CEREMONY
+--- NOTES ---
+下面进入嘉宾致辞环节。第一届 Techathon 的举办，离不开学校、书院、学院以及各位合作伙伴的支持。接下来，让我们用掌声有请今天到场的嘉宾为我们致辞。
+
+
+========================================================================
+SLIDE 5
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 联合主办
+[TEXT name='Text 2'] 05
+[TEXT name='Text 3'] 主办方
+[TEXT name='Text 4'] T.I.E
+[TEXT name='Text 5'] ×
+[TEXT name='Text 6'] GeekPie_
+[TEXT name='Text 8'] 科技创业社
+[TEXT name='Text 9'] GeekPie_ 技术协会
+[TEXT name='Text 10'] 共同策划、共同组织、共同推动 Techathon 2026
+[TEXT name='Text 12'] 承办 / 支持
+[TEXT name='Text 13'] 上海科技大学  ·  科道书院  ·  创业与管理学院  ·  联育孵化器
+--- NOTES ---
+再次感谢刚才各位嘉宾的致辞。这里也正式介绍一下本届 Techathon 的联合主办团队：一方是科技创业社 T.I.E，另一方是上海科技大学技术社团 GeekPie。两家社团共同策划和组织这次比赛，大家看到的很多赛程、技术和现场安排，背后都有双方同学的努力。也感谢学校、科道书院、创业与管理学院，以及 联育孵化器 影眸等单位的支持。今天所有站在这里的组织者，都希望让大家能够安心投入开发，享受一场真正有收获的黑客松。
+
+
+========================================================================
+SLIDE 6
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 联合主办
+[TEXT name='Text 2'] 05
+[TEXT name='Text 4'] T.I.E
+[TEXT name='Text 8'] 科技创业社
+[TEXT name='Text 10'] 科技创业社是依托科道书院、创管学院联合指导，
+面向全校学生的科技创业交流平台。
+
+社团以“创新 创造 创业 创投”为核心，
+搭建项目孵化、赛事备战、资源对接渠道。
+
+[PICTURE name='图片 16']
+[PICTURE name='图片 19']
+[TEXT name='文本框 20'] 项目均可在平台上进行发布
+
+========================================================================
+SLIDE 7
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 联合主办
+[TEXT name='Text 2'] 05
+[TEXT name='Text 4'] GeekPie_
+[TEXT name='Text 8'] 技术协会
+[TEXT name='文本框 20'] GeekPie.club
+[PICTURE name='Picture 4']
+[TEXT name='Text 10'] 大家的老朋友，上科大最大的技术交流社区。
+一个立足于技术的综合性科创社团，屡获殊荣。
+一个秉承开源与合作理念，
+不断追求思想进步和技术前沿的学生组织。
+
+
+========================================================================
+SLIDE 8
+========================================================================
+(layout: DEFAULT)
+[PICTURE name='Image 0']
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 参赛形式
+[TEXT name='Text 2'] 06
+[PICTURE name='Image 1']
+[TEXT name='Text 3'] OPEN
+[TEXT name='Text 4'] BRIEF
+[TEXT name='Text 5'] 开放命题  自由选题
+[TEXT name='Text 6'] 软件、AI、硬件、交互原型等方向均可探索
+[TEXT name='Text 7'] 建议：做出核心 Demo后再继续扩展
+[PICTURE name='Image 2']
+--- NOTES ---
+本次比赛采用开放命题，具体做什么由每支队伍决定。可以做软件产品，也可以做 AI 应用、硬件、交互原型，或者其他方向。开放命题的好处是空间很大，但也容易让项目范围越做越大。所以我建议大家先选一个清楚、真实的问题，尽早验证最关键的技术路径，把核心功能跑通，再考虑锦上添花的功能。最后能稳定演示一个完成度比较高的核心场景，通常比堆一长串没有做完的功能更有说服力。
+
+
+========================================================================
+SLIDE 9
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 赛事总览
+[TEXT name='Text 2'] 07
+[TEXT name='Text 3'] 10.16  →  10.18
+[TEXT name='Text 4'] 三天时间，从开幕、开发到展示。
+[TEXT name='Text 7'] 16 / FRI
+[TEXT name='Text 8'] 开幕 · 开工
+[TEXT name='Text 9'] 15:00 开幕式
+[TEXT name='Text 10'] 开幕式后投入开发
+[TEXT name='Text 12'] 17 / SAT
+[TEXT name='Text 13'] 集中开发
+[TEXT name='Text 14'] 全天持续开发
+[TEXT name='Text 15'] 按现场安排获取支持
+[TEXT name='Text 17'] 18 / SUN
+[TEXT name='Text 18'] 提交 · 展示
+[TEXT name='Text 19'] 15:00 开始材料提交
+[TEXT name='Text 20'] 17:00 代码最终冻结
+[TEXT name='Text 21'] 临时安排以现场通知和赛事群公告为准
+--- NOTES ---
+我们来看整个赛程。今天下午三点我们开幕式，开幕结束后各队就可以投入正式开发。十月十七日是最完整的一天，大家可以集中精力推进核心功能，需要帮助时按照现场安排联系工作人员。十月十八日进入最后一天，下午有专业评委巡场，下午五点是参评材料提交截止，代码最终冻结。晚些时候还会进行展示、入围路演以及颁奖。
+
+
+========================================================================
+SLIDE 10
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 决赛日详细安排
+[TEXT name='Text 2'] 08
+[TEXT name='Text 3'] 10 月 18 日 / 最后一天
+[TEXT name='Text 5'] 15:00–17:00
+[TEXT name='Text 6'] 专业评委巡场
+[TEXT name='Text 7'] 首轮展示与筛选
+[TEXT name='Text 9'] 15:00
+[TEXT name='Text 10'] 开始提交参评材料
+[TEXT name='Text 11'] 表单提交，不要等到最后一刻
+[TEXT name='Text 13'] 17:00
+[TEXT name='Text 14'] 参评材料提交截止，代码冻结
+[TEXT name='Text 15'] 停止核心功能开发
+[TEXT name='Text 17'] 17:00–18:00
+[TEXT name='Text 18'] 项目展示交流
+[TEXT name='Text 19'] 项目现场展示与交流
+[TEXT name='Text 21'] 18:00–
+[TEXT name='Text 22'] 最终路演
+[TEXT name='Text 23'] 入围队伍 5 分钟展示
+[TEXT name='Text 26'] 颁奖与闭幕
+[TEXT name='Text 27'] 公布获奖结果
+--- NOTES ---
+这是具体的时间安排：下午三点到五点是专业评委巡场，每队需要向评委展示已经做出来的核心成果。
+15:00开始提交参评材料，17:00参评材料提交截止，代码冻结
+
+请队伍内部提前分工，不要所有人都在弄 Demo，却没人负责提交。五点到六点是项目展示交流，六点开始是入围队伍的最终路演，颁奖、闭幕。
+
+
+========================================================================
+SLIDE 11
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 评审流程
+[TEXT name='Text 2'] 10
+[TEXT name='Text 3'] 综合奖评选方式
+[TEXT name='Text 4'] 01
+[TEXT name='Text 6'] 专业巡场
+[TEXT name='Text 7'] 观察真实成果
+评估技术与创新
+[TEXT name='Text 8'] 02
+[TEXT name='Text 10'] 入围路演
+[TEXT name='Text 11'] 5 分钟展示
+回答评委问题
+[TEXT name='Text 12'] 03
+[TEXT name='Text 14'] 综合评分
+[TEXT name='Text 15'] 依据官方标准
+产生综合奖项
+[TEXT name='Text 18'] 综合奖依据专业评委的综合评分产生
+--- NOTES ---
+综合奖项由专业评委评定。评审过程主要包括专业巡场、确定入围最终路演的队伍，以及结合展示和答辩按照评分标准形成综合结果。大家需要做的，是确保评委能够实际看到核心成果，而不是只听到一个很好的想法；入围路演后，也要能够在短时间里把技术路线和产品价值说明白。
+
+
+========================================================================
+SLIDE 12
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 提交清单
+[TEXT name='Text 2'] 12
+[TEXT name='Text 3'] 评委需要看到哪些材料？
+[TEXT name='Text 5'] 01
+[TEXT name='Text 6'] 说明文档
+[TEXT name='Text 7'] 项目简介 / 成员信息 / 功能说明 / 原创声明
+[TEXT name='Text 9'] 02
+[TEXT name='Text 10'] 项目内容
+[TEXT name='Text 11'] 代码仓库 / 技术文档 / 第三方资源说明
+[TEXT name='Text 13'] 03
+[TEXT name='Text 14'] 展示材料
+[TEXT name='Text 15'] PPT + 现场 Demo 或演示视频
+[TEXT name='Text 17'] 私有仓库需授权访问    ·    演示视频建议 ≤ 8 分钟（MP4）
+[TEXT name='Text 21'] 第三方代码、模型、数据集等需注明来源。
+--- NOTES ---
+最终提交材料一共分为三类。第一类是说明文档，包括队伍和项目信息、功能介绍，以及原创和版权声明。第二类是项目内容，包括代码仓库、技术文档，以及使用到的第三方工具、开源库、模型、API 和数据集等说明。第三类是展示材料，包括展示 PPT，以及现场 Demo 或演示视频。大家需要特别注意两件事：如果仓库是私有的，记得提前把访问权限打开；如果准备演示视频，官方建议控制在八分钟以内，推荐 MP4。第三方资源要把来源标清楚，可以使用开源项目作为基础，但必须体现自己的改进。
+
+
+========================================================================
+SLIDE 13
+========================================================================
+(layout: DEFAULT)
+[GROUP name='Group 14']
+  [PICTURE name='Image 1']
+  [PICTURE name='Image 2']
+[PICTURE name='Image 0']
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 最终提交 / 冻结
+[TEXT name='Text 2'] 13
+[TEXT name='Text 3'] 10 月 18 日
+[TEXT name='Text 4'] 17:00
+[TEXT name='Text 5'] 所有提交截止
+[TEXT name='Text 7'] 15:00
+[TEXT name='Text 8'] 允许提交 & 评委巡场
+--- NOTES ---
+这里再强调一次比赛最后一天的两个截止时间。十月十八日十七点，所有提交截止。大家需要通过指定表单按要求提交说明文档、代码仓库和演示材料。请大家提前提交，不要等到临界时间才上传。提交入口由赛事群发布
+
+
+========================================================================
+SLIDE 14
+========================================================================
+(layout: DEFAULT)
+[PICTURE name='Image 0']
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 最终路演
+[TEXT name='Text 2'] 11
+[TEXT name='Text 3'] 5min
+[TEXT name='Text 5'] 15:00-17:00 每队 5 分钟正式展示
+[TEXT name='Text 6'] 痛点 / 解决方案 / 技术亮点 /  Demo
+[TEXT name='Text 7'] 到时结束展示，随后接受评委提问
+[GROUP name='Group 15']
+  [PICTURE name='Image 1']
+  [PICTURE name='Image 2']
+--- NOTES ---
+入围最终路演的队伍，每队有五分钟进行正式展示，之后接受评委提问。五分钟其实非常短，我建议大家别把时间花在大段的背景铺垫上，尽量按这样的顺序准备：我们发现了什么问题，为什么值得解决，我们做了什么，然后现场给大家看 Demo，再讲清楚其中真正有价值的技术或产品亮点。请各队务必提前彩排，超过展示时间，组委会会按规则叫停。
+
+
+========================================================================
+SLIDE 15
+========================================================================
+(layout: DEFAULT)
+[PICTURE name='Image 0']
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 评审标准
+[TEXT name='Text 2'] 09
+[TEXT name='Text 3'] 100
+[TEXT name='Text 4'] 分
+[TEXT name='Text 5'] 专业评审维度
+[TEXT name='Text 9'] 30
+[TEXT name='Text 10'] 创新性
+[TEXT name='Text 12'] 选题 · 方案 · 场景
+[TEXT name='Text 13'] 30
+[TEXT name='Text 14'] 技术完成度
+[TEXT name='Text 16'] 功能 · 稳定 · 工程
+[TEXT name='Text 17'] 40
+[TEXT name='Text 18'] 成果呈现与答辩
+[TEXT name='Text 20'] 交付材料 · 路演 · 整体表达
+[TEXT name='Text 21'] 先让核心功能稳定运行，再把成果讲清楚。
+--- NOTES ---
+路演评审总分一百分，主要看三个方面。第一，项目创新性三十分，包括选题是不是抓到了真实需求、解决方案有没有自己的创新、应用场景是不是有价值。第二，技术完成度与稳定性三十分，重点是核心功能有没有做出来，现场运行是否稳定，代码和工程实现是否规范。第三，成果呈现与答辩四十分，其中包含提交材料是否完整、路演答辩质量以及整体呈现效果。这里提醒大家，这不意味着只会讲就能拿高分：稳定可演示的核心功能是基础，而把技术成果讲清楚同样重要。
+
+
+========================================================================
+SLIDE 16
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 奖项设置
+[TEXT name='Text 2'] 14
+[TEXT name='Text 3'] 奖项设置
+[TEXT name='Text 4'] 一等奖
+[TEXT name='Text 5'] ¥10,000
+[TEXT name='Text 7'] 二等奖
+[TEXT name='Text 8'] ¥5,000
+[TEXT name='Text 10'] 三等奖
+[TEXT name='Text 11'] ¥2,000
+[TEXT name='Text 13'] 另设联育 DeepTech 奖 2000元 、影眸科技专项奖 总奖池5000元
+[TEXT name='Text 14'] 按官方评审标准决定奖项。
+--- NOTES ---
+下面介绍这次比赛的奖金。一等奖金一万元，二等奖金五千元，三等奖金两千元。与此同时，我们也希望鼓励一些在底层技术、硬件或者算法实现上真正攻克难点的作品，相关专项荣誉请以组委会最终公布为准。最终奖项将以专业评委的综合评分为依据。希望大家关注作品本身，集中把自己的想法做好。
+
+
+========================================================================
+SLIDE 17
+========================================================================
+(layout: DEFAULT)
+[PICTURE name='Image 0']
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 现场开发资源
+[TEXT name='Text 2'] 15
+[TEXT name='Text 3'] 开发资源已就位，
+可自由使用
+[TEXT name='Text 5'] 01
+[TEXT name='Text 6'] DeepSeek V4.1Flash
+[TEXT name='Text 7'] 免费提供模型使用资源
+[TEXT name='Text 9'] 02
+[TEXT name='Text 10'] 3D 打印机等设备
+[TEXT name='Text 11'] 硬件制作与原型开发支持
+[TEXT name='Text 13'] 03
+[TEXT name='Text 14'] 现场组织与技术协助
+[TEXT name='Text 15'] 遇到问题联系工作人员
+[TEXT name='Text 16'] 具体领取 / 使用方式，请关注现场通知
+[GROUP name='Group 21']
+  [PICTURE name='Image 1']
+  [PICTURE name='Image 2']
+[TEXT name='TextBox 23'] key:7a8e0a329ff944ffa595b86f74aa40fd
+model: deepseek-pro
+[PICTURE name='Picture 24']
+[TEXT name='TextBox 26'] 影眸Hyper3D会员兑换码：XH4KKMWUXUR2 
+（请用上科大邮箱注册）
+[TEXT name='Text 6'] DeepSeek V4.1Flash
+[PICTURE name='Picture 28']
+[TEXT name='TextBox 29'] 3D打印机手册
+--- NOTES ---
+我们也为大家准备了一些实际开发资源。首先，这次会提供免费的 DeepSeek V4.1Flash，大家可以结合自己的项目需求使用。其次，现场有 3D 打印机等设备资源，适合做硬件结构、外壳或者一些实体原型的队伍。具体使用方式、现场安排和设备使用要求，请听工作人员的通知；不要擅自操作设备。开发期间如果遇到技术、场地或者组织上的问题，也可以寻找现场工作人员协助。我们提供资源，是希望大家把精力集中在最重要的开发和实现上。
+
+
+========================================================================
+SLIDE 18
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 现场保障
+[TEXT name='Text 2'] 16
+[TEXT name='Text 3'] 这两天，别忘了照顾好自己
+[TEXT name='Text 5'] 补给
+[TEXT name='Text 6'] 茶歇、饮品和零食按现场安排领取
+[TEXT name='Text 8'] 场地
+[TEXT name='Text 9'] 开发区域与休息安排听从现场指引
+[TEXT name='Text 11'] 用电
+[TEXT name='Text 12'] 注意安全，不私拉乱接
+[TEXT name='Text 14'] 秩序
+[TEXT name='Text 15'] 夜间降低音量，保持环境整洁
+[TEXT name='Text 17'] 求助
+[TEXT name='Text 18'] 突发问题联系佩戴工作牌的工作人员
+[TEXT name='Text 19'] IMPORTANT：及时备份代码与演示文件
+--- NOTES ---
+最后说一下现场保障和纪律。组委会会按照现场安排提供茶歇、饮品和零食，大家可以在指定区域领取。具体开发区域、晚间场地和休息安排，请以工作人员的现场指引为准。学校场地的安全管理要求也请大家配合，尤其是用电安全，不要自行乱拉电线；夜间也尽量降低音量，避免影响其他队伍。公共区域用过的物品请及时清理。遇到设备、网络、身体不适或其他突发情况，直接寻找佩戴工作牌的工作人员。还有一个很重要的习惯：定期备份代码、材料与 Demo，不要把所有成果只留在一台电脑里。
+
+
+========================================================================
+SLIDE 19
+========================================================================
+(layout: DEFAULT)
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 开工前确认
+[TEXT name='Text 2'] 17
+[TEXT name='Text 3'] 开赛前，请各队核对
+[TEXT name='Text 4'] 01
+[TEXT name='Text 5'] 队伍名称、队长与成员信息
+[TEXT name='Text 7'] 02
+[TEXT name='Text 8'] 项目方向/下一步行动
+[TEXT name='Text 10'] 03
+[TEXT name='Text 11'] 成员分工
+[TEXT name='Text 13'] 04
+[TEXT name='Text 14'] 赛事群 & 提交负责人
+[TEXT name='Text 17'] 确认无误后，跟随现场指引投入开发
+--- NOTES ---
+马上就要开赛了，在正式启动之前，麻烦每支队伍再快速检查四件事。第一，队伍名称、队长和成员信息是否已经确定；第二，项目方向有没有一个基本共识，知道开工后第一步做什么；第三，大家有没有清楚的分工和联系方式；第四，是否已经进入官方赛事群，并明确谁来关注时间通知、谁来负责最终提交。接下来我们进入启动仪式。
+
+
+========================================================================
+SLIDE 20
+========================================================================
+(layout: DEFAULT)
+[PICTURE name='Image 0']
+[TEXT name='Text 0'] TECHATHON / 2026
+[TEXT name='Text 1'] 启动时刻
+[TEXT name='Text 2'] 18
+[PICTURE name='Image 1']
+[PICTURE name='Image 2']
+[TEXT name='Text 4'] TECHATHON 2026
+[TEXT name='Text 5'] 开造。
+[TEXT name='Text 6'] JUST MAKE IT.
+--- NOTES ---
+好，规则和安排就介绍到这里。接下来邀请现场的老师、嘉宾和所有参赛同学，一起完成第一届 Techathon 的启动倒计时！大家准备好了吗？我们一起——五！四！三！二！一！Techathon 2026，正式开赛！感谢各位老师、嘉宾和同学们。接下来请大家听从现场工作人员引导，完成全体合影，再返回各自工位开始开发。祝大家这两天写得顺利、做得尽兴，也祝每支队伍最终都能拿出一个值得自己骄傲的作品。Techathon，开造！

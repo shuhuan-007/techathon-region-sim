@@ -77,6 +77,12 @@ _INDUSTRY_KEY_TO_OUTPUT: dict[str, tuple[int, str]] = {
     "H-F_L2":  (2, "H-F"),
     "H-G_L2":  (2, "H-G"),
     "H-J_L2":  (2, "H-J"),
+    # ★ 研究线二级（ind_1_2_research 建成）：存储编码 INDUSTRY/L2/'研究'。
+    #    ⚠️ 本「键」没有对应工业配方 —— 研究地块**不产商品**，配方在
+    #    recipes.research.maintain（由 recipe_for_plot 重定向过去）；
+    #    本项的唯一作用是让 _industry_output(2, "研究") 通过（对齐
+    #    validate._BUILD_PRODUCTS 的真值表），不是给 config['industry'] 加键。
+    "研究_L2": (2, "研究"),
     "I_L3":    (3, "I"),
     "H-A+_L3": (3, "H-A+"),
     "H-F+_L3": (3, "H-F+"),
