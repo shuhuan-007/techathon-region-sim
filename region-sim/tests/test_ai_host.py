@@ -36,7 +36,7 @@ TOL = 1e-9
 
 #: 开局现金的锚点（tests/test_server.py::test_new_game_creates_playable_opening
 #: 口径）。evidence 断言"含具体数字且与 state 一致"就靠它。
-OPENING_CASH = 1200.0
+OPENING_CASH = 2400.0
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -153,7 +153,7 @@ def test_advise_passes_rule_and_question_to_model():
     assert "11.4" in user, "messages 应带上基线 §11.4 的规则摘要"
     assert "我该先建什么？" in user, "messages 应带上玩家的问题"
     # 把局面递给模型是为了让它引用真数字，不许编
-    assert "1200" in user, "messages 应带上开局现金 1200（否则 AI 只能瞎猜）"
+    assert "2400" in user, "messages 应带上季度初补贴后的开局现金 2400（否则 AI 只能瞎猜）"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -566,7 +566,7 @@ def test_state_context_keeps_original_seven_keys():
     user, _ = _grab_user_message()
     for token in (
         "quarter=1/20",      # quarter + total_quarters 一起
-        "cash=1200",         # cash
+        "cash=2400",         # cash（含 Q1 季初补贴 1200）
         "happiness=0.6",     # happiness
         "population=null",   # population（开局未提交 → null + 说明）
         "phase=collecting",  # phase

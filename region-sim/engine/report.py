@@ -285,6 +285,12 @@ def build_state(
         # ── 市场 ──
         "market": _market(state, cfg, trial),
 
+        # ── ★ 口粮需求（2026-10-18 S3）—— 不依赖玩家计划：岗位在、人就在。
+        #    用 `compute_population(state, player_id, plan_u={}, cfg)` 的
+        #    baseline_food / good_food 两档需求 × config 的 baseline/good 配比。
+        #    前端用它显示"本季要吃多少 A/B/C/D"；u 不影响岗位（§3.3.1）。
+        "food_need": _food_need(state, player_id, cfg),
+
         # ── 上季报告（原样给，前端零计算）──
         "report": last_report,
 
@@ -361,6 +367,37 @@ def _population_block(
     from engine.population import compute_population
 
     return compute_population(state, player_id, _u_map(plan), cfg).to_dict()
+
+
+def _food_need(state: GameState, player_id: str, cfg: Config) -> dict:
+    """本季**口粮需求**（§3.3.3）—— 两档 × 各商品量。**不依赖 plan**。
+
+    用 `compute_population(state, player_id, plan_u={}, cfg)` 拿到 baseline_food
+    （F_基准）与 good_food（F_优秀）两档**总篮数**，再 × config
+    `food.baseline_quota` / `food.good_quota` 的配比拆到 A/B/C/D。
+
+    ⚠️ `plan_u={}` 是**刻意的**：岗位跟"已建成 RUNNING 地块"走（§3.3.1
+       "不申报开工不等于岗位不存在，人要吃饭"），与 u 无关；
+       传入空 u 既防循环依赖、又防"本季没安排地就没人吃饭"的误差。
+
+    形状（用户 2026-10-18 拍板）::
+
+        {"baseline": {"A": .., "B": ..},
+         "good":     {"A": .., "B": .., "C": .., "D": ..},
+         "baseline_total": F_基准,
+         "good_total":     F_优秀}
+    """
+    from engine.population import compute_population
+
+    pop = compute_population(state, player_id, {}, cfg)
+    return {
+        "baseline": {g: ratio * pop.baseline_food
+                     for g, ratio in cfg.food.baseline_quota.items()},
+        "good": {g: ratio * pop.good_food
+                 for g, ratio in cfg.food.good_quota.items()},
+        "baseline_total": pop.baseline_food,
+        "good_total": pop.good_food,
+    }
 
 
 def _jobs_and_population(
@@ -489,6 +526,8 @@ def _plots(
             "level": plot.level,
             "status": plot.status.value,
             "product": plot.product,
+            # ★ 2026-10-18 地块中文名（UI/3D 悬浮牌用，引擎不外溢）
+            "name": plot.name,
             "u": u,
             "efficiency": eff,
             "output_preview": preview_block,
@@ -561,6 +600,9 @@ def _projection(
         "cash_after": trial.cash_after,
         "net_cash": trial.cash_after - trial.cash_before,
         "food": trial.food.to_dict() if trial.food else None,
+        # ★ 2026-10-18 S2：本季经营盈亏（与报告同源，preview 同样给出）
+        "construction_materials_cost": trial.construction_materials_cost,
+        "operating_profit": trial.operating_profit,
         "error": trial_error,
     }
 

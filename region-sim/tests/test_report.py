@@ -509,6 +509,172 @@ def test_average_efficiency_none_when_all_idle():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 七之二、★ S2（2026-10-18）：本季经营盈亏两新字段
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_operating_profit_jia_matches_anchor():
+    """★ 甲区试算：operating_profit = sales−wages−operating+税回流（无建设物资）。
+
+    甲（资源 1 级，无投入）：
+        sales_revenue = 94.08，wages = 36，operating = 30，
+        materials_cost = 0 → construction_materials_cost = 0
+        operating_profit = 94.08 − 36 − 30 + 3.6 = 31.68
+        （= 现金进账 − 现金出账 + 税回流）= 1031.68 − 1034.08? 不对 —— 校验算式：
+          94.08 − 36 − 30 − 0 + 3.6 = 31.68。M1 现金净值 1031.68 − 1000 = 31.68 ✓
+    """
+    cfg = load_config()
+    st = state_with(plot("0,0"))
+    proj = report.build_state(st, "p1", cfg, plan=full_plan("0,0"))["projection"]
+
+    # 两字段必须在 projection 里出现（preview 同源给出）
+    assert "construction_materials_cost" in proj, "projection 缺 construction_materials_cost"
+    assert "operating_profit" in proj, "projection 缺 operating_profit"
+
+    assert abs(proj["construction_materials_cost"] - 0.0) < TOL, (
+        f"甲区无工程 → 建设物资成本应为 0，实得 {proj['construction_materials_cost']}"
+    )
+    assert abs(proj["operating_profit"] - 31.68) < TOL, (
+        f"甲区经营盈亏应为 31.68（94.08−36−30+3.6），实得 {proj['operating_profit']}"
+    )
+
+    # 与预览的「净现金」自洽：无建设、无口粮时 operating_profit == net_cash
+    assert abs(proj["net_cash"] - proj["operating_profit"]) < TOL, (
+        "甲区无工程无口粮 → operating_profit 应与 net_cash（cash_after−cash_before）一致"
+    )
+
+
+def test_construction_materials_cost_uses_actual_charge_prices():
+    """★ 建设物资按**实际扣款价**（上季价/P0）计，与 materials_cost 同账。"""
+    from engine.models import BuildOrder
+
+    cfg = load_config()
+    st = state_with(plot("0,0"))
+    plan = Plan(player_id="p1",
+                plot_plans={"0,0": PlotPlan(plot_id="0,0", u=1.0)},
+                builds=[BuildOrder("1,1", PlotType.AGRICULTURE, 1, "A")])
+
+    trial = pipeline.preview(st, {"p1": plan}, cfg)
+    rep_construction = trial.construction
+    assert rep_construction == {"H-A": 1.0}, (
+        f"新建一级农业物资应为 {{'H-A':1}}，实得 {rep_construction}"
+    )
+
+    price = st.world.last_price("H-A")
+    expect_cost = 1.0 * price
+    assert abs(trial.construction_materials_cost - expect_cost) < TOL, (
+        f"建设物资成本应 = 量 × 实际扣款价 = 1×{price} = {expect_cost}，"
+        f"实得 {trial.construction_materials_cost}"
+    )
+    # 它是 materials_cost 的一部分；materials_cost 里还应含生产原料（甲区 0）
+    assert trial.construction_materials_cost <= trial.materials_cost + TOL
+
+
+def test_operating_profit_excludes_subsidy_and_construction_cash():
+    """★ operating_profit **不含** construction_cash、**不含**补贴（S2）。"""
+    from engine.models import BuildOrder
+
+    cfg = load_config()
+    st = state_with(plot("0,0"), cash=1200.0)
+    plan = Plan(player_id="p1",
+                plot_plans={"0,0": PlotPlan(plot_id="0,0", u=1.0)},
+                builds=[BuildOrder("1,1", PlotType.AGRICULTURE, 1, "A")])
+
+    trial = pipeline.preview(st, {"p1": plan}, cfg)
+    # subsidy 恒 0（S1）
+    assert abs(trial.subsidy) < TOL
+
+    # operating_profit = sales −(wages+operating+materials−cmc)+tax_refund（公式重算自洽）
+    recomputed = (trial.sales_revenue
+                  - (trial.wages + trial.operating
+                     + trial.materials_cost
+                     - trial.construction_materials_cost)
+                  + trial.wage_tax_refund)
+    assert abs(trial.operating_profit - recomputed) < TOL, (
+        f"operating_profit 自洽性失败：{trial.operating_profit} vs 重算 {recomputed}"
+    )
+
+    # 关键判别：**cash_before − cash_after 的净扣款 ≠ operating_profit**
+    #   （net_cash 还含工程现金费 40，operating 口径不含 construction_cash）
+    net_cash = trial.cash_after - trial.cash_before
+    assert abs(net_cash - trial.operating_profit) > 1.0, (
+        "有工程现金费时，operating_profit 不应等于 net_cash（证明它不含 construction_cash）"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 七之三、★ S3（2026-10-18）：口粮需求（不依赖 plan）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_build_state_food_need_present_and_shaped():
+    """★ `/state` 顶层给 `food_need`（前端显示用），形状 = 两档 × 配比。"""
+    cfg = load_config()
+    st = state_with(plot("0,0", PlotType.RESOURCE, 3))   # 三级 d=1.5 → N=3
+    out = report.build_state(st, "p1", cfg)
+
+    assert "food_need" in out, "/state 里缺 food_need"
+    fn = out["food_need"]
+    for key in ("baseline", "good", "baseline_total", "good_total"):
+        assert key in fn, f"food_need 缺 {key}"
+
+    # 形状：baseline 配比 = config 的 baseline_quota 键集；good 同理
+    assert set(fn["baseline"]) == set(cfg.food.baseline_quota), (
+        f"baseline 键应 = 'A','B'，实得 {sorted(fn['baseline'])}"
+    )
+    assert set(fn["good"]) == set(cfg.food.good_quota), (
+        f"good 键应 = A/B/C/D，实得 {sorted(fn['good'])}"
+    )
+
+    # 与 compute_population 同源：配比 × 总篮数
+    # 三级 d=1.5 → N=3.0 → F_基准=(3/5)×(1+0.15×(3−1))=0.6×1.3=0.78
+    b_ratio, g_ratio = cfg.food.baseline_quota["A"], cfg.food.good_quota["A"]
+    assert abs(fn["baseline"]["A"] - fn["baseline_total"] * b_ratio) < TOL
+    assert abs(fn["good"]["A"] - fn["good_total"] * g_ratio) < TOL
+    assert abs(fn["good_total"] - 1.5 * fn["baseline_total"]) < TOL
+
+
+def test_build_state_food_need_independent_of_plan():
+    """★ food_need **不依赖 plan** —— 岗位在、人就在（2026-10-16 拍板）。
+
+    `plan=None` 与「有 plan」两种调用必须给出**同一组**food_need；
+    且与显式 `compute_population(state, pid, plan_u={}, cfg)` 相通。
+    """
+    from engine.population import compute_population
+
+    cfg = load_config()
+    st = state_with(plot("0,0"))
+    no_plan = report.build_state(st, "p1", cfg, plan=None)["food_need"]
+    with_plan = report.build_state(st, "p1", cfg, plan=full_plan("0,0"))["food_need"]
+
+    assert no_plan == with_plan, (
+        f"food_need 不该随 plan 变：{no_plan} vs {with_plan}"
+    )
+
+    pop = compute_population(st, "p1", {}, cfg)
+    assert abs(no_plan["baseline_total"] - pop.baseline_food) < TOL, (
+        f"baseline_total 应 = compute_population 的 F_基准，"
+        f"{no_plan['baseline_total']} vs {pop.baseline_food}"
+    )
+    assert abs(no_plan["good_total"] - pop.good_food) < TOL
+
+
+def test_build_state_food_need_zero_plots_still_zeroish():
+    """★ 零地块开局：人口 0 → food_need 各商品量都为 0（但不缺键）。"""
+    cfg = load_config()
+    world = cfg.new_world()
+    from engine.models import PlayerState, WorldPhase, GameState
+    world.phase = WorldPhase.RUNNING
+    st = GameState(world=world, players={"p1": PlayerState(player_id="p1", cash=1200.0)})
+    out = report.build_state(st, "p1", cfg)
+    fn = out["food_need"]
+    assert set(fn["baseline"]) == {"A", "B"}
+    assert set(fn["good"]) == {"A", "B", "C", "D"}
+    for v in list(fn["baseline"].values()) + list(fn["good"].values()):
+        assert abs(v) < TOL, f"零地块人口 0 → 口粮需求应为 0，实得 {v}"
+
+
+# ══════════════════════════════════════════════════════════════════
 # 八、地图
 # ══════════════════════════════════════════════════════════════════
 

@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -744,7 +745,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--saves", default="saves", help="存档目录")
+    ap.add_argument("--offline", action="store_true",
+                    help="强制离线（不真调叙事模型；给纯离线调试用）")
     args = ap.parse_args(argv)
+
+    # ★ 2026-10-18 用户要求：财报/新闻必须能生成。
+    #   生产进程默认在线；测试走 make_server / 注入 client，不受影响。
+    if args.offline:
+        os.environ["NARRATE_OFFLINE"] = "1"
+    else:
+        os.environ["NARRATE_OFFLINE"] = "0"
 
     httpd = make_server(args.host, args.port, args.saves)
     url = f"http://{args.host}:{args.port}/"

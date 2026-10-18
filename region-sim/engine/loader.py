@@ -182,14 +182,20 @@ class EfficiencyConfig:
     def happiness_factor(self, h: float) -> float:
         """H → E_幸福（§3.3.5）。
 
-            H ≥ 0.6 → 0.90 + (H − 0.6) × 0.5
-            H < 0.6 → 0.90（下限）
+            H ≥ 0.6 → 0.90 + (H − 0.6) × 0.5         （旧公式不变：H=.6→.9、H=.8→1.0）
+            H < 0.6 → 0.90 × max(0, H) / 0.6         （★ 2026-10-18 S4：线性下探）
+
+        ★ 旧公式在 H < baseline 时有断点式下限 0.90 —— 玩家挨饿（H 掉到 0.4）
+           效率只从 1.0 降到 0.9，惩罚太钝。改为**线性下探**：
+           H=0 → 0，H=0.6 → 0.90，中间连续过渡，低幸福区才有真实代价。
+
+        ⚠️ H ≥ baseline 的原式一字未动 —— M1 的 H=0.8 → 1.0 不受影响（M1 不动）。
 
         ⚠️ 用的是**上一季**的 H（六条铁律第一条），否则与
            "粮食 → H → 效率"形成循环依赖。
         """
         if h < self.happiness_baseline_h:
-            return self.happiness_floor
+            return self.happiness_floor * max(0.0, h) / self.happiness_baseline_h
         return self.happiness_floor + (h - self.happiness_baseline_h) * self.happiness_slope
 
     def neighbors_in_table(self, plot_type: PlotType, neighbor_types: list[PlotType]) -> int:
@@ -327,8 +333,9 @@ class Config:
     opening_discount_rate: Optional[float] = None
 
     # ★ 2026-10-17 用户拍板：每季固定补贴（转移支付，不是产值，不进 GDP、不进市场求价）。
-    #   默认 120.0；config.economy.quarterly_subsidy 可覆盖。口径说明见 pipeline.py 第 8.X 步注释。
-    quarterly_subsidy: float = 120.0
+    #   默认 300.0；config.economy.quarterly_subsidy 可覆盖。
+    #   ★ 2026-10-18 S1：改为**季初发放**（server/session.py），结算不再入账。
+    quarterly_subsidy: float = 300.0
 
     # ★ 2026-10-18 E1 用户拍板：开局期加发补贴。
     #   前 `early_subsidy_quarters` 季（含边界，即 `quarter <= early_subsidy_quarters`）
@@ -336,12 +343,19 @@ class Config:
     #   缺省 0/0 → 没有任何一季能命中，early 档自动失效（每季发基准 `quarterly_subsidy`）。
     #   ⚠️ `early_subsidy_quarters` 必须 ≥0 整数；= 0 等价于"关掉早期补贴"。
     #   ⚠️ 与 `quarterly_subsidy` 同口径：转移支付，不是产值，不进 GDP / 市场求价。
+    #   ★ 2026-10-18 S1 最终以 config.json 为准（Q1–Q7 各 1200、Q8 起 300）；
+    #      这里仍是"未加载 config 时"的兜底缺省。
     early_quarterly_subsidy: float = 0.0
     early_subsidy_quarters: int = 0
 
     # ★ 政策（§11.9.3）：开局模式 + 乘数数值覆盖。见 policies.py。
     policy_mode: Optional[str] = None
     policy_multipliers: dict = field(default_factory=dict)
+
+    # ★ 2026-10-18 地块名字库：{plot_type_key: [名字…]}。
+    #   引擎**只用来查、不参与计算**；新建成时 Plot.name 从这里分配。
+    #   缺省空 dict → 分配函数退化到默认后缀策略（"类型-Lxx"）。
+    plot_names: dict[str, list[str]] = field(default_factory=dict)
 
     # ── 访问器 ──────────────────────────────────────────
 
@@ -761,6 +775,17 @@ def load_config(path: str | Path | None = None) -> Config:
     pol = raw.get("policies") or {}
     cfg.policy_mode = pol.get("mode")
     cfg.policy_multipliers = dict(pol.get("multipliers") or {})
+
+    # ── 地块名字库（2026-10-18）─────────────────────────
+    # 只读取、不校验内容；{plot_type_key: [名字…]}，名字全当中文串用。
+    pn = raw.get("plot_names") or {}
+    names_map: dict[str, list[str]] = {}
+    for key, names in pn.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(names, list) and all(isinstance(n, str) for n in names):
+            names_map[key] = list(names)
+    cfg.plot_names = names_map
 
     _validate(cfg)
     return cfg

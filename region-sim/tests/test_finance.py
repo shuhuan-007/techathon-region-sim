@@ -89,11 +89,10 @@ def test_pipeline_records_tax_as_refund():
         f"工资税回流应为 3.6，实得 {r.wage_tax_refund}"
     )
     # 期末现金 = 1000 − 66 + 94.08 + 3.60 = 1031.68（M1 锚点，运营口径）
-    # 2026-10-17 起每季 +subsidy（默认 120）补贴进账面 → 账面 = 运营锚点 + 补贴。
-    # M1 锚点本身（1031.68）不含补贴，断言时把补贴加在锚点一侧。
-    assert abs(st.players["p1"].cash - (1031.68 + r.subsidy)) < 1e-9, (
-        f"期末现金应为 1031.68 + 补贴 {r.subsidy} = {1031.68 + r.subsidy}，"
-        f"实得 {st.players['p1'].cash}"
+    # ★ 2026-10-18 S1：补贴改为季初发放、不进结算 → 账面 = 运营锚点本身。
+    assert abs(r.subsidy) < 1e-9, f"S1 起结算报告 subsidy 应为 0，实得 {r.subsidy}"
+    assert abs(st.players["p1"].cash - 1031.68) < 1e-9, (
+        f"期末现金应为 1031.68（S1 起补贴不进账），实得 {st.players['p1'].cash}"
     )
 
 

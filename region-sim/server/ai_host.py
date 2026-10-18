@@ -69,10 +69,13 @@ DEFAULT_RULE_KEY = "11.4"
 #: ②数字口径三条 —— 现成数字原样引用 / **自行推算放开但须标依据**（2026-10-17 用户拍板）/ 无依据就明说拿不到。
 _SYSTEM_PREAMBLE = (
     "你是区域经营游戏的 AI 秘书，只管解释、试算、起草；提交永远由玩家走 /api/submit，你无 commit，也不得声称执行过任何操作。\n"
+    "回答默认 **1–3 句**，先给结论/关键数字/公式；除非玩家明确要求详细，不要写长段落，不要复述局面。\n"
+    "口粮口径：F_基准/F_优秀是**等效篮位数，不是人数**；需求 = 配比 × F（A/B 基准档，A/B/C/D 优秀档）。\n"
     "用数字分三种：\n"
     "① 局面/试算里已有的数字：原样引用，不得改动、不得凑整冒充原值。\n"
     "② 自己推算的数字：允许，但必须说明「这是推算」，写清依据（用了哪个已有数字、什么算法/口径），必要时写明假设。\n"
-    "③ 既没现成的、又推算无依据的数字：不许编，明说「拿不到」，说清缺什么。"
+    "③ 既没现成的、又推算无依据的数字：不许编，明说「拿不到」，说清缺什么。\n"
+    "若给了 [当前草稿]：只输出要改的键（food / plot_plans / builds ...），**绝不重填未提及的字段**。"
 )
 
 
@@ -722,6 +725,15 @@ def _rule_answer_text(excerpts: list[dict]) -> str:
         key = str(ex.get("key") or "")
         title = str(ex.get("title") or "").strip()
         summary = str(ex.get("summary") or "").strip().replace("```", "")
+        if key.startswith("3.3.3") or title.startswith("3.3.3"):
+            # 用户要“短答、只回公式与关键数”。口粮是最高频机制题，
+            # 直接给三行公式，不再把整节表格倒出来。
+            parts.append(
+                "§3.3.3 口粮：F_基准=(N/5)×m，F_优秀=1.5×F_基准；"
+                "基准 A×0.4F、B×0.2F，优秀再加 C×0.1F、D×0.02F"
+                "（F 是等效篮位数，不是人数）。"
+            )
+            continue
         if title.startswith(key):
             head = title
         else:
@@ -1212,13 +1224,13 @@ def _draft_advice(
             summary += f"（引擎已按预算/校验校正 {len(notes)} 处，见 plan_notes）"
     else:
         summary = (
-            "模型起草了一份计划" +
-            (f"（含 {n_builds} 条建造、{n_plots} 块地开工）"
-             if (n_builds or n_plots) else "")
+            "已起草：" +
+            (f"{n_builds} 条建造、{n_plots} 块开工"
+             if (n_builds or n_plots) else "空计划")
         )
         if notes:
-            summary += f"；引擎校正 {len(notes)} 处（见 plan_notes）"
-        summary += "。下方 `suggested_plan` 就是它，玩家确认后可一键复制走 /api/submit。"
+            summary += f"；引擎校正 {len(notes)} 处"
+        summary += "。确认后由你提交。"
 
     preview = compiled.preview or None
     if isinstance(preview, dict):

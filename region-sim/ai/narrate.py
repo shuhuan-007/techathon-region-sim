@@ -27,15 +27,12 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 #: kind → 提示词文件名。
 _PROMPT_FILES = {"news": "news.md", "report": "report.md"}
 
-#: ⚠️ **默认离线**。要真调模型必须显式设 `NARRATE_OFFLINE=0`。
+#: ⚠️ **默认在线**（2026-10-18 用户要求：财报/新闻必须能生成）。
+#: 测试全部注入 FakeClient；要强制离线调试，显式设 `NARRATE_OFFLINE=1`。
 #:
-#: 为什么默认是关的（2026-10-17 实测教训）：
-#:   `server/session.py` 的接线会在**已结算的局**上打 `/api/state` 时
-#:   自动生成叙事 —— 于是 `tests/test_server.py` 这类**本该离线**的测试
-#:   会真的去连网关（实测卡了 14 分钟，`Established 127.0.0.1:8787`）。
-#:   测试联网既慢又烧配额，还可能因为网关抖动而变成不确定结果。
-#:   所以默认关掉真调用：想让它真跑，运行进程时带上环境变量。
-_OFFLINE_DEFAULT = True
+#: 以前默认关，是为了避免 `tests/test_server.py` 这类本该离线的测试
+#: 去连网关；现在测试都注入 client，不再依赖这个默认值。
+_OFFLINE_DEFAULT = False
 
 
 def is_offline() -> bool:

@@ -69,6 +69,10 @@ class GameRegistry:
                 state=state, cfg=self.cfg,
                 storage=self.storage, game_id=game_id,
             )
+            # ★ 2026-10-18 S1：新开局在 Q1 发一次季初补贴（early 档，默认 1200）。
+            #   幂等来自"创建路径**只走这里一次**"；加载路径（下面的 get()）
+            #   特意**不调** —— 旧档现金已含历次补贴，不补发。
+            session.credit_opening_subsidy()
             # 开局就落一次盘，这样"我建过这局"这件事立刻可见
             session.save_now()
             self._sessions[game_id] = session

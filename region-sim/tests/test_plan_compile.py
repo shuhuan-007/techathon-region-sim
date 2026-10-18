@@ -216,6 +216,7 @@ def test_tight_cash_prefers_production_over_new_build():
     """
     cfg = load_config()
     state = _mid_state(cfg)
+    state.player("p1").cash = 250.0       # E1 降本后 416 已能同时建造+开工；这里压到真·超预算但可开工
     raw = _raw(builds=[{
         "plot_id": "0,0", "plot_type": "agriculture",
         "target_level": 1, "product": "A",

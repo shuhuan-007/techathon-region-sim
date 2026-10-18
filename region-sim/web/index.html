@@ -35,8 +35,8 @@
       <select id="sel-games" style="max-width:220px"></select>
     </div>
     <p class="muted" style="margin:8px 0 0">
-      开新局：开局现金 <b>1200</b>、<b>零地块</b> —— 地图上全是可建空地，
-      先在地图上点一格建造（《规则基线》§5.3）。
+      开新局：开局现金 <b>1200</b>、<b>零地块</b>；Q1–Q7 季初再发 <b>1200</b>（Q8 起 300），
+      地图上全是可建空地，先在地图上点一格建造（《规则基线》§5.3）。
     </p>
   </div>
 
@@ -57,6 +57,7 @@
 
         <div class="panel">
           <h2>🔨 建造 / 升级 <span class="muted" id="build-at"></span></h2>
+          <p id="plot-name-strip" style="margin:0 0 6px;font-size:14px;font-weight:600;color:#cfe2ff"></p>
           <p class="muted" id="quota-strip" style="margin:0 0 8px;font-size:12px"></p>
           <div class="row" style="margin-bottom:8px">
             <select id="sel-work"></select>
@@ -100,11 +101,13 @@
 
         <div class="panel">
           <h2>🍚 居民口粮</h2>
-          <table><thead><tr><th>商品</th><th class="num">需求</th><th class="num">本季供给</th></tr></thead>
+          <table><thead><tr>
+            <th>商品</th><th class="num">合格需求</th><th class="num">优秀需求</th><th class="num">本季计划</th>
+          </tr></thead>
           <tbody id="food-body"></tbody></table>
           <p class="muted" style="margin:8px 0 0" id="food-note">—</p>
           <p class="muted" style="margin:6px 0 0">
-            基准档要 <b>A、B</b>（可互换）；优秀档要 <b>A、B、C、D</b> 四样都有。
+            合格档要 <b>A、B</b>；优秀档要 <b>A、B、C、D</b> 四样都有。
             自产先顶，缺口自动买（按上季价）。
           </p>
         </div>

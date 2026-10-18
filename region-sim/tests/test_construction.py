@@ -310,9 +310,10 @@ def test_build_charges_cash_and_materials():
         f"总扣款应为 104（= 折后现金 40 + 物资 64），实得 {r.total_deduction}"
     )
     # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
-    # 2026-10-17 起每季 +subsidy（默认 120）补贴进账面 → 期末 = 运营账 + 1×补贴
-    assert abs(st.players["p1"].cash - (1096.0 + r.subsidy)) < TOL, (
-        f"期末现金应为 1200 − 104 + 补贴 {r.subsidy} = {1096.0 + r.subsidy}，"
+    # ★ 2026-10-18 S1：补贴季初发放、不进结算 → 期末 = 运营账本身
+    assert abs(r.subsidy) < TOL, f"S1 起结算报告 subsidy 应为 0，实得 {r.subsidy}"
+    assert abs(st.players["p1"].cash - 1096.0) < TOL, (
+        f"期末现金应为 1200 − 104 = 1096.0（S1 起补贴不进账），"
         f"实得 {st.players['p1'].cash}"
     )
 
@@ -519,10 +520,10 @@ def test_discount_fourth_new_agriculture_pays_full_price():
     assert abs(r.total_deduction - 456.0) < TOL, (
         f"总扣款应为 456（= 现金 200 + 物资 256），实得 {r.total_deduction}"
     )
-    # 2026-10-17 起每季 +subsidy（默认 120）补贴进账面
-    assert abs(st.players["p1"].cash - (1200.0 - 456.0 + r.subsidy)) < TOL, (
-        f"期末现金应为 744 + 补贴 {r.subsidy} = {1200.0 - 456.0 + r.subsidy}，"
-        f"实得 {st.players['p1'].cash}"
+    # ★ 2026-10-18 S1：补贴季初发放、不进结算 → 期末 = 744 本身
+    assert abs(r.subsidy) < TOL, f"S1 起结算报告 subsidy 应为 0，实得 {r.subsidy}"
+    assert abs(st.players["p1"].cash - (1200.0 - 456.0)) < TOL, (
+        f"期末现金应为 744（S1 起补贴不进账），实得 {st.players['p1'].cash}"
     )
     # 用满 3 个名额
     assert st.players["p1"].opening_quota_used.get("agriculture") == 3, (

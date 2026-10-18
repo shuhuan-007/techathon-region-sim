@@ -367,6 +367,12 @@ class Plot:
     # ⚠️ 该字段**留空即由 config 的默认配方决定**，等拍板后启用。
     product: Optional[str] = None
 
+    # ★ 2026-10-18 地块显示名（ui/sky/3D 用，不参与引擎计算）。
+    #   新建成时按 plot_type（研究地块读 research 列）从 config.plot_names
+    #   里**全局不重复**地挑一个填进来；用尽则退化为 "类型-Lxx"。
+    #   老存档没这字段 → None，UI 兜底仍显示 plot_id。
+    name: Optional[str] = None
+
     # ── 派生属性 ────────────────────────────────────────
 
     @property
@@ -429,6 +435,8 @@ class Plot:
             target_level=data.get("target_level", data["level"]),
             construction_materials=dict(data.get("construction_materials", {})),
             product=data.get("product"),
+            # ★ 2026-10-18 老存档无 name 键 → data.get 兜底为 None
+            name=data.get("name"),
         )
 
 

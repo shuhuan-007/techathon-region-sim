@@ -76,6 +76,7 @@ from engine import policies as POL
 from engine import production as P
 from engine import settlement as S
 from engine.efficiency import EfficiencyBreakdown, compute_efficiency
+from engine.naming import assign_plot_name
 from engine.loader import Config
 from engine.models import Contract, GameState, Plan, Plot, PlotStatus
 from engine.population import PopulationResult, compute_population
@@ -135,10 +136,20 @@ class QuarterReport:
     cash_before: float = 0.0
     cash_after: float = 0.0
     value_added: float = 0.0              # GDP（增加值）
-    # ★ 2026-10-17 用户拍板：每季固定补贴（默认 120.0，可在 config.economy.quarterly_subsidy 调）。
-    #   ⚠️ 这是**转移支付**，不是产值：只进玩家现金账面与 report.subsidy，
-    #      **不进 value_added / sales_revenue / 市场求价 / GDP**。
+    # ★ 2026-10-18 S1 用户拍板：补贴改为**季度初发放、不进入结算**。
+    #   本字段**保留**（形状不变、存档兼容），但结算/preview 恒记 0 ——
+    #   真正的发钱挪到 `server/session.py::credit_opening_subsidy()`。
+    #   ⚠️ 这是**转移支付**，不是产值：从来就不进 value_added / sales_revenue /
+    #      市场求价 / GDP，S1 之后也不再进 report（只进玩家现金账面）。
     subsidy: float = 0.0
+    # ★ 2026-10-18 S2 用户拍板：本季**经营盈亏**两个新字段。
+    #   construction_materials_cost = 本季投入的工程物资 × 本季结算价之和
+    #     （是 `materials_cost` 的一部分 —— materials_cost 还含生产原料与口粮）
+    #   operating_profit = sales_revenue − (wages + operating + materials_cost
+    #       − construction_materials_cost) + wage_tax_refund
+    #     （**不含** construction_cash、**不含**补贴 —— 只看"经营"这条线）
+    construction_materials_cost: float = 0.0
+    operating_profit: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -172,7 +183,11 @@ class QuarterReport:
             "value_added": self.value_added,
             # ★ 2026-10-17 用户拍板：只加字段，不改既有字段名/含义。
             #   新闻/财报的提示词输入契约 `QuarterReport.to_dict()` 的既有键一个不动。
+            # ★ 2026-10-18 S1：subsidy 保留字段但结算恒 0（季初发放挪服务层）。
             "subsidy": self.subsidy,
+            # ★ 2026-10-18 S2：本季经营盈亏（S2 新增，同样只加不改）。
+            "construction_materials_cost": self.construction_materials_cost,
+            "operating_profit": self.operating_profit,
         }
 
 
@@ -672,32 +687,46 @@ def _run_body(
         # GDP：有效产出价值（固定参考价）− 实际消耗的中间投入（§7.5）
         rep.value_added = F.value_added(rep, cfg)
 
-    # ══ 第 8.5 步：每季固定补贴 ★ 2026-10-17 用户拍板 / 2026-10-18 E1 早期补贴 ══
-    #
-    #   每个玩家每季 +cfg.subsidy_for_quarter(state.world.quarter) 现金：
-    #     quarter ≤ cfg.early_subsidy_quarters → cfg.early_quarterly_subsidy（默认 1200）
-    #     quarter >  cfg.early_subsidy_quarters → cfg.quarterly_subsidy（默认 300）
-    #
-    # ⚠️ 落点：第 8 步税收与 GDP 算完之后、cash_after 落账之前 ——
-    #   即"扣款/结算之后、写报告之前"（用户口径），让 subsidy 体现在
-    #   state.report 的 cash_after 里，也能被新闻/财报读到。
-    #
-    # ⚠️ 补贴是**转移支付**，不是产值：
-    #     · 不改 value_added（GDP，在上一行已经算完，补贴不参与）
-    #     · 不改 sales_revenue（销售收入，第 7 步已写完）
-    #     · 不进市场求价、不改价格、不改效率、不改任何已算好的中间量
-    #   它的唯一作用是给现金账面注入一笔钱，并在 report.subsidy 字段如实记录。
-    #
-    # ⚠️ 公式放在 `Config.subsidy_for_quarter(quarter)` 纯函数里：
-    #   pipeline 与 test_m1 共用同一条 —— 否则改了代码断言还在拼 quarterly_subsidy。
-    for player_id, plan in plans.items():
-        player = state.players[player_id]
-        rep = reports[player_id]
-        subsidy = float(cfg.subsidy_for_quarter(state.world.quarter))
-        player.cash += subsidy
-        rep.subsidy = subsidy
-        # ★ cash_after 是"季末玩家手上实际现金"，必须含补贴。
+        # ══ ★ 2026-10-18 S2：本季经营盈亏（新增两个报告字段）══════════
+        #
+        #   construction_materials_cost = Σ(report.construction 各物资量 × 本季结算价)
+        #     它是 materials_cost 的一部分（materials_cost 还含生产原料 + 口粮）。
+        #     ⚠️ 第 5 步扣款按**上季价**收（§4.1 买入口径），这里估价用
+        #        **本季结算价** —— 这不是两套账：扣款价与资产评估价本来就分属
+        #        "期初买入"与"本季市场"两个口径（用户 2026-10-18 拍板"× 本季价"）。
+        #
+        #   operating_profit = sales_revenue − (wages + operating
+        #       + materials_cost − construction_materials_cost) + wage_tax_refund
+        #     ⚠️ **不含 construction_cash**（工程现金费是投资，不是经营支出）、
+        #        **不含补贴**（补贴已挪回季初发放，S1）。
+        # 建设物资按**实际扣款价**（上季价/P0）计，和 materials_cost 同一本账；
+        # 这样 operating_profit 里的 `materials_cost - construction_materials_cost`
+        # 才是真正剔除建设后的生产/口粮支出，不会因本季求价差出现负值。
+        rep.construction_materials_cost = sum(
+            qty * state.world.last_price(g)
+            for g, qty in rep.construction.items()
+        )
+        rep.operating_profit = (
+            rep.sales_revenue
+            - (rep.wages + rep.operating
+               + rep.materials_cost - rep.construction_materials_cost)
+            + rep.wage_tax_refund
+        )
+        # ★ cash_after 是"季末玩家手上实际现金"。S1 之后补贴不进来，
+        #   所以 cash_after = 第 7 收入 − 第 5/5.5 扣款 − 税回流后的账面。
         rep.cash_after = player.cash
+
+    # ══ 第 8.5 步：补贴入账 —— ★ 2026-10-18 S1 已取消 ════════════════
+    #
+    # ★ 用户最终裁定：补贴改为**季度初发放、不进入结算**。
+    #   · pipeline 不再给现金、不再写 `rep.subsidy`（字段保留、恒 0）；
+    #   · preview / advance 的 preview 报告里 subsidy = cash_after 那笔补贴
+    #     **不再出现**；
+    #   · 真正的发钱挪到 `server/session.py::credit_opening_subsidy()`：
+    #     开局在 Q1 发一次，每次 advance 后（新季初）发下一季；
+    #     幂等、加载旧档不补发。
+    #   · M1 测试夹具**不走** server/session，现金锚点因此**逐字节不变**
+    #     （详见 tests/test_m1.py::test_m1_full_account 的注释）。
 
     # ══ 第 9 步：结转 ══════════════════════════════════════
     for g, pr in prices.items():
@@ -1166,6 +1195,8 @@ def _advance_construction(state: GameState, player_id: str, cfg: Config) -> list
             plot.status = PlotStatus.RUNNING
             plot.level = plot.target_level
             plot.running_quarters = 0     # 磨合从本季起算
+            # ★ 2026-10-18 完工时才算中文地块名（等级已生效，研究/工业分得清）
+            assign_plot_name(state, player_id, plot, cfg)
             events.append({
                 "event": "completed",
                 "plot_id": pid,
@@ -1260,6 +1291,8 @@ def _invest_construction(state: GameState, player_id: str, plan: Plan, cfg: Conf
             plot.status = PlotStatus.RUNNING
             plot.level = plot.target_level
             plot.running_quarters = 0     # 磨合从完工本季起算
+            # ★ 2026-10-18 完工时才算中文地块名（与 _advance_construction 同钩）
+            assign_plot_name(state, player_id, plot, cfg)
             events.append({
                 "event": "completed",
                 "plot_id": order.plot_id,

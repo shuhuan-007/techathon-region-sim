@@ -70,12 +70,19 @@ def test_games_list_starts_empty():
 
 
 def test_new_game_creates_playable_opening():
-    """★ 开新局：现金 1200、**零地块**（§5.3 地图全是可建空地）。"""
+    """★ 开新局：**现金 2400 = 1200 开局 + Q1 季初补贴 1200**（S1，2026-10-18 用户拍板）、
+    **零地块**（§5.3 地图全是可建空地）。
+
+    ⚠️ 开局现金锚点从 1200 改为 2400：补贴已挪到季初发放（registry.create
+       内 `credit_opening_subsidy()`），不走结算。
+    """
     c = Client()
     code, body = c.new_game("g1")
     assert code == 200
     st = body["state"]
-    assert abs(st["cash"] - 1200.0) < TOL, f"开局现金应为 1200，实得 {st['cash']}"
+    assert abs(st["cash"] - 2400.0) < TOL, (
+        f"开局现金应为 2400（1200 开局 + Q1 补贴 1200），实得 {st['cash']}"
+    )
     assert st["plots"] == [], "开局不该有地块"
     assert st["quarter"] == 1
     assert st["total_quarters"] == 20
@@ -121,6 +128,69 @@ def test_build_options_gives_fourteen_works():
 # ══════════════════════════════════════════════════════════════════
 
 
+def test_new_game_load_path_does_not_double_credit():
+    """★ S1（2026-10-18）：**读档不补发** Q1 补贴 —— 幂等只在创建路径。
+
+    `registry.create()`（新开局）才调 `credit_opening_subsidy()`；
+    `registry.get()`（从存档拉回活跃表）**不调**。这条钉的就是那个分支。
+    """
+    c = Client()
+    c.new_game("g1")
+    fresh = c.get("/api/state", game="g1", player="p1")[1]["state"]
+    assert abs(fresh["cash"] - 2400.0) < TOL, "新开局 2400（含 Q1 季初补贴）"
+
+    # 从活跃表丢掉再取 —— 走「读档」路径，不该再发一份
+    c.registry.drop_from_memory("g1")
+    reloaded = c.get("/api/state", game="g1", player="p1")[1]["state"]
+    assert abs(reloaded["cash"] - fresh["cash"]) < TOL, (
+        f"★ 读档不补发：现金应仍为 {fresh['cash']}，实得 {reloaded['cash']}"
+    )
+
+
+def test_eighth_quarter_subsidy_falls_back_to_300():
+    """★ S1（2026-10-18）：**Q8 季初补贴回落到基准 300**（Q1–Q7 各 1200）。"""
+    c = Client()
+    c.new_game("g1")
+    sess = c.registry.get("g1")
+    with sess.lock:
+        # 现场把会话推到 Q7→Q8（引擎只看 world.quarter 这一个判据）。
+        sess.state.world.quarter = 7
+    before = c.get("/api/state", game="g1", player="p1")[1]["state"]["cash"]
+    # 走完 Q7 的结算 → advance 把 quarter 推到 8 → 季初补贴走基准档
+    c.post("/api/submit", {"game": "g1", "player": "p1",
+                           "plan": {"player_id": "p1"}})
+    c.post("/api/end_quarter", {"game": "g1", "player": "p1"})
+    after = c.get("/api/state", game="g1", player="p1")[1]["state"]
+    assert after["quarter"] == 8, f"结算后应进入 Q8，实得 {after['quarter']}"
+    # 空计划结算无扣款无收入 → 现金增量恰为 Q8 的季初补贴 300
+    assert abs(after["cash"] - (before + 300.0)) < TOL, (
+        f"Q8 现金应只增 300（基准补贴），{before} → {after['cash']}"
+    )
+    # 报告里的 subsidy 字段恒 0（补贴不进结算）
+    rep = c.get("/api/report", game="g1", player="p1")[1]["report"]
+    assert abs(rep["subsidy"]) < TOL, (
+        f"S1 起结算报告 subsidy 应恒 0，实得 {rep['subsidy']}"
+    )
+
+
+def test_second_quarter_report_subsidy_is_zero():
+    """★ S1（2026-10-18）：Q2 的结算报告 subsidy = 0（季初已发，结算不再发）。"""
+    c = Client()
+    c.new_game("g1")
+    c.build("g1", "0,0")
+    c.post("/api/end_quarter", {"game": "g1", "player": "p1"})                # Q1→Q2
+    c.post("/api/next_quarter", {"game": "g1", "player": "p1"})               # 月报→行动
+    c.post("/api/submit", {"game": "g1", "player": "p1",
+                           "plan": {"player_id": "p1"}})
+    c.post("/api/end_quarter", {"game": "g1", "player": "p1"})                # Q2→Q3
+
+    rep = c.get("/api/report", game="g1", player="p1")[1]["report"]
+    assert rep["quarter"] == 2, f"应为 Q2 的报告，实得 {rep['quarter']}"
+    assert abs(rep["subsidy"]) < TOL, (
+        f"★ S1 起 Q2 结算报告 subsidy 应为 0，实得 {rep['subsidy']}"
+    )
+
+
 def test_full_quarter_cycle():
     """★ 建造 → 结算 → 读状态 → 下一季，整条链路走通。"""
     c = Client()
@@ -139,10 +209,16 @@ def test_full_quarter_cycle():
     st = body["state"]
     assert st["quarter"] == 2, f"结算后应进入第 2 季，实得 {st['quarter']}"
     # 2026-10-16 用户裁定：开局减免 每类 3 名额 × 0.50（现金费折半）生效
-    # 2026-10-17 起每季 +subsidy（默认 120）补贴进账面 → 1200−104+120=1216
+    # ★ 2026-10-18 S1：补贴改为季初发放、不进结算 ——
+    #   现金链：开局 2400（1200 + Q1 补贴 1200）→ 结算 1200−104 → advance 后
+    #   立刻发 Q2 补贴 1200 → 账面 2400 − 104 + 1200 = 3496。
+    #   结算报告里的 subsidy 字段恒为 0（不进结算）。
     subsidy = body["report"]["subsidy"]
-    assert abs(st["cash"] - (1096.0 + subsidy)) < TOL, (
-        f"1200−104+补贴{subsidy}={1096.0 + subsidy}，实得 {st['cash']}"
+    assert abs(subsidy) < TOL, (
+        f"S1 起结算报告 subsidy 应为 0（季初发放），实得 {subsidy}"
+    )
+    assert abs(st["cash"] - 3496.0) < TOL, (
+        f"现金应为 2400−104+1200(Q2 季初补贴)=3496，实得 {st['cash']}"
     )
     assert len(st["plots"]) == 1, "新建后应有一块地"
     # 2026-10-17 用户拍板：本季投钱投料也算一季工期。

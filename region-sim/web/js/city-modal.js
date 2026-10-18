@@ -514,131 +514,109 @@ window.APP = window.APP || {};
         _camera.lookAt(cx, 0, cz);
         _controls.update();
       }
-      /* 3b) v15b 拍板（2026-10-18）：地块 mesh 间隙下面填"平面道路"。
+      /* ★★ 2026-10-18 v16 拍板（推翻 v15b）★★
          ──────────────────────────────────────────────────────────
-         上一版只画"整条 seam 横竖大矩形"，视觉死板。
-         这一版按「**每个空缝单元格**」铺路：
-           · seam 行 → 沿 X 方向铺一段段 "马路横断面"（柏油底 + 白虚线 + 路缘）
-           · seam 列 → 沿 Z 方向铺一段段
-           · seam × seam 交叉口 → 单独铺一块压深的"十字路"，
-             把两段道路自然连起来，不再出现"两张大矩形"。
-         所有路面贴地 y=0.004，比荒地（0.02）矮，比底盘高一点。 */
+         视觉正确的"马路" = 相邻两个【已建成 plot】之间的**交界窄缝**，
+         不是"段间空缝"（那个是 v7 视觉剪掉的空格，里面什么都没有）。
+
+         每个 plot 占 1×1 世界单位，中心 (c+0.5, r+0.5)；模型本体宽
+         0.95，两边各留 0.025。两个相邻 plot（水平相邻 (r,c)+(r,c+1)
+         或垂直相邻 (r,c)+(r+1,c)）的"间隔"= 单位边长 1 − 0.95 = 0.05，
+         中心线 = 两边格子的几何交界（中心偏移 ±0.5）。
+         所以路宽 0.05 是物理准确的，不会有越出缝的部分。
+
+         做法：
+           1. 扫已建成 plot 集合（压缩后/原始坐标一一对应）；
+           2. 对每个 plot 向右看一格、向下看一格，若都建成 → 在压缩后
+              对应格边线上画一条窄路；
+           3. 同时若 (r,c)/(r,c+1)/(r+1,c)/(r+1,c+1) 四格都建成 → 在
+              它们共享的角落点画一个小圆/方块作"路口"。
+
+         与"未建房空地"无关——空地根本不画路。 */
       if (_roadGroup){
         const asphaltMat = new THREE.MeshStandardMaterial({
-          color: 0x22262e,
-          roughness: 0.98,
-          metalness: 0.0,
+          color: 0x22262e, roughness: 0.98, metalness: 0.0,
         });
-        const crossingMat = new THREE.MeshStandardMaterial({
-          color: 0x181b22,              /* 交叉口压得更深一档 */
-          roughness: 0.98,
-          metalness: 0.0,
+        const stripeMat = new THREE.MeshBasicMaterial({
+          color: 0xf5edaf,
         });
-        const stripeMat = new THREE.MeshStandardMaterial({
-          color: 0xe8e2c8,              /* 偏黄的白虚线 */
-          roughness: 0.6,
-          metalness: 0.0,
-          emissive: 0x202020,
-        });
-        const curbMat = new THREE.MeshStandardMaterial({
-          color: 0x3a3f4a,              /* 路缘肩线 */
-          roughness: 0.9,
-          metalness: 0.0,
-        });
-        /* 得出"整段空缝行集合 / 列集合" */
-        const seamRows = new Set();
-        const seamCols = new Set();
-        for (let nr = 0; nr < rowSize; nr++){
-          if (rowReverse[nr] === undefined) seamRows.add(nr);
-        }
-        for (let nc = 0; nc < colSize; nc++){
-          if (colReverse[nc] === undefined) seamCols.add(nc);
-        }
-        const roadY = 0.004;
-        const roadH = 0.03;
-        const stripeY = roadY + roadH / 2 + 0.001;  /* 浮在柏油面上 1mm */
+        /* 路宽严格 = 两模型之间的物理缝（不可加宽，会盖住模型边缘 0.025/边）*/
+        const ROAD_W = 0.05 * 0.92;    /* 略缩 8%，避免与模型边缘"刚好相切"看起来脏 */
+        const roadY = 0.004;            /* 略高于底盘 0，低于 Plot 模型底 0.02 */
+        const roadH = 0.02;
+        const stripeY = roadY + roadH + 0.002;
         const stripeH = 0.002;
-        const curbW = 0.04;
 
-        /* ── seam 行 → 沿 X 一格一格铺路面段 ── */
-        seamRows.forEach(nr => {
-          const z = nr * CELL_SPACING + CELL_SPACING / 2;
-          for (let nc = 0; nc < colSize; nc++){
-            if (seamCols.has(nc)) continue;        /* 交叉口另画 */
-            const x = nc * CELL_SPACING + CELL_SPACING / 2;
-            const road = new THREE.Mesh(
-              new THREE.BoxGeometry(CELL_SPACING * 0.98, roadH, CELL_SPACING * 0.92),
-              asphaltMat
-            );
-            road.position.set(x, roadY, z);
-            road.receiveShadow = true;
-            _roadGroup.add(road);
-            [-0.45, 0.45].forEach(dz => {
-              const curb = new THREE.Mesh(
-                new THREE.BoxGeometry(CELL_SPACING * 0.98, roadH * 0.6, curbW),
-                curbMat
-              );
-              curb.position.set(x, roadY + roadH * 0.3, z + dz * CELL_SPACING);
-              curb.receiveShadow = true;
-              _roadGroup.add(curb);
-            });
-            for (let k = -1; k <= 1; k++){
-              const stripe = new THREE.Mesh(
-                new THREE.BoxGeometry(CELL_SPACING * 0.18, stripeH, CELL_SPACING * 0.02),
-                stripeMat
-              );
-              stripe.position.set(x + k * CELL_SPACING * 0.33, stripeY, z);
-              _roadGroup.add(stripe);
-            }
-          }
-        });
+        /* 已经建成的压缩后格子集合（用 placedCells 即可，它就是真实 plot 坐标）*/
+        const placedSet = new Set();
+        placedCells.forEach(({ row, col }) => placedSet.add(row + ',' + col));
 
-        /* ── seam 列 → 沿 Z 一格一格铺路面段 ── */
-        seamCols.forEach(nc => {
-          const x = nc * CELL_SPACING + CELL_SPACING / 2;
-          for (let nr = 0; nr < rowSize; nr++){
-            if (seamRows.has(nr)) continue;
-            const z = nr * CELL_SPACING + CELL_SPACING / 2;
-            const road = new THREE.Mesh(
-              new THREE.BoxGeometry(CELL_SPACING * 0.92, roadH, CELL_SPACING * 0.98),
-              asphaltMat
+        /* 辅助：在压缩后坐标 (r,c) 与 (r,c+1) 的共享竖线上画路（水平方向的路段）*/
+        const drawHRoad = (r, c) => {
+          const z1 = r * CELL_SPACING + CELL_SPACING / 2;
+          const xMid = (c + 1) * CELL_SPACING;      /* 两格之间的 x（格子 c 的右沿 = 格子 c+1 的左沿）*/
+          const road = new THREE.Mesh(
+            new THREE.BoxGeometry(ROAD_W, roadH, CELL_SPACING * 0.96),
+            asphaltMat
+          );
+          road.position.set(xMid, roadY, z1);
+          road.receiveShadow = true;
+          _roadGroup.add(road);
+          /* 中心虚线：两段 */
+          [-0.22, 0.22].forEach(dz => {
+            const stripe = new THREE.Mesh(
+              new THREE.BoxGeometry(0.008, stripeH, 0.10),
+              stripeMat
             );
-            road.position.set(x, roadY, z);
-            road.receiveShadow = true;
-            _roadGroup.add(road);
-            [-0.45, 0.45].forEach(dx => {
-              const curb = new THREE.Mesh(
-                new THREE.BoxGeometry(curbW, roadH * 0.6, CELL_SPACING * 0.98),
-                curbMat
-              );
-              curb.position.set(x + dx * CELL_SPACING, roadY + roadH * 0.3, z);
-              curb.receiveShadow = true;
-              _roadGroup.add(curb);
-            });
-            for (let k = -1; k <= 1; k++){
-              const stripe = new THREE.Mesh(
-                new THREE.BoxGeometry(CELL_SPACING * 0.02, stripeH, CELL_SPACING * 0.18),
-                stripeMat
-              );
-              stripe.position.set(x, stripeY, z + k * CELL_SPACING * 0.33);
-              _roadGroup.add(stripe);
-            }
-          }
-        });
-
-        /* ── seam × seam 交叉口：一整块压深路面 + 不加线 ── */
-        seamRows.forEach(nr => {
-          const z = nr * CELL_SPACING + CELL_SPACING / 2;
-          seamCols.forEach(nc => {
-            const x = nc * CELL_SPACING + CELL_SPACING / 2;
-            const cross = new THREE.Mesh(
-              new THREE.BoxGeometry(CELL_SPACING * 0.98, roadH, CELL_SPACING * 0.98),
-              crossingMat
-            );
-            cross.position.set(x, roadY, z);
-            cross.receiveShadow = true;
-            _roadGroup.add(cross);
+            stripe.position.set(xMid, stripeY, z1 + dz);
+            _roadGroup.add(stripe);
           });
+        };
+        /* 在 (r,c) 与 (r+1,c) 的共享横线上画路（垂直方向的路段）*/
+        const drawVRoad = (r, c) => {
+          const x1 = c * CELL_SPACING + CELL_SPACING / 2;
+          const zMid = (r + 1) * CELL_SPACING;
+          const road = new THREE.Mesh(
+            new THREE.BoxGeometry(CELL_SPACING * 0.96, roadH, ROAD_W),
+            asphaltMat
+          );
+          road.position.set(x1, roadY, zMid);
+          road.receiveShadow = true;
+          _roadGroup.add(road);
+          [-0.22, 0.22].forEach(dx => {
+            const stripe = new THREE.Mesh(
+              new THREE.BoxGeometry(0.10, stripeH, 0.008),
+              stripeMat
+            );
+            stripe.position.set(x1 + dx, stripeY, zMid);
+            _roadGroup.add(stripe);
+          });
+        };
+
+        /* 扫所有已建成格子 */
+        placedSet.forEach(key => {
+          const [r, c] = key.split(',').map(x => parseInt(x, 10));
+          if (placedSet.has(r + ',' + (c + 1))) drawHRoad(r, c);
+          if (placedSet.has((r + 1) + ',' + c)) drawVRoad(r, c);
+        });
+
+        /* 十字路口：4 格都建成 → 在共享角落画小方块路口 */
+        placedSet.forEach(key => {
+          const [r, c] = key.split(',').map(x => parseInt(x, 10));
+          const four =
+            placedSet.has(r + ',' + (c + 1)) &&
+            placedSet.has((r + 1) + ',' + c) &&
+            placedSet.has((r + 1) + ',' + (c + 1));
+          if (!four) return;
+          const xCorner = (c + 1) * CELL_SPACING;
+          const zCorner = (r + 1) * CELL_SPACING;
+          const junction = new THREE.Mesh(
+            new THREE.BoxGeometry(ROAD_W * 1.05, roadH * 0.9, ROAD_W * 1.05),
+            new THREE.MeshStandardMaterial({ color: 0x1a1e26, roughness: 0.98, metalness: 0.0 })
+          );
+          junction.position.set(xCorner, roadY, zCorner);
+          junction.receiveShadow = true;
+          _roadGroup.add(junction);
         });
       }
 

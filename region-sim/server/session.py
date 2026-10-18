@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:                       # 只为类型标注，运行时不 import
@@ -57,6 +58,54 @@ from engine.validate import PlanRejected  # noqa: F401  (re-export)
 
 class Conflict(Exception):
     """请求与当前会话状态冲突（不在行动阶段、已提交过等）。"""
+
+
+def _report_view_from_dict(d: dict):
+    """把 `state.report` 的 dict 适配成 `engine.news.news_facts` 需要的只读对象。
+
+    读档后 `raw_reports` 为空，但 `state.report` 一直在；没有这层适配时
+    `/api/narratives` 的新闻路会永远拿不到 facts（ok:false 或 null）。
+    这里只做形状转换，**不补、不改任何数字**。
+    """
+    if not isinstance(d, dict):
+        return None
+    prod = []
+    for item in d.get("production") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            ptype = PlotType(item.get("plot_type"))
+        except (TypeError, ValueError):
+            ptype = PlotType.AGRICULTURE
+        prod.append(SimpleNamespace(
+            plot_id=item.get("plot_id"),
+            plot_type=ptype,
+            level=int(item.get("level") or 0),
+            product=item.get("product"),
+            output_goods=item.get("output_goods"),
+            output_qty=float(item.get("output_qty") or 0.0),
+        ))
+    food = d.get("food")
+    return SimpleNamespace(
+        quarter=int(d.get("quarter") or 0),
+        player_id=d.get("player_id") or "",
+        prices=d.get("prices") or {},
+        production=prod,
+        food=SimpleNamespace(**food) if isinstance(food, dict) else None,
+        policy=d.get("policy"),
+        cash_before=float(d.get("cash_before") or 0.0),
+        cash_after=float(d.get("cash_after") or 0.0),
+        total_deduction=float(d.get("total_deduction") or 0.0),
+        materials_cost=float(d.get("materials_cost") or 0.0),
+        wages=float(d.get("wages") or 0.0),
+        operating=float(d.get("operating") or 0.0),
+        construction_cash=float(d.get("construction_cash") or 0.0),
+        sales_revenue=float(d.get("sales_revenue") or 0.0),
+        wage_tax_refund=float(d.get("wage_tax_refund") or 0.0),
+        value_added=float(d.get("value_added") or 0.0),
+        production_incentive=float(d.get("production_incentive") or 0.0),
+        net_cash=float(d.get("net_cash") or 0.0),
+    )
 
 
 @dataclass
@@ -105,6 +154,29 @@ class GameSession:
             raise ValueError(
                 "给了 storage 就必须给 game_id —— 否则不知道往哪一局存。"
             )
+
+    # ── ★ 补贴（2026-10-18 S1 用户拍板：季度初发放、不进结算）────────
+
+    def credit_opening_subsidy(self) -> float:
+        """**幂等**：给本局所有玩家发**当季度**补贴（季初现金注入，不进结算）。
+
+        ★ 用户拍板（S1）：
+          · 新开局（Q1）→ 发一次；
+          · 每次 `advance` 结算完（`end_quarter` 已推进 `quarter`）→ 发下一季补贴；
+          · **不在 `_run` 里发**（那里现在只算市场/税/GDP，`rep.subsidy` 恒 0）；
+          · **加载旧档不补发** —— 本函数只在"创建"与"推进"两个时点被调用，
+            旧档的现金里**含**它历次已发的补贴，不重复。
+
+        ⚠️ 幂等性来自**调用点**而非内部记账：每个时点**恰好**调一次。
+           每次**重复调用**（同锁内）都会再发一份 —— 由 server/registry/
+           `_resolve_unlocked` 的顺序保证"只会调一次"（见那两处的注释）。
+        """
+        amount = float(self.cfg.subsidy_for_quarter(self.state.world.quarter))
+        if amount == 0.0:
+            return 0.0
+        for player in self.state.players.values():
+            player.cash += amount
+        return amount
 
     # ── 读 ────────────────────────────────────────────────
 
@@ -214,7 +286,7 @@ class GameSession:
 
         # ── 准备参数（**锁外**纯搬运，无判定）────────────────
         if kind == "news":
-            facts = self._facts_for(player_id, rep_obj)
+            facts = self._facts_for(player_id, rep_obj, rep_dict)
         else:
             facts = None
         try:
@@ -277,12 +349,15 @@ class GameSession:
             return None
         return fn
 
-    def _facts_for(self, player_id: str, rep_obj):
-        """新闻事实包（直接走引擎 `news_facts`；`rep_obj` 为 None → None）。
+    def _facts_for(self, player_id: str, rep_obj, rep_dict=None):
+        """新闻事实包（直接走引擎 `news_facts`；`rep_obj`/`rep_dict` 都 None → None）。
 
-        ⚠️ 若 `news_facts` 自己抛错（比如另一路正改 `engine/news.py`
-        改到一半），**不**让 `/state` 崩——如实 None，空态交给前端。
+        ⚠️ 读档后 `raw_reports` 通常为空，但 `state.report` 是 dict；
+          这里把 dict 适配成 news_facts 需要的只读视图，避免「读档后新闻永远
+          生成不出来」。
         """
+        if rep_obj is None and rep_dict is not None:
+            rep_obj = _report_view_from_dict(rep_dict)
         if rep_obj is None:
             return None
         from engine import news as _news_mod
@@ -483,6 +558,12 @@ class GameSession:
 
         self.plans.clear()
         self.phase = SessionPhase.REPORT
+
+        # ★ 2026-10-18 S1：季度推进完（`advance` 已把 `quarter +1`）→
+        #   立刻发**新一季度**的季初补贴。锁内、结算之后、存档之前，
+        #   保证"落盘的现金"含这笔。幂等来自"每次 _resolve 恰好这一行调一次"。
+        self.credit_opening_subsidy()
+
         self._save_unlocked()          # ★ 结算完立刻全量快照（锁内）
         first = sorted(self.state.raw_reports)[0]
         return self.state.raw_reports[first]

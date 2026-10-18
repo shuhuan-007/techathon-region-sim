@@ -263,23 +263,52 @@ function renderMarket(){
 
 /* ── 口粮 ─────────────────────────────────────────────── */
 const FOODS = ["A","B","C","D"];
+/* ★ 2026-10-18 · 口粮两档拆列：
+   · 需求数据源优先级：STATE.food_need（后端并行下发
+     {baseline:{A,B}, good:{A,B,C,D}, baseline_total, good_total}）
+     → 否则退回旧口径 STATE.population 乘配比 {A:.4,B:.2 / A:.4,B:.2,C:.1,D:.02}；
+   · 表头/行**拆成两列**：「合格需求」（只 A/B 有）与「优秀需求」（A/B/C/D 全有），
+     不再挤一格 "base / good"（之前 C/D 那格要么空白要么仅斜杠，玩家读不懂）；
+   · 「本季计划」输入照留（plan.food）；
+   · 兜底：两边都拿不到时该格显示 0，**不能再空白**。 */
+const FOOD_QUOTA_B = {A:0.4, B:0.2};
+const FOOD_QUOTA_G = {A:0.4, B:0.2, C:0.1, D:0.02};
+
+function _foodNeeds(){
+  const fn = (STATE && STATE.food_need) || null;
+  if (fn && (fn.baseline || fn.good)){
+    return {
+      baseline: (fn && fn.baseline) || {},
+      good:     (fn && fn.good)     || {},
+    };
+  }
+  /* 兜底：population 仍在 /state 给（compute_population 五项），按 config 配比自乘。 */
+  const pop = STATE && STATE.population;
+  const baseF = pop ? pop.baseline_food : 0;
+  const goodF = pop ? pop.good_food     : 0;
+  const baseline = {}, good = {};
+  Object.entries(FOOD_QUOTA_B).forEach(([g, q]) => { baseline[g] = q * (baseF || 0); });
+  Object.entries(FOOD_QUOTA_G).forEach(([g, q]) => { good[g]     = q * (goodF || 0); });
+  return { baseline, good };
+}
+
 function renderFood(){
-  const proj = STATE.projection;
-  const food = proj && proj.food;
-  const pop  = STATE.population;
-  const needBase = pop ? pop.baseline_food : null;
-  const needGood = pop ? pop.good_food : null;
+  /* ★ 2026-10-18 · 幸福度预览的数据源跟"本季收支预览"保持同一口径：
+       SIM.last（/api/simulate 只读试算的最新 report）优先，其次 STATE.projection。
+       之前只读 STATE.projection —— 提交过一次后玩家改口粮，幸福度一直停在旧值，
+       玩家看不到「我这么改下季会不会更幸福」。 */
+  const simFood = (SIM && SIM.last && SIM.last.food) ? SIM.last.food : null;
+  const food = simFood || (STATE.projection && STATE.projection.food) || null;
+  const needs = _foodNeeds();
 
   $("food-body").innerHTML = FOODS.map(g => {
-    const quotaB = g === "A" ? 0.4 : g === "B" ? 0.2 : null;
-    const quotaG = {A:0.4,B:0.2,C:0.1,D:0.02}[g];
-    const baseNeed = (quotaB != null && needBase != null) ? quotaB * needBase : null;
-    const goodNeed = (needGood != null) ? quotaG * needGood : null;
-    const have = food ? (food.deducted && food.deducted[g]) || 0 : null;
+    const baseNeed = needs.baseline[g];                 // A/B 有值；C/D 无 → 显示 "—"
+    const goodNeed = needs.good[g];                     // A/B/C/D 都有
     const want = plan.food[g] || 0;
     return `<tr>
       <td>${g}</td>
-      <td class="num">${baseNeed==null?"—":fmt(baseNeed)} / ${goodNeed==null?"—":fmt(goodNeed)}</td>
+      <td class="num">${baseNeed == null ? "—" : fmt(baseNeed)}</td>
+      <td class="num">${goodNeed == null ? "—" : fmt(goodNeed)}</td>
       <td><input type="number" min="0" step="0.1" value="${want || ""}"
            data-food="${g}" placeholder="0" style="width:74px"></td>
     </tr>`;
@@ -289,18 +318,33 @@ function renderFood(){
     inp.onchange = () => {
       const g = inp.dataset.food, v = Number(inp.value);
       if (v > 0) plan.food[g] = v; else delete plan.food[g];
+      /* ★ 2026-10-18：改口粮 → 立刻重画幸福度预览（不等到 runPreview 回包）。 */
+      renderFood();
       refreshPreview();
     };
   });
 
-  if (!food){
-    $("food-note").textContent = "提交计划后才能看到判定结果。";
-  } else {
-    $("food-note").innerHTML =
-      `基准档（吃饱）：<b>${food.baseline_met ? "✅ 达标" : "❌ 未达标"}</b>　`
-      + `优秀档（吃好）：<b>${food.good_met ? "✅ 达标" : "❌ 未达标"}</b>　`
-      + `→ 幸福度 <b>${fmt(food.happiness)}</b>`;
+  /* 幸福度说明：S last / projection 二选一，Δ 用 STATE.happiness 当"当前"。 */
+  const happy = food ? food.happiness : null;
+  if (happy == null){
+    $("food-note").textContent = "填好计划后（或试算回来）这里会显示预计下季幸福度。";
+    return;
   }
+  const cur = STATE && STATE.happiness;
+  const deltaTxt = (cur != null && typeof cur === "number")
+    ? (() => {
+        const d = happy - cur;
+        return `${d >= 0 ? "+" : ""}${fmt(d)}`;
+      })()
+    : "—";
+  const baseTxt = food.baseline_met === true ? "✅ 合格"
+               : food.baseline_met === false ? "❌ 未合格" : "—";
+  const goodTxt = food.good_met === true ? "✅ 优秀"
+               : food.good_met === false ? "❌ 未优秀" : "—";
+  $("food-note").innerHTML =
+    `合格档：<b>${baseTxt}</b>　优秀档：<b>${goodTxt}</b>　`
+    + `→ 预计下季幸福度 <b>${fmt(happy)}</b>`
+    + `（当前 ${fmt(cur)}，Δ${deltaTxt}）`;
 }
 
 /* ── 开局减免名额速览（★ 与报价行同源：读 build_quote.quota_by_type）──
@@ -377,28 +421,50 @@ function renderProj(){
 /* 真正摆行的那一段（SIM.last 与 STATE.projection 共用）。
    isSim=true 时来源是 QuarterReport.to_dict()：它没有 net_cash 键，
    但引擎 projection 的 net_cash 本来就是 cash_after − cash_before
-   （engine/report.py:550），此处按**同一口径**补齐，公式不自创。 */
+   （engine/report.py:550），此处按**同一口径**补齐，公式不自创。
+   ★ 2026-10-18：新增「经营盈亏」行 —— 后端 report/projection 并行给
+     `operating_profit`（销售 − 工资 − 经营费 − 非建设物资款 + 工资税回流，
+     即"不含建设和补贴的经营口径"）。后端还没下发时按同一公式兜底；**不**用
+     total_deduction 顶（它混入了建造现金/建造物资，不是经营盈亏）。 */
+function _operatingProfit(p){
+  if (!p || typeof p !== "object") return null;
+  if (typeof p.operating_profit === "number") return p.operating_profit;
+  /* 兜底（同一口径，公式与后端一致）：
+       sales_revenue − wages − operating − (materials_cost − construction_materials_cost)
+       + wage_tax_refund */
+  const pieces = [p.sales_revenue, p.wages, p.operating, p.materials_cost];
+  if (pieces.some(v => typeof v !== "number")) return null;
+  const cons = (typeof p.construction_materials_cost === "number")
+    ? p.construction_materials_cost : 0;
+  const refund = (typeof p.wage_tax_refund === "number") ? p.wage_tax_refund : 0;
+  return p.sales_revenue - p.wages - p.operating - (p.materials_cost - cons) + refund;
+}
+
 function _renderProjRows(p, isSim){
   const netCash = (p.net_cash != null)
     ? p.net_cash
     : ((p.cash_after != null && p.cash_before != null) ? p.cash_after - p.cash_before : null);
+  const opP = _operatingProfit(p);
   const rows = [
     ["物资款", fmt(p.materials_cost)],
     ["工资（税前）", fmt(p.wages)],
     ["经营费", fmt(p.operating)],
-    ["一次性扣款", "<b>" + fmt(p.total_deduction) + "</b>"],
+    ["一次性扣款（含建造）", "<b>" + fmt(p.total_deduction) + "</b>"],
     ["销售收入（本季价）", fmt(p.sales_revenue)],
     /* ★ 2026-10-18 · P0-F：工资税回流是**收入**，标"+"。 */
     ["工资税回流", "（收入，+" + fmt(p.wage_tax_refund) + "）"],
+    ["经营盈亏（不含建设/补贴）", opP == null ? "—"
+      : "<b>" + (opP >= 0 ? "+" : "") + fmt(opP) + "</b>"],
     ["期末现金", "<b>" + fmt(p.cash_after) + "</b>"],
-    ["本季盈亏", (netCash != null ? (netCash >= 0 ? "+" : "") + fmt(netCash) : "—")],
+    ["本季现金变动", (netCash != null ? (netCash >= 0 ? "+" : "") + fmt(netCash) : "—")],
     ["增加值 GDP（参考价）", fmt(p.value_added)],
   ];
   $("proj-body").innerHTML = rows.map(r =>
     `<tr><td class="muted">${r[0]}</td><td class="num">${r[1]}</td></tr>`).join("");
   $("proj-note").textContent =
     (isSim ? "只读试算（/api/simulate，未提交）。" : "") +
-    "GDP 用固定参考价 P0，与销售收入（本季成交价）是两个口径。";
+    "GDP 用固定参考价 P0，与销售收入（本季成交价）是两个口径。" +
+    "补贴季度初已发、不计入本预览。";
 }
 
 /* ── 上季报告 ─────────────────────────────────────────── */
@@ -414,13 +480,22 @@ function renderReport(){
     const out = o.output_goods ? `${o.output_goods}×${fmt(o.output_qty,1)}` : "（无产出）";
     return `${o.plot_id} → ${out}`;
   }).join("<br>") || "无";
+  /* ★ 2026-10-18：报告面板与预览同一口径 —— 经营盈亏（不含建设/补贴）单独列。 */
+  const opP = (typeof r.operating_profit === "number") ? r.operating_profit : (() => {
+    const pieces = [r.sales_revenue, r.wages, r.operating, r.materials_cost];
+    if (pieces.some(v => typeof v !== "number")) return null;
+    const cons = (typeof r.construction_materials_cost === "number") ? r.construction_materials_cost : 0;
+    const refund = (typeof r.wage_tax_refund === "number") ? r.wage_tax_refund : 0;
+    return r.sales_revenue - r.wages - r.operating - (r.materials_cost - cons) + refund;
+  })();
   $("report-body").innerHTML = `
     <table><tbody>
       <tr><td class="muted">季度</td><td class="num">第 ${r.quarter} 季</td></tr>
       <tr><td class="muted">产量</td><td class="num">${prod}</td></tr>
       <tr><td class="muted">卖出 X_t</td><td class="num">${sold}</td></tr>
-      <tr><td class="muted">一次性扣款</td><td class="num">${fmt(r.total_deduction)}</td></tr>
+      <tr><td class="muted">一次性扣款（含建造）</td><td class="num">${fmt(r.total_deduction)}</td></tr>
       <tr><td class="muted">销售收入</td><td class="num">${fmt(r.sales_revenue)}</td></tr>
+      <tr><td class="muted">经营盈亏（不含建设/补贴）</td><td class="num">${opP == null ? "—" : "<b>" + (opP >= 0 ? "+" : "") + fmt(opP) + "</b>"}</td></tr>
       <tr><td class="muted">期末现金</td><td class="num"><b>${fmt(r.cash_after)}</b></td></tr>
       <tr><td class="muted">增加值</td><td class="num">${fmt(r.value_added)}</td></tr>
       <tr><td class="muted">幸福度</td><td class="num">${r.food ? fmt(r.food.happiness) : "—"}</td></tr>
@@ -603,6 +678,15 @@ function renderBuildPanel(){
 
   const list = sel ? worksForCell() : [];
   const p = (STATE.plots || []).find(x => x.plot_id === sel);
+
+  /* ★ 2026-10-18 · 地块名置顶：选中"已建成"的地块，先亮名字（来自
+     engine/naming.py 分配的 Plot.name，后端 STATE.plots[].name 直出）。
+     空地/未命名回退到空串（不显示），避免误导。 */
+  const nameStrip = $("plot-name-strip");
+  if (nameStrip){
+    if (sel && p && p.name) nameStrip.textContent = `「${p.name}」`;
+    else nameStrip.textContent = "";
+  }
 
   if (!sel){
     $("sel-work").innerHTML = `<option value="">—</option>`;
@@ -843,6 +927,8 @@ function schedulePreview(){
     return;
   }
   renderProj();                  // ★ P0-B：计划刚变 → 立刻先切到「试算中…」
+  renderFood();                  /* ★ 2026-10-18：计划改动 → 幸福度预览也立刻切到
+                                    「填好计划后…/当前值」（不等 runPreview 回包） */
   if (SIM.inflight){ SIM.pending = true; return; }   // 在飞 → 排队即可
   if (SIM.timer) clearTimeout(SIM.timer);
   SIM.timer = setTimeout(() => { SIM.timer = null; runPreview(); }, SIM_DEBOUNCE_MS);
@@ -879,6 +965,7 @@ async function runPreview(){
   }
   renderPreviewLine();
   renderProj();                    // ★ P0-B：试算成功（SIM.last）/失败（SIM.fail+reason）都立刻上预览面板
+  renderFood();                    /* ★ 2026-10-18：幸福度预览同步跟上（同一口径 SIM.last||projection） */
   renderTop();                     /* ★ 2026-10-18：让 ⚡ 平均效率跟上 SIM.last */
   /* 飞行期间排队过一次 → 只补一发最新（不发两轮） */
   if (SIM.pending){ SIM.pending = false; schedulePreview(); }
@@ -1094,16 +1181,42 @@ $("btn-report").onclick = () => {
 /* ══════════════════════════════════════════════════════════
    五、AI 秘书 —— **一个聊天式对话框**(§11.4:AI 只起草,提交永远是玩家的动作)
    ══════════════════════════════════════════════════════════ */
-/* 把 AI 起草的 suggested_plan 落进前端既有的待提交 plan（与 /api/submit 同形）。
-   地图/建造面板/本季安排/口粮/预览 全靠既有 renderAll() 显示。 */
+/* 把 AI 起草的 suggested_plan **合并**进前端既有的待提交 plan（与 /api/submit 同形）。
+   ★ 2026-10-18：不再 `resetPlan()` 清空玩家已有安排 ——
+     · plot_plans / food / purchases：**逐键合并**（AI 的键覆盖玩家同键；玩家其它键保留）；
+     · builds：**按 plot_id 合并** —— 新条目覆盖玩家同 plot_id 的旧条；玩家没有冲突的旧条保留；
+     · contracts：**仅有值才替换**（AI 没给 contracts → 玩家已有 contracts 不动）。
+   之前的"应用 AI 计划 = 重置 + 覆盖"会把玩家点好的建造/开工全抹掉，不符合
+   「AI 只起草，玩家持有主导权」的口径（§11.4）。 */
 function applySuggestedPlan(sp){
-  resetPlan();
-  // 只抄已知的五个键；其它键（player_id 之类）由 publicPlan() 自己补。
-  plan.plot_plans = (sp && typeof sp.plot_plans === "object" && sp.plot_plans) ? sp.plot_plans : {};
-  plan.purchases  = (sp && typeof sp.purchases  === "object" && sp.purchases)  ? sp.purchases  : {};
-  plan.food       = (sp && typeof sp.food       === "object" && sp.food)       ? sp.food       : {};
-  plan.builds     = Array.isArray(sp && sp.builds)    ? sp.builds    : [];
-  plan.contracts  = Array.isArray(sp && sp.contracts) ? sp.contracts : [];
+  if (!sp || typeof sp !== "object") return;
+  /* plot_plans / food / purchases：逐键合并 */
+  if (sp.plot_plans && typeof sp.plot_plans === "object"){
+    Object.entries(sp.plot_plans).forEach(([pid, v]) => { plan.plot_plans[pid] = v; });
+  }
+  if (sp.purchases && typeof sp.purchases === "object"){
+    Object.entries(sp.purchases).forEach(([g, v]) => { plan.purchases[g] = v; });
+  }
+  if (sp.food && typeof sp.food === "object"){
+    Object.entries(sp.food).forEach(([g, v]) => {
+      const num = (typeof v === "number") ? v : Number(v);
+      if (num > 0) plan.food[g] = num; else delete plan.food[g];
+    });
+  }
+  /* builds：按 plot_id 合并 —— 新覆盖同 ID，其它保留。 */
+  if (Array.isArray(sp.builds)){
+    sp.builds.forEach(b => {
+      if (!b || b.plot_id == null) return;
+      const pid = String(b.plot_id);
+      const idx = plan.builds.findIndex(x => x && String(x.plot_id) === pid);
+      if (idx >= 0) plan.builds.splice(idx, 1, b);   // 覆盖同 plot_id
+      else plan.builds.push(b);                       // 新增
+    });
+  }
+  /* contracts：AI 给了才整组替换；没给就不动玩家已有 contracts。 */
+  if (Array.isArray(sp.contracts)){
+    plan.contracts = sp.contracts;
+  }
 }
 
 /* ── 机制题 / 规划题分流（与后端同一套关键词；前端先判一版，后端仍可改判）──
@@ -1269,12 +1382,13 @@ $("btn-ai-send").onclick = async () => {
       const why = (typeof adv.why === "string" && adv.why.trim()) ? adv.why.trim() : "";
 
       /* ★ 不覆盖玩家手填的草稿：本地已有任何东西 → 先问；不答应就**一个字都不落表**，
-         只把 AI 的 summary / 校正说明留在气泡里给她参考。 */
+         只把 AI 的 summary / 校正说明留在气泡里给她参考。
+         ★ 2026-10-18：applySuggestedPlan 改为**合并**（不 resetPlan），文案改为「合并进来」。 */
       const hadLocal = !planEmpty();
       if (hadLocal){
         const ok = window.confirm(isRemove
           ? "AI 要撤销部分建造并保留其余安排，应用吗？"
-          : "你已经有本地草稿。应用 AI 的计划会替换/编辑它，继续吗？");
+          : "你已经有本地草稿。应用 AI 的计划会把它合并进来（不覆盖你已有的建造/开工），继续吗？");
         if (!ok){
           status.textContent = "已保留你的草稿（AI 计划未落表）";
           let kept = "已保留你的草稿；这次没有落表。\n\n" + summary;
@@ -1314,7 +1428,7 @@ $("btn-ai-send").onclick = async () => {
         "",
         (model ? `模型：${model}${ruleKey ? " · " + ruleKey : ""}` : "") +
         `\n——这是 AI 起草的，你可以改；提交仍由你点「▶ 推进本季度」。` +
-        (hadLocal ? `\n（提醒：按你确认，之前攒的本地草稿已被这份计划替换。）` : ""));
+        (hadLocal ? `\n（提醒：AI 计划已**合并**到你已有的安排里——你自己的建造/开工仍在，新条目按地块覆盖同名老条目。）` : ""));
       return;
     }
 
@@ -1339,21 +1453,26 @@ $("btn-ai-send").onclick = async () => {
   }
 };
 
-/* 输入框里 Ctrl/Cmd+Enter 也发送（回车换行、快捷键提交，桌面惯例）。 */
+/* 输入框按键：
+     · Enter           → **直接发送**（2026-10-18 起）；
+     · Shift+Enter     → 换行（不发送）；
+     · Ctrl/Cmd+Enter  → 也发送（老快捷键保留，不冲突）；
+     · 输入法 composing（IME 选词中）→ **不发送**，避免打字到一半飞了。 */
 $("ai-input").addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter"){
-    e.preventDefault();
-    $("btn-ai-send").click();
-  }
+  if (e.key !== "Enter") return;
+  /* IME 正在组词（中文/日文/韩文输入）：this Enter 是确认候选字，不是发送。 */
+  if (e.isComposing) return;
+  if (e.shiftKey) return;                        // Shift+Enter = 换行
+  e.preventDefault();
+  $("btn-ai-send").click();
 });
 
-/* 开局/读档后第一次在秘书框里给一句问候（没有历史时才给）。 */
+/* 开局/读档后第一次在秘书框里给一句问候（没有历史时才给）。
+   ★ 2026-10-18：精简到一句，第二段（"起草就直接填到界面…"）删除。 */
 function aiGreet(){
   if (AI_LOG.length) return;
   aiBubble("ai",
-    "你好，我是你的 AI 秘书。问问题、要建议、让我起草本季计划都行。\n" +
-    "我起草的计划会**直接填到界面**上，你可以再改；" +
-    "**提交永远由你点「▶ 推进本季度」**（§11.4，我无 commit）。");
+    "你好，我是你的 AI 秘书。问问题、要建议、让我起草本季计划都行。");
 }
 
 /* ══════════════════════════════════════════════════════════

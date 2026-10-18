@@ -134,9 +134,9 @@ def test_ramp_advances_after_each_production_quarter():
             f"Q{quarter} 的 E_磨合 应为 {ramp}，实得 {eff['ramp_up']} —— "
             f"running_quarters 是否没推进？"
         )
-        # E = ramp × E_幸福(0.9)，验证报告里的 E 与分量一致
-        assert abs(rep.production[0].efficiency - ramp * 0.9) < TOL, (
-            f"Q{quarter} 的 E 应等于 ramp×0.9"
+        # E = ramp × E_幸福（低幸福会线性下探，不能写死 0.9）
+        assert abs(rep.production[0].efficiency - ramp * eff["happiness"]) < TOL, (
+            f"Q{quarter} 的 E 应等于 ramp×E_幸福 = {ramp}×{eff['happiness']}"
         )
         assert plot.running_quarters == rq_after, (
             f"Q{quarter} 生产之后 rq 应为 {rq_after}，实得 {plot.running_quarters}"
@@ -190,7 +190,53 @@ def test_failed_settlement_does_not_advance_ramp():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 四、命令行
+# 四、★ S4（2026-10-18）：低幸福线性下探
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_happiness_factor_below_baseline_drops_linearly():
+    """★ 用户拍板：H < 0.6 时 E_幸福 从 0.90 下探（断点式下限改成线性）。
+
+    新公式（S4）：
+        H ≥ 0.6 → 0.90 + (H−0.6)×0.5          （M1 不动：.6→.9、.8→1.0 原样）
+        H < 0.6 → floor × max(0,H) / baseline = 0.90 × H/0.6
+
+    断言三点：
+      · H=0.41 → 0.615，**严格小于** 0.90（旧断点 0.90 会被它逼出来）
+      · H=0.8  → 1.0（M1 锚点，S4 不许改它）
+      · H=0.6  → 0.9（与旧公式无缝相接）
+    """
+    cfg = load_config()
+    eff = cfg.efficiency
+
+    # ── ① H=0.41：线性下探，< 0.9 ──────────────────────────
+    got = eff.happiness_factor(0.41)
+    assert got < 0.9, (
+        f"★ H=0.41 时 E_幸福应**严格小于**旧断点 0.9（旧下限被改成线性下探了），实得 {got}"
+    )
+    assert abs(got - 0.90 * 0.41 / 0.6) < TOL, (
+        f"H=0.41 应为 0.90×0.41/0.6 = {0.90 * 0.41 / 0.6}，实得 {got}"
+    )
+
+    # ── ② H=0.8：仍是 M1 锚点 1.0（旧公式一字未动）─────────
+    assert abs(eff.happiness_factor(0.8) - 1.0) < TOL, (
+        f"H=0.8 应为 1.0（0.9 + 0.2×0.5），实得 {eff.happiness_factor(0.8)}"
+    )
+
+    # ── ③ H=0.6 连续（两条公式在断点相连，不许跳）─────────
+    assert abs(eff.happiness_factor(0.6) - 0.9) < TOL, (
+        f"H=0.6 应为 0.9，实得 {eff.happiness_factor(0.6)}"
+    )
+
+    # ── ④ 负 H / 0 兜底：不炸、给 0（清一色的边界口径）──
+    assert abs(eff.happiness_factor(0.0) - 0.0) < TOL
+    assert abs(eff.happiness_factor(-0.3) - 0.0) < TOL, (
+        "H<0 时应被 max(0,H) 兜到 0（不构造负效率）"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 五、命令行
 # ══════════════════════════════════════════════════════════════════
 
 
