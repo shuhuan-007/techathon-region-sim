@@ -1412,6 +1412,148 @@ def test_route_mode_forces_draft_and_passes_current_plan():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 九、★ 口粮绝对量（2026-10-18 D3）
+# ══════════════════════════════════════════════════════════════════
+#
+# 用户原话：「AI 还是不会填粮食。**比例对了，但没法读取优秀需要多少
+# 进行准确填写。**」
+#   · answer 分支原来只回 `A×0.4F_优秀…`（比例），没有本局的量；
+#   · 起草成功的 summary 只说「已起草：N 条建造…」，从不提口粮。
+# 三条验收：
+#   ① answer 分支在配比之后必须给**本局绝对量**（且量真按「配比 × F」算）；
+#   ② 人口 0 时明说「没有吃饭人口，本季口粮需求为 0」，不许套公式假装有量；
+#   ③ 起草成功的 summary 必须报口粮 + H（H 取试算真值，不硬编码档位）。
+
+
+def _pure_food_answer(session) -> str:
+    """问「粮食怎么算」→ 取 ai_host 兜底（规则原文）出来的答案文本。
+
+    FakeClient 的固定建议里没有 `F_基准` / `0.4` → `_mentions_rule_terms`
+    判为答偏 → 走 `_rule_answer_text`（不起真网关、不联网）。
+    """
+    fake = FakeClient()
+    out = ai_host.advise(session, "p1", "粮食怎么算", client=fake, draft=False)
+    assert out["ok"] is True, out
+    return out["summary"]
+
+
+def test_rule_answer_text_includes_current_absolute_food_amounts():
+    """★ D3-①：问口粮「怎么算」时，答案必须带**本局绝对量**，不能只有比例。
+
+    断言两件事：
+      ① 文本里有「当前局面」与「优秀档本季需」和四样具体数字；
+      ② 数字**真按 `配比 × F_优秀` 算**（拿答案里写的 F_优秀 反推校验），
+         防止把 `0.4` / `0.1` 这类比例当成数量抄出来。
+    """
+    import re
+
+    session = _mid_session()   # 5 块运行地块 → 人口 > 0，才有绝对量可说
+    summary = _pure_food_answer(session)
+
+    assert "当前局面" in summary, f"answer 分支缺当期数字行：{summary}"
+    assert "优秀档本季需" in summary, f"answer 分支缺绝对量：{summary}"
+    # 比例公式仍在（先讲清怎么算，再给本局的数）
+    assert "A×0.4F" in summary, f"原配比公式被冲掉了：{summary}"
+
+    # 只在「当前局面：…」那一段里取数（前面的公式里有 F_优秀=1.5×F_基准）
+    at = summary.index("当前局面")
+    current = summary[at:]
+    m = re.search(r"F_优秀=([0-9.]+)", current)
+    assert m, f"当期行缺 F_优秀：{summary}"
+    good_food = float(m.group(1))
+    amounts = {
+        goods: float(qty)
+        for goods, qty in re.findall(r"([ABCD]) ([0-9.]+)", current)
+    }
+    quota = load_config().food.good_quota or {}
+    assert set(quota) <= set(amounts), (
+        f"优秀档四样必须都给出：quota={quota}、实得 amounts={amounts}\n{summary}"
+    )
+    for goods, ratio in sorted(quota.items()):
+        expect = float(ratio) * good_food
+        assert abs(amounts[goods] - expect) <= 0.01, (
+            f"{goods} 的量应为 {ratio}×F_优秀={expect:.3f}，答案里写的是 "
+            f"{amounts[goods]}（{summary}）"
+        )
+
+
+def test_rule_answer_text_zero_population_says_no_diners():
+    """★ D3-②：人口 0（开局空地）时明说「没有吃饭人口，本季口粮需求为 0」，
+    **不许**给出四样数量（那会变成编数字）。"""
+    app = _fresh_app()
+    session = _fresh_session(app)   # 一块地都没有 → 人口 0
+    summary = _pure_food_answer(session)
+
+    assert "没有吃饭人口" in summary, f"人口 0 必须明说：{summary}"
+    assert "需求为 0" in summary, f"人口 0 必须给出口粮需求 0：{summary}"
+    assert "优秀档本季需" not in summary, (
+        f"人口 0 不该报四样数量（否则是编的）：{summary}"
+    )
+
+
+def test_draft_summary_reports_food_quantities_and_happiness():
+    """★ D3-③：起草成功后的 summary 必须说清口粮结论（数量 + H）。
+
+    用假模型起草（问题里不带「优秀」关键词 → 编译器按默认优秀档补齐），
+    断言 summary 含「口粮」、含 Plan.food 里各商品的**实际数量**、且带 H。
+    """
+    import re
+
+    session = _mid_session(cash=10000.0)   # 足现金 → 优秀档配齐，不被缩量
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps({"why": "按优秀档补口粮。"}, ensure_ascii=False),
+    ))
+    out = ai_host.advise(
+        session, "p1", "帮我起草本季计划",
+        client=fake, draft=True, current_plan=_mid_current_plan(),
+    )
+    assert out["ok"] is True, out
+    plan = out["suggested_plan"]
+    assert plan is not None, f"应编译成功：issues={out.get('plan_issues')}"
+
+    summary = out["summary"]
+    assert "口粮" in summary, f"起草摘要没提口粮：{summary!r}"
+    m = re.search(r"H=([0-9.]+)", summary)
+    assert m, f"起草摘要缺 H 描述：{summary!r}"
+    # 数量必须取自 Plan.food（实际填的那份），不是另一套推算
+    food = plan["food"]
+    for goods in ("A", "B", "C", "D"):
+        assert food.get(goods, 0) > 0, f"足现金应补齐优秀档四样：{food}"
+        token = f"{goods} {ai_host._qty_text(food[goods])}"
+        assert token in summary, f"摘要缺 {token}：{summary!r}"
+    h = float(m.group(1))
+    assert 0.99 <= h <= 1.0, f"足现金时应到优秀档（H≈1.0），实得 {h}：{summary!r}"
+    assert "优秀档配齐" in summary, f"应说明按优秀档配齐：{summary!r}"
+
+
+def test_food_plan_line_follows_actual_h_not_hardcoded_tier():
+    """★ D3-③ 的档位判定：三档措辞跟**实际 H** 走（不硬编码 0.6 / 1.0 文案），
+    且 preview 里没有 H 时**只报数量、不编档位**。"""
+    food = {"A": 2.64, "B": 1.32, "C": 0.66, "D": 0.132}
+
+    full = ai_host._food_plan_line(food, {"food": {"happiness": 1.0, "good_met": True}})
+    assert "优秀档配齐" in full and "H=1.0" in full, full
+    assert "A 2.64" in full and "D 0.132" in full, full
+
+    base = ai_host._food_plan_line(food, {"food": {"happiness": 0.6, "good_met": False}})
+    assert "仅到基准档" in base and "H=0.6" in base and "现金约束" in base, base
+
+    low = ai_host._food_plan_line(food, {"food": {"happiness": 0.42, "good_met": False}})
+    assert "H=0.42" in low and "减少建造" in low, low
+    assert "优秀档配齐" not in low, f"H=0.42 不该被说成配齐：{low}"
+
+    # 找不到 H → 只报数量，不编档位（也不许出现假 H）
+    unknown = ai_host._food_plan_line(food, None)
+    assert "A 2.64" in unknown and "H=" not in unknown, unknown
+
+    # 空 food（人口 0 / 没填）→ 不追加任何一句（不打扰）
+    assert ai_host._food_plan_line({}, {"food": {"happiness": 1.0}}) == ""
+    # 快照拿不到 → answer 分支宁可不给，也不编
+    assert ai_host._current_food_line(None) == ""
+
+
+# ══════════════════════════════════════════════════════════════════
 # runner（与 tests/test_ai_layer.py 同写法）
 # ══════════════════════════════════════════════════════════════════
 

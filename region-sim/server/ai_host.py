@@ -210,14 +210,17 @@ def advise(
     # ★ 可行动作快照（2026-10-18）：空地 / 可建材料 / 可开工 / 口粮需求。
     #   模型之前只能看到“自己的地块”，于是把已有地块写成 builds —— 这份快照
     #   就是给它一份“能往哪建、要花什么、哪些地能开工”的 ground truth。
+    cap: Optional[dict] = None
     cap_text = ""
     try:
         from ai.plan_context import describe_capabilities, format_capabilities
 
-        cap_text = format_capabilities(
-            describe_capabilities(session.state, player_id, session.cfg)
-        )
+        # ★ 2026-10-18 D3：快照 dict 也留一份 —— answer 分支要拿
+        #   `food_rule` 里的**当期绝对量**（只读复用，不另算公式）。
+        cap = describe_capabilities(session.state, player_id, session.cfg)
+        cap_text = format_capabilities(cap)
     except Exception as e:  # noqa: BLE001 —— 快照拿不到就诚实缺席，不编
+        cap = None
         cap_text = (
             f"[可行动作] 生成失败（{type(e).__name__}: {e}）；"
             f"不要臆造空地/成本，按上面已有的局面回答。"
@@ -225,6 +228,12 @@ def advise(
 
     # 机制问答的规则摘录：**先算好**（后面还要用它兜底校验模型有没有答到公式）
     rule_excerpts = [] if draft else _rule_excerpts(question)
+
+    # ★ 2026-10-18 D3「比例对了，但没法读取优秀需要多少」：
+    #   answer 分支原来只回 `A×0.4F_优秀…`，玩家拿不到本局的量。
+    #   这里先把绝对量算好（数字全部来自 `plan_context` 的口粮规则渲染，
+    #   口径＝本季完工后人口，与结算扣口粮是同一个数）；起草分支不需要。
+    food_line = "" if draft else _current_food_line(cap)
 
     # ★ 纯机制题（“粮食怎么算/公式是什么”）**直接回规则原文**，不调模型。
     #   2026-10-18 真跑：即使把 §3.3.3 原文塞进 user message，qwen-flash 仍答成
@@ -238,7 +247,7 @@ def advise(
         and client is llm_client
     ):
         return _ok_advice(
-            summary=_rule_answer_text(rule_excerpts),
+            summary=_rule_answer_text(rule_excerpts, food_line=food_line),
             suggested_plan=None,
             plan_source=None,
             plan_issues=None,
@@ -331,7 +340,9 @@ def advise(
     #   对“怎么算/公式/规则”这类**纯机制题**，如果模型回答没覆盖摘录里的
     #   关键公式，就直接用基线原文替换答案 —— 宁可不“会说话”，也不能答错规则。
     if rule_excerpts and not draft:
-        content = _ensure_rule_answer(content, question, rule_excerpts)
+        content = _ensure_rule_answer(
+            content, question, rule_excerpts, food_line=food_line
+        )
 
     # ── 4. draft 开路：把回答当 **Plan 候选** 解析 → 校验 → 收建议 ──
     #    ⚠️ AI 只起草数据，**绝不提交**（§11.4）：
@@ -736,8 +747,14 @@ def _mentions_rule_terms(content: str, excerpts: list[dict]) -> bool:
     return False
 
 
-def _rule_answer_text(excerpts: list[dict]) -> str:
-    """把规则摘录拼成一段可直接给玩家看的答案（原文，不改写）。"""
+def _rule_answer_text(excerpts: list[dict], *, food_line: str = "") -> str:
+    """把规则摘录拼成一段可直接给玩家看的答案（原文，不改写）。
+
+    ★ 2026-10-18 D3：口粮题（§3.3.3）在配比公式之后**追加一行当期绝对量**
+      （`food_line` 由 `_current_food_line` 从 `plan_context` 的口粮规则算好）。
+      用户原话「比例对了，但没法读取优秀需要多少」—— 只有 `A×0.4F_优秀`
+      这种比例式，玩家没法照着填；有本局的 F 与四样数量才填得准。
+    """
     parts = ["按《规则基线》原文："]
     for ex in excerpts:
         key = str(ex.get("key") or "")
@@ -746,11 +763,15 @@ def _rule_answer_text(excerpts: list[dict]) -> str:
         if key.startswith("3.3.3") or title.startswith("3.3.3"):
             # 用户要“短答、只回公式与关键数”。口粮是最高频机制题，
             # 直接给三行公式，不再把整节表格倒出来。
-            parts.append(
+            block = (
                 "§3.3.3 口粮：F_基准=(N/5)×m，F_优秀=1.5×F_基准；"
                 "基准 A×0.4F、B×0.2F，优秀再加 C×0.1F、D×0.02F"
                 "（F 是等效篮位数，不是人数）。"
             )
+            # 当期绝对量（本局真实数字）—— 拿不到就不加这一行（不编）。
+            if food_line:
+                block += "\n" + food_line
+            parts.append(block)
             continue
         if title.startswith(key):
             head = title
@@ -764,6 +785,8 @@ def _ensure_rule_answer(
     content: str,
     question: Optional[str],
     excerpts: list[dict],
+    *,
+    food_line: str = "",
 ) -> str:
     """纯机制题：模型答偏时用基线原文替换；否则保留模型回答。"""
     if not excerpts:
@@ -772,7 +795,142 @@ def _ensure_rule_answer(
         return content
     if _mentions_rule_terms(content, excerpts):
         return content
-    return _rule_answer_text(excerpts)
+    return _rule_answer_text(excerpts, food_line=food_line)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 口粮绝对量（2026-10-18 D3）—— **复用 plan_context，不另写人口 / F 公式**
+# ══════════════════════════════════════════════════════════════════
+#
+# 用户原话：「比例对了，但没法读取优秀需要多少进行准确填写。」
+# 本层只做两件事：
+#   ① answer 分支：在配比公式后补一行**本局的绝对量**（`_current_food_line`）；
+#   ② 起草成功：在摘要末尾补一句**实际填了多少、试算到几档**
+#      （`_food_plan_line`）。
+#
+# ⚠️ 数字来源钉死，别在这里自己乘：
+#   · 需求侧 —— `ai.plan_context.describe_capabilities()['food_rule']` /
+#     `['population']`（其口径＝本季**完工后**人口，与结算扣口粮同一个数；
+#     该模块正在被改成这个口径，复用它才能自动跟上）；
+#   · 实际侧 —— 编译后 `Plan.food` + `preview['food']['happiness']`（试算真值）。
+#   本层**不写**人口公式、也不写 `A×0.4F` 这类比例公式。
+
+
+def _qty_text(value) -> str:
+    """数量展示：最多 3 位小数、去掉多余的 0（`2.640 → 2.64`、`0.132 → 0.132`）。
+
+    ⚠️ 不截到 2 位：优秀档 D 这类量只有 0.132，四舍五入成 0.13 会让玩家
+       照抄后**少买**（H 反而掉档）—— 宁可多一位，也不要把数字改小。
+    """
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    text = f"{num:.3f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _f_text(value) -> str:
+    """F（等效篮位数）展示：固定 1 位小数（`166.03 → 166.0`）。"""
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _h_text(value) -> str:
+    """H 的短写法：`1.0` / `0.6` / `0.42`（不硬编码档位，只去掉多余零）。"""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    for anchor in (1.0, 0.6):
+        if abs(num - anchor) < 1e-9:
+            return f"{anchor:.1f}"
+    return f"{num:.2f}".rstrip("0").rstrip(".")
+
+
+def _current_food_line(cap: Optional[dict]) -> str:
+    """本局口粮**绝对量**一行（answer 分支用）。
+
+    只读 `describe_capabilities()` 的结果：
+    `food_rule.good_need` 就是「优秀档本季每样要多少」，`food_rule.
+    baseline_food / good_food` 是两档 F —— 与提示词里的 [口粮规则]
+    是**同一份**数字，不可能出现两套口径。
+
+    人口为 0（或快照拿不到口粮规则）：
+      · 快照整个拿不到 → `""`（宁可不给，也不编）；
+      · 有人口字段且为 0 → 明说「当前没有吃饭人口，本季口粮需求为 0」。
+    """
+    if not isinstance(cap, dict):
+        return ""
+    rule = cap.get("food_rule") or {}
+    population = cap.get("population") or {}
+    good_need = rule.get("good_need") or {}
+    try:
+        people = float(population.get("population", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        people = 0.0
+    if people <= 0 or not good_need:
+        return "当前没有吃饭人口，本季口粮需求为 0。"
+    pairs = " / ".join(
+        f"{goods} {_qty_text(qty)}" for goods, qty in sorted(good_need.items())
+    )
+    tiers = {4: "四样齐", 2: "两样齐"}.get(len(good_need), f"{len(good_need)} 样齐")
+    return (
+        f"当前局面：F_基准={_f_text(rule.get('baseline_food'))}、"
+        f"F_优秀={_f_text(rule.get('good_food'))}；"
+        f"优秀档本季需 {pairs}（{tiers} H=1.0）"
+    )
+
+
+def _food_plan_line(food: Optional[dict], preview: Optional[dict]) -> str:
+    """起草成功后追加的一句口粮结论（数字＝`Plan.food`，H＝试算/preview 真值）。
+
+    三档**按实际 H 判**，不硬编码档位：
+      · 优秀档配齐（H=1.0）      → 「口粮按优秀档配齐：A x / B x …（H=1.0）」；
+      · 只到基准（H=0.6）        → 「口粮仅到基准档（H=0.6）：现金约束，未买齐 C/D」；
+      · 被现金压缩（H<0.6）      → 「口粮被现金压缩到 H=0.xx，建议减少建造或留钱买粮」。
+    ⚠️ preview 里找不到 H → **只报数量、不编 H**（用户口径：拿不到就明说）。
+    """
+    items: dict[str, float] = {}
+    for goods, qty in (food or {}).items():
+        try:
+            amount = float(qty)
+        except (TypeError, ValueError):
+            continue
+        if amount > 0:
+            items[str(goods)] = amount
+    if not items:
+        return ""
+    pairs = " / ".join(
+        f"{goods} {_qty_text(qty)}" for goods, qty in sorted(items.items())
+    )
+
+    happiness = None
+    good_met = None
+    if isinstance(preview, dict):
+        info = preview.get("food") or {}
+        if isinstance(info, dict):
+            try:
+                happiness = float(info.get("happiness"))
+            except (TypeError, ValueError):
+                happiness = None
+            good_met = info.get("good_met")
+    if happiness is None:
+        return f"口粮已填：{pairs}（试算里没取到 H，本次不判档）。"
+
+    if good_met is True or happiness >= 1.0 - 1e-9:
+        return f"口粮按优秀档配齐：{pairs}（H={_h_text(happiness)}）"
+    if happiness >= 0.6 - 1e-9:
+        if abs(happiness - 0.6) < 1e-9:
+            head = f"口粮仅到基准档（H={_h_text(happiness)}）"
+        else:
+            head = f"口粮只到 H={_h_text(happiness)}（基准与优秀之间）"
+        return f"{head}：现金约束，未买齐 C/D"
+    return f"口粮被现金压缩到 H={_h_text(happiness)}，建议减少建造或留钱买粮"
 
 
 _CANCEL_WORDS: tuple[str, ...] = ("取消", "撤销", "删", "移除", "不要", "停掉")
@@ -1410,6 +1568,20 @@ def _draft_advice(
         if notes:
             summary += f"；引擎校正 {len(notes)} 处"
         summary += "。确认后由你提交。"
+
+    # ★ 2026-10-18 D3：「比例对了，但没法读取优秀需要多少」——起草成功后
+    #   摘要必须把**口粮结论**说清（填了多少 + 试算到几档），否则玩家只看到
+    #   「已起草：N 条建造…」，仍然不知道口粮到底够不够。
+    #   数字全部取 Plan.food 实际值与 preview 的 H；取不到 H 就只报数量。
+    food_line = _food_plan_line(
+        plan_dict.get("food"),
+        getattr(compiled, "preview", None),
+    )
+    if food_line:
+        summary = summary.rstrip()
+        if not summary.endswith(("。", "！", "？", "；", ".")):
+            summary += "。"
+        summary += food_line
 
     preview = compiled.preview or None
     if isinstance(preview, dict):

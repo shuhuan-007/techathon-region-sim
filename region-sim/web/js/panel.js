@@ -1240,10 +1240,18 @@ const AI_ACTION_WORDS = ["建","造","取消","撤销","删","安排","起草","
                          "开工","停工","买","卖","改"];
 const AI_MECHANISM_WORDS = ["怎么算","为什么","是什么","机制","规则","解释",
                             "原理","公式","多少","区别","能不能"];
+/* ★ 2026-10-18 D3：问「口粮/粮食要多少」不是机制题，是要**填数字**。
+   用户原话：「比例对了，但没法读取优秀需要多少进行准确填写。」
+   只加这一条白名单（粮食词 + 问量词），其它启发式一字不动 ——
+   不含粮食词的「服务区怎么加成」仍旧走 answer。 */
+const AI_FOOD_WORDS = ["粮","口粮","粮食","吃"];
+const AI_FOOD_ASK_WORDS = ["多少","几","够","买","要"];
 
 function detectAiMode(q){
   const s = String(q == null ? "" : q);
   if (AI_ACTION_WORDS.some(w => s.includes(w))) return "plan";
+  if (AI_FOOD_WORDS.some(w => s.includes(w))
+      && AI_FOOD_ASK_WORDS.some(w => s.includes(w))) return "plan";
   if (AI_MECHANISM_WORDS.some(w => s.includes(w))) return "answer";
   return "auto";
 }
