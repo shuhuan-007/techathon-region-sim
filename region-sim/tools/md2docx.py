@@ -298,14 +298,14 @@ def plan_column_widths(header, rows, usable_cm, size_pt):
                         "hdr": _text_width_units(header[ci], size_pt) + pad})
 
     def floor_w(n):
-        # 下限：表头不可断 + 最短可读宽度
-        return min(n["full"], max(n["hdr"], n["tok"], 1.15))
+        # 下限：表头不可断 + 最短可读宽度（单位 cm）
+        return min(n["full"], max(n["hdr"], n["tok"], 0.55))
 
     def widths_for(f):
         out = []
         for n in details:
             need = max(n["mean"], n["tok"])
-            out.append(max(floor_w(n), min(n["full"], need * f) + pad))
+            out.append(max(floor_w(n), min(n["full"], need * f + pad)))
         return out
 
     f = 1.0
@@ -333,7 +333,7 @@ def plan_column_widths(header, rows, usable_cm, size_pt):
         extra = usable_cm - total
         tot = sum(w)
         w = [x + extra * (x / tot) for x in w]
-    w = [max(0.4, x) for x in w]
+    w = [max(0.55, x) for x in w]
     scale = usable_cm / sum(w)
     if abs(scale - 1.0) > 1e-6:
         w = [x * scale for x in w]
