@@ -260,19 +260,120 @@ def align_from_sep(sep_cell, body_cell):
     return WD_ALIGN_PARAGRAPH.LEFT
 
 
-def add_table(doc, header, aligns, rows):
+def _text_width_units(text, size_pt):
+    """粗略估算文本单行占用的可用宽度（cm）。中文按 1em，ASCII 按 0.55em。"""
+    em_cm = size_pt / 72 * 2.54
+    width = 0.0
+    for ch in text:
+        if ord(ch) > 0x2E80:
+            width += em_cm
+        elif ch == " ":
+            width += em_cm * 0.28
+        else:
+            width += em_cm * 0.55
+    return width
+
+
+def _longest_token(text):
+    toks = re.split(r"[\s，。、；：（）()「」【】]+", text)
+    return max((len(t) for t in toks), default=0)
+
+
+def plan_column_widths(header, rows, usable_cm, size_pt):
+    """按内容分配列宽：代码/路径列给足宽度，短列（序号/等级）给下限。返回 (宽列表, 字号)。"""
     ncols = len(header)
+    pad = 0.34  # 左右单元格边距合计
+    details = []
+    for ci in range(ncols):
+        cells = [header[ci]] + [(r[ci] if ci < len(r) else "") for r in rows]
+        longest_line = max((_text_width_units(c.split("\n")[0], size_pt) for c in cells),
+                           default=0.0)
+        mean_line = sum(_text_width_units(c, size_pt) for c in cells) / max(len(cells), 1)
+        longest_tok = max([_text_width_units(t, size_pt)
+                           for c in cells
+                           for t in re.split(r"[\s，。；：]+", c)] or [0.0])
+        details.append({"full": longest_line + pad,
+                        "mean": mean_line + pad,
+                        "tok": longest_tok + pad,
+                        "hdr": _text_width_units(header[ci], size_pt) + pad})
+
+    def floor_w(n):
+        # 下限：表头不可断 + 最短可读宽度
+        return min(n["full"], max(n["hdr"], n["tok"], 1.15))
+
+    def widths_for(f):
+        out = []
+        for n in details:
+            need = max(n["mean"], n["tok"])
+            out.append(max(floor_w(n), min(n["full"], need * f) + pad))
+        return out
+
+    f = 1.0
+    while f > 0.55:
+        w = widths_for(f)
+        if sum(w) <= usable_cm:
+            break
+        f -= 0.03
+    w = widths_for(f)
+    total = sum(w)
+    floors = [floor_w(n) for n in details]
+    if total > usable_cm:
+        if sum(floors) >= usable_cm:
+            # 下限之和已超宽：只能等比压缩（保持各列比例，绝不出现负宽）
+            w = [x * usable_cm / total for x in w]
+        else:
+            slack = usable_cm - sum(floors)
+            over = [max(0.0, x - fl) for x, fl in zip(w, floors)]
+            so = sum(over)
+            if so <= 0:
+                w = [fl * usable_cm / sum(floors) for fl in floors]
+            else:
+                w = [fl + s * slack / so for fl, s in zip(floors, over)]
+    else:
+        extra = usable_cm - total
+        tot = sum(w)
+        w = [x + extra * (x / tot) for x in w]
+    w = [max(0.4, x) for x in w]
+    scale = usable_cm / sum(w)
+    if abs(scale - 1.0) > 1e-6:
+        w = [x * scale for x in w]
+    if f <= 0.7:
+        size = 8.5
+    elif f <= 0.9:
+        size = 9.0
+    else:
+        size = size_pt
+    return w, size
+
+
+def add_table(doc, header, aligns, rows, usable_cm=16.8):
+    ncols = len(header)
+    size_pt = 9.5
+    widths_cm, size_pt = plan_column_widths(header, rows, usable_cm, size_pt)
+
     table = doc.add_table(rows=1, cols=ncols)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.autofit = True
     set_table_borders(table)
     set_cell_margins(table)
+
+    # 关闭自动调整，写入固定列宽
+    tbl_pr = table._tbl.tblPr
+    layout = OxmlElement("w:tblLayout")
+    layout.set(qn("w:type"), "fixed")
+    tbl_pr.append(layout)
+    tbl_pr_tblw = OxmlElement("w:tblW")
+    tbl_pr_tblw.set(qn("w:w"), str(int(sum(widths_cm) * 567)))
+    tbl_pr_tblw.set(qn("w:type"), "dxa")
+    tbl_pr.append(tbl_pr_tblw)
+    for gc, wcm in zip(table._tbl.tblGrid.findall(qn("w:gridCol")), widths_cm):
+        gc.set(qn("w:w"), str(int(wcm * 567)))
 
     hdr = table.rows[0]
     repeat_header(hdr)
     prevent_row_split(hdr)
     for i, text in enumerate(header):
         cell = hdr.cells[i]
+        cell.width = Cm(widths_cm[i])
         cell_shade(cell, HEADER_FILL)
         para = cell.paragraphs[0]
         para.alignment = aligns[i] if i < len(aligns) else WD_ALIGN_PARAGRAPH.LEFT
@@ -281,7 +382,7 @@ def add_table(doc, header, aligns, rows):
         para.paragraph_format.line_spacing = 1.15
         cleaned = text.replace("**", "")
         run = para.add_run(cleaned)
-        set_run_font(run, LATIN_FONT, 9.5, bold=True, color=RGBColor(0xFF, 0xFF, 0xFF))
+        set_run_font(run, LATIN_FONT, size_pt, bold=True, color=RGBColor(0xFF, 0xFF, 0xFF))
 
     for ridx, row in enumerate(rows):
         cells = table.add_row()
@@ -289,6 +390,7 @@ def add_table(doc, header, aligns, rows):
         for i in range(ncols):
             text = row[i] if i < len(row) else ""
             cell = cells.cells[i]
+            cell.width = Cm(widths_cm[i])
             if ridx % 2 == 1:
                 cell_shade(cell, ZEBRA_FILL)
             para = cell.paragraphs[0]
@@ -296,7 +398,13 @@ def add_table(doc, header, aligns, rows):
             para.paragraph_format.space_before = Pt(2)
             para.paragraph_format.space_after = Pt(2)
             para.paragraph_format.line_spacing = 1.15
-            add_inline(para, text, size=9.5)
+            add_inline(para, text, size=size_pt)
+
+    # 只让表头行与其后一行保持同页（防止表头孤立在页底）；
+    # 不整表锁死，否则长表会被整块推到下一页、留下大片空白。
+    for cell in table.rows[0].cells:
+        for para in cell.paragraphs:
+            para.paragraph_format.keep_with_next = True
     return table
 
 
@@ -344,11 +452,12 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str = None):
     sec = doc.sections[0]
     sec.page_width = Cm(21.0)
     sec.page_height = Cm(29.7)
-    sec.left_margin = Cm(2.2)
-    sec.right_margin = Cm(2.0)
+    sec.left_margin = Cm(1.8)
+    sec.right_margin = Cm(1.8)
     sec.top_margin = Cm(2.2)
     sec.bottom_margin = Cm(2.0)
     add_page_number_footer(sec)
+    usable_cm = (sec.page_width - sec.left_margin - sec.right_margin) / 360000
 
     add_title_block(doc, title, subtitle)
 
@@ -402,7 +511,7 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str = None):
                         body = r[k]
                         break
                 aligns.append(align_from_sep(sep[k] if k < len(sep) else "", body))
-            add_table(doc, header, aligns, rows)
+            add_table(doc, header, aligns, rows, usable_cm=usable_cm)
             stats["tables"] += 1
             stats["table_rows"] += len(rows)
             # 表后留白

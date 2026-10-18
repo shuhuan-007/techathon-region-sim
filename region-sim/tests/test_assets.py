@@ -25,6 +25,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -138,6 +140,17 @@ def test_manifest_keys_exactly_expected_20():
     assert len(man) == 20
 
 
+
+# 3D 资产（21 个 glb / 533MB）刻意不入 git；**干净克隆**下 web/assets/plots/ 是空的，
+# 此时 manifest 的 exists 合法地为 False —— 这条断言只在资产齐备的机器上生效。
+_ASSETS_PRESENT = any(
+    (Path(__file__).resolve().parent.parent / "web" / "assets" / "plots").glob("*.glb")
+)
+
+
+@pytest.mark.skipif(
+    not _ASSETS_PRESENT, reason="3D glb 未入 git（533MB）；干净克隆下按设计跳过"
+)
 def test_manifest_shape_file_path_exists():
     man = report.asset_manifest()
     for key, entry in man.items():

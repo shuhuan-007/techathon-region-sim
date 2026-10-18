@@ -16,6 +16,8 @@ import copy
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.loader import Config, load_config
@@ -33,6 +35,22 @@ from ai import rules_digest
 from tests.test_m1 import make_state, mature, plain_plan
 
 TOL = 1e-6
+
+
+@pytest.fixture(autouse=True)
+def _rebaseline_ai_boundary():
+    """整库连跑时，别的测试文件可能已经 import 了 server.* / storage ——
+    按 ai/tools.py 的口径，那些属于"进程里早就有的"，**不算 ai/ 的账**。
+    每个用例开始时把基线重置为当前进程快照，等价于本文件隔离单跑。
+    """
+    from ai import tools as _tools
+
+    saved = _tools._LOADED_AT_AI_IMPORT
+    _tools._LOADED_AT_AI_IMPORT = frozenset(sys.modules)
+    try:
+        yield
+    finally:
+        _tools._LOADED_AT_AI_IMPORT = saved
 
 
 def cfg_with_example_elasticity() -> Config:
@@ -111,8 +129,14 @@ def test_self_check_catches_blacklist_module_loaded():
 
     fake_name = "storage"  # 黑名单按模块整名匹配（含子模块）
     saved = sys.modules.get(fake_name, "__absent__")
+    tools_mod = sys.modules["ai.tools"]
+    baseline = tools_mod._LOADED_AT_AI_IMPORT
     sys.modules[fake_name] = types.ModuleType(fake_name)
     try:
+        # 整库连跑时 storage 可能已被别的测试文件 import（＝"进程里早就有的"），
+        # 本用例要验的是「**新出现**的黑名单模块必须被拦下」，
+        # 所以把它从基线里摘掉，模拟它确实是刚刚才加载的。
+        tools_mod._LOADED_AT_AI_IMPORT = baseline - {fake_name}
         raised = False
         try:
             assert_import_boundary()
@@ -121,6 +145,7 @@ def test_self_check_catches_blacklist_module_loaded():
             assert "storage" in str(exc)
         assert raised, "★ 缺陷：黑名单模块 storage 已加载，自检却没有拦下"
     finally:
+        tools_mod._LOADED_AT_AI_IMPORT = baseline
         if saved == "__absent__":
             sys.modules.pop(fake_name, None)
         else:
