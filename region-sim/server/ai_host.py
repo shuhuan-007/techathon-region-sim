@@ -963,34 +963,168 @@ def _market_lines(
     return body
 
 
+#: 地块**逐块明细**的块数上限：≤ 这个数保留每块一行，超过则聚合。
+#:
+#: ★ 为什么用阈值而不是一律聚合（2026-10-18 修 8550 的 500）：
+#:   · 小局（≤30 块）的明细里有坐标 / u / 本季产出预览 —— AI 讨论
+#:     “哪块该开、哪块该升”时要能**指着地说**，聚合掉就答不具体了；
+#:   · 大局每行长得几乎一样，100 行 ≈ 4.2k 字符，既撑爆体积闸，模型也
+#:     读不出“哪类有几块”（这才是它做判断真正要的分布）。
+#:   · 30 是**可读 × 体积**的折中：30 行明细约 1.3k 字符，加核心/价格/
+#:     可建仍稳在 4000 以内；再多，AI 该看的是聚合分布，单块细节走试算。
+_PLOT_DETAIL_MAX = 30
+
+#: 聚合行的中文标签。**没配的类型/状态原样回退**（不吞、不编）。
+_PLOT_TYPE_ZH = {
+    "agriculture": "农业",
+    "resource": "资源",
+    "industry": "工业",
+    "service": "服务",
+    "research": "研究",
+}
+_PLOT_STATUS_ZH = {
+    "running": "运行中",
+    "constructing": "在建",
+    "empty": "空地",
+}
+_PLOT_TYPE_ORDER = {
+    "agriculture": 0, "resource": 1, "industry": 2, "service": 3, "research": 4,
+}
+_PLOT_STATUS_ORDER = {"constructing": 0, "running": 1, "empty": 2}
+
+
+def _enum_value(v):
+    """Enum 或原值 → 字符串值（state_for 给的是字符串，测试夹具可能是 Enum）。"""
+    return getattr(v, "value", v)
+
+
+def _pct(rate) -> str:
+    """0.075 → ``7.5%``（能整除就不带小数）。**只改展示，不改数。**"""
+    try:
+        value = float(rate) * 100.0
+    except (TypeError, ValueError):
+        return str(rate)
+    if abs(value - round(value)) < 1e-9:
+        return f"{int(round(value))}%"
+    return f"{value:.2f}".rstrip("0").rstrip(".") + "%"
+
+
+def _plot_bonus(p: dict):
+    """一块地的「服务」相关数字 → ``(标签, 值)``；没有就 None。
+
+    · 服务地块自己：``service_rate``（它能给出去多少）；
+    · 非服务地块：``service_bonus``（它从相邻服务拿到的邻接加成）。
+    """
+    eff = p.get("efficiency")
+    if not isinstance(eff, dict):
+        return None
+    ptype = _enum_value(p.get("plot_type"))
+    if ptype == "service":
+        rate = eff.get("service_rate")
+        return ("服务率", float(rate)) if rate else None
+    bonus = eff.get("service_bonus")
+    return ("服务邻接+", float(bonus)) if bonus else None
+
+
+def _aggregate_plot_lines(plots: list[dict]) -> list[str]:
+    """把地块按 ``(类型, 产物, 等级, 状态, 在建剩余季)`` 分组，每组一行。
+
+    保留 AI 真用得上的四样：类型+产物、等级、块数、在建剩余季数；
+    地块自己/邻居带来的服务邻接加成（若有）也带上。坐标、u、产出预览
+    一律省略 —— 大局里它们是噪声，要看细节走试算。
+    """
+    groups: dict[tuple, dict] = {}
+    for p in plots:
+        ptype = _enum_value(p.get("plot_type")) or "?"
+        product = p.get("product")
+        level = p.get("level")
+        status = _enum_value(p.get("status")) or "?"
+        left = p.get("construction_left") if status == "constructing" else None
+        key = (ptype, str(product) if product else "", level, status, left)
+        group = groups.setdefault(key, {"count": 0, "bonus_kind": None, "bonus": set()})
+        group["count"] += 1
+        bonus = _plot_bonus(p)
+        if bonus:
+            kind, value = bonus
+            group["bonus_kind"] = kind
+            group["bonus"].add(round(value, 9))  # 去掉 float 尾巴再比
+
+    def _sort_key(item):
+        (ptype, product, level, status, left), _ = item
+        return (
+            _PLOT_TYPE_ORDER.get(ptype, 99),
+            product,
+            level if isinstance(level, int) else -1,
+            _PLOT_STATUS_ORDER.get(status, 99),
+            left if isinstance(left, int) else -1,
+        )
+
+    rows: list[str] = []
+    for (ptype, product, level, status, left), group in sorted(
+        groups.items(), key=_sort_key
+    ):
+        type_zh = _PLOT_TYPE_ZH.get(ptype, str(ptype))
+        label = f"{type_zh}{product}" if product else type_zh
+        level_zh = f"{_fmt(level)}级" if level is not None else "?级"
+        status_zh = _PLOT_STATUS_ZH.get(status, str(status))
+        if status == "constructing" and left is not None:
+            status_zh = f"在建 {_fmt(left)} 季"
+        suffix = ""
+        values = sorted(group["bonus"])
+        if values:
+            kind = group["bonus_kind"] or ""
+            if len(values) == 1:
+                suffix = f"，{kind}{_pct(values[0])}"
+            else:
+                suffix = f"，{kind}{_pct(values[0])}~{_pct(values[-1])}"
+        rows.append(
+            f"{label}×{group['count']}（{level_zh}，{status_zh}{suffix}）"
+        )
+    return rows
+
+
 def _plot_lines(state: dict) -> list[str]:
     """本地地块块：只画玩家**自己的**地（state['plots'] 本来就只有自己的）。
 
-    ★ 每块一行：plot_id / 类型 / 等级 / 状态 / 开工 u / 本季产出预览。
-       efficiency 的四分量拆解、running_quarters 那些给前端悬停看的，
-       不进对话 —— AI 要细节时用试算，不把整张表灌进来。
+    ★ 两档（阈值见 `_PLOT_DETAIL_MAX`）：
+      · ≤30 块：**每块一行**，保留 plot_id / 类型 / 等级 / 状态 / 开工 u /
+        本季产出预览 —— 小局要能指着具体地块说话；
+      · >30 块：按 ``(类型, 产物, 等级, 状态)`` **聚合**，如
+        ``工业G×21（1级，运行中）``、``农业D×2（1级，在建 1 季）``，
+        不再一块一行（100 块 4.2k 字符会撑爆体积闸，模型也读不出分布）。
+
+    efficiency 的四分量拆解、running_quarters 那些给前端悬停看的，
+    两档都不进对话 —— AI 要细节时用试算，不把整张表灌进来。
     """
     plots = state.get("plots")
     if not isinstance(plots, list):
         return []
-    rows: list[str] = []
-    for p in plots:
-        if not isinstance(p, dict):
-            continue
-        u = p.get("u")
-        prev = p.get("output_preview") or {}
-        qty = prev.get("qty")
-        produce = (
-            f"产{prev.get('goods')}×{_fmt(qty)}" if prev.get("goods") else "无产出"
-        )
-        rows.append(
-            f"{p.get('plot_id')}|{p.get('plot_type')}|L{p.get('level')}|"
-            f"{p.get('status')}|产出{p.get('product')}|"
-            f"u={_fmt(u) if u is not None else 'null'}|{produce}"
-        )
+    rows = [p for p in plots if isinstance(p, dict)]
     if not rows:
         return ["[地块] （还没有任何地块）"]
-    return [f"[地块·{len(rows)}块] id|类型|级|状态|产出|u|本季预览", *rows]
+    if len(rows) <= _PLOT_DETAIL_MAX:
+        detail: list[str] = []
+        for p in rows:
+            u = p.get("u")
+            prev = p.get("output_preview") or {}
+            qty = prev.get("qty")
+            produce = (
+                f"产{prev.get('goods')}×{_fmt(qty)}"
+                if prev.get("goods") else "无产出"
+            )
+            detail.append(
+                f"{p.get('plot_id')}|{p.get('plot_type')}|L{p.get('level')}|"
+                f"{p.get('status')}|产出{p.get('product')}|"
+                f"u={_fmt(u) if u is not None else 'null'}|{produce}"
+            )
+        return [f"[地块·{len(detail)}块] id|类型|级|状态|产出|u|本季预览", *detail]
+
+    # 大局：聚合。**区块名仍以「[地块」开头**（测试/模型都按它找块）。
+    return [
+        f"[地块·{len(rows)}块·聚合] 按类型+产物+等级+状态分组"
+        f"（>{_PLOT_DETAIL_MAX} 块不逐块列；u/产出预览略，要单块明细走试算）",
+        *_aggregate_plot_lines(rows),
+    ]
 
 
 def _buildoption_lines(cfg) -> list[str]:
@@ -1028,7 +1162,8 @@ def _compact_state(player_id: str, state: dict, cfg=None) -> str:
       ② 市场 / 本地块 / 可建选项（拓宽的新内容）
       ③ 末尾自觉体积：总字符超 `_STATE_BODY_LIMIT` 时，
          价格从「全量」降为「只留有变化/触底的」，仍超再砍建造选项，
-         **核心七键与地块绝不砍**。
+         **核心七键与地块绝不砍**（地块自己按块数聚合，见 `_plot_lines`；
+          正常局的断言只是兜底，不该被 100 块地打穿）。
     """
     core = _core_lines(state)
     plots = _plot_lines(state)

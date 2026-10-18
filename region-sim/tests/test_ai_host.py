@@ -477,6 +477,145 @@ def _grab_user_message(app=None, question="建什么划算？"):
     return fake.calls[0][1]["content"], session
 
 
+def _fake_plot_for_count(
+    plot_id,
+    plot_type,
+    level=1,
+    *,
+    product=None,
+    status="running",
+    construction_left=0,
+    service_bonus=0.0,
+    service_rate=0.0,
+):
+    """造一块与 `state_for` 同形的假地块（只填 100 块聚合测试要的字段）。"""
+    eff = None
+    if status == "running":
+        eff = {
+            "adjacency": 1.0 + service_bonus,
+            "happiness": 1.0,
+            "ramp_up": 1.0,
+            "research_multiplier": 1.0,
+            "efficiency": 1.0 + service_bonus,
+            "linked_neighbors": 0,
+            "adjacency_bonus": service_bonus,
+            "adjacency_capped": False,
+            "is_service": plot_type == "service",
+            "service_rate": service_rate,
+            "service_neighbors": 1 if service_bonus else 0,
+            "service_bonus": service_bonus,
+            "contributions": [],
+        }
+    return {
+        "plot_id": plot_id,
+        "plot_type": plot_type,
+        "level": level,
+        "status": status,
+        "product": product,
+        "name": None,
+        "u": None,
+        "efficiency": eff,
+        "output_preview": None,
+        "construction_left": construction_left,
+        "target_level": level + (1 if status == "constructing" else 0),
+        "running_quarters": 1 if status == "running" else 0,
+    }
+
+
+def _fake_100_plot_state() -> dict:
+    """100 块地的局面（8550 规模的合成夹具）——**正是旧实现会 500 的形状**。
+
+    分布刻意覆盖 G / H-A / I / 服务 / 在建：聚合后这些类别必须仍能辨认。
+    """
+    plots: list[dict] = []
+
+    def add(n, plot_type, level=1, *, product=None, status="running",
+            construction_left=0, **eff_kw):
+        for _ in range(n):
+            i = len(plots)
+            plots.append(_fake_plot_for_count(
+                f"{i // 10},{i % 10}", plot_type, level, product=product,
+                status=status, construction_left=construction_left, **eff_kw,
+            ))
+
+    add(30, "agriculture", 1, product="C")
+    add(10, "agriculture", 2, product="D")
+    add(40, "resource", 1)
+    add(10, "industry", 1, product="G")
+    add(5, "industry", 2, product="H-A")
+    add(3, "industry", 3, product="I")
+    add(1, "service", 1, service_rate=0.075)
+    add(1, "industry", 1, product="H-A", status="constructing",
+        construction_left=1)
+    assert len(plots) == 100, f"夹具应为 100 块，实得 {len(plots)}"
+    # 资源组里两块吃到不同服务加成 → 聚合行显示区间（信息不丢）
+    for p, bonus in ((plots[40], 0.05), (plots[41], 0.10)):
+        p["efficiency"]["service_bonus"] = bonus
+        p["efficiency"]["adjacency_bonus"] = bonus
+        p["efficiency"]["service_neighbors"] = 1
+
+    return {
+        "quarter": 1, "total_quarters": 20, "phase": "collecting",
+        "can_settle": False, "cash": 1200.0, "happiness": 0.6,
+        "population": None,
+        "market": {
+            f"G{i:02d}": {
+                "name": f"商品{i}", "P0": 10.0, "last_price": 10.0 + i,
+                "current_price": None, "P_min": 1.0, "at_floor": None,
+            }
+            for i in range(15)
+        },
+        "plots": plots,
+    }
+
+
+def test_many_plots_compact_under_limit_without_assertion():
+    """★ 100 块地（8550 规模）→ 局面文本必须压缩到上限内，**不许断言炸**。
+
+    旧实现每块一行：100 行 ≈ 4.2k 字符 + 核心/价格 → 4912，`assert` 直接
+    抛 AssertionError，模型一次都没被调用（真机表现为 AI 对话整体 500）。
+    """
+    state = _fake_100_plot_state()
+    body = ai_host._compact_state("p1", state, None)   # ★ 不抛即过第一关
+    assert len(body) < ai_host._STATE_BODY_LIMIT, (
+        f"★ 100 块地压缩后 {len(body)} 字符，仍超硬上限 "
+        f"{ai_host._STATE_BODY_LIMIT}"
+    )
+    # 8550 的目标线：聚合后应明显低于上限（不是刚好擦边）
+    assert len(body) < 2500, (
+        f"100 块地压缩后 {len(body)} 字符，未达到 <2500 的目标"
+    )
+    # 核心七键与地块块都还在
+    assert "quarter=1/20" in body and "cash=1200" in body
+    assert "[地块·100块·聚合]" in body, f"100 块应走聚合档：{body[:500]}"
+    # 聚合后地块行应是个位/十位数，绝不是 100 行
+    plot_rows = [ln for ln in body.splitlines() if "级，" in ln]
+    assert len(plot_rows) == 8, f"聚合行数异常：{plot_rows}"
+
+
+def test_aggregate_plot_lines_have_type_and_count():
+    """★ 聚合行必须同时含**类型/产物**与**数量**（否则 AI 看不出分布）。
+
+    如 `工业G×10（1级，运行中）`、`服务×1（1级，运行中，服务率7.5%）`。
+    """
+    text = "\n".join(ai_host._plot_lines(_fake_100_plot_state()))
+    for expected in (
+        "农业C×30（1级，运行中）",
+        "农业D×10（2级，运行中）",
+        "资源×40（1级，运行中，服务邻接+5%~10%）",
+        "工业G×10（1级，运行中）",
+        "工业H-A×1（1级，在建 1 季）",
+        "工业H-A×5（2级，运行中）",
+        "工业I×3（3级，运行中）",
+        "服务×1（1级，运行中，服务率7.5%）",
+    ):
+        assert expected in text, (
+            f"聚合行缺「{expected}」：\n{text}"
+        )
+    # 100 块不再逐块列（逐块明细才有 "id|类型" 这种坐标行）
+    assert "0,0|" not in text, f"100 块仍逐块输出：{text[:500]}"
+
+
 def test_state_context_now_includes_market_prices():
     """★ 拓宽点 ①：user message 里**出现了价格信息**。
 
