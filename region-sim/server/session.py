@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import threading
+import copy
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, TYPE_CHECKING, Optional
@@ -154,6 +155,14 @@ class GameSession:
             raise ValueError(
                 "给了 storage 就必须给 game_id —— 否则不知道往哪一局存。"
             )
+        # ★ 2026-10-18 第七轮：**市场曲线属于 config，不是玩家进度**。
+        #   存档里带的是**建局时**的那份曲线；config 改了 Q0/弹性之后，
+        #   读旧档若继续用存档曲线 → "改了市场"对旧档完全不生效
+        #   （实测：8550 读到 C Q0=200 / H-A Q0=30，新配置 260/150）。
+        #   所以在会话建立时一律用 config 覆盖；新建局的 `new_world()`
+        #   本来就用 cfg.market，这里对它是恒等操作。
+        if getattr(self.cfg, "market", None):
+            self.state.world.market = copy.deepcopy(self.cfg.market)
 
     # ── ★ 补贴（2026-10-18 S1 用户拍板：季度初发放、不进结算）────────
 
