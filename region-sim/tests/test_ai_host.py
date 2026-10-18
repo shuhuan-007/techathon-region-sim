@@ -1071,16 +1071,20 @@ def test_draft_instruction_mentions_why_and_remove_builds():
     )
 
 
-def test_wants_excellent_food_keyword_detection():
-    """★ 2026-10-18：意图词「优秀 / 吃好 / 优质 / 优秀档」必须
-    确定性命中 / 不命中，不交给模型猜。"""
-    assert ai_host._wants_excellent_food("想给居民吃好一点") is True
-    assert ai_host._wants_excellent_food("口粮想达到优秀档") is True
-    assert ai_host._wants_excellent_food("想冲优质口粮") is True
-    assert ai_host._wants_excellent_food("想吃优秀口粮") is True
-    assert ai_host._wants_excellent_food("帮我起草本季计划") is False
-    assert ai_host._wants_excellent_food(None) is False
-    assert ai_host._wants_excellent_food("") is False
+def test_wants_baseline_only_keyword_detection():
+    """★ 2026-10-18 AI-food-default-excellent：意图反转 —— 默认就给优秀档，
+    只有玩家明说「只要基准档 / 吃饱就行 / 不用优秀」才退回基准档。
+    `_wants_baseline_only` 必须确定性命中 / 不命中，不交给模型猜。"""
+    # 肯定：明说只要基准
+    assert ai_host._wants_baseline_only("只要基准档就行") is True
+    assert ai_host._wants_baseline_only("吃饱就行，别乱花钱") is True
+    assert ai_host._wants_baseline_only("不用优秀，吃饱就好") is True
+    # 否定：想吃好 / 中性 / 空 / None 都不应触发"退回基准"
+    assert ai_host._wants_baseline_only("想给居民吃好一点") is False
+    assert ai_host._wants_baseline_only("想冲优质口粮") is False
+    assert ai_host._wants_baseline_only("帮我起草本季计划") is False
+    assert ai_host._wants_baseline_only(None) is False
+    assert ai_host._wants_baseline_only("") is False
 
 
 def test_advise_draft_with_excellent_word_fills_good_tier():
@@ -1112,25 +1116,53 @@ def test_advise_draft_with_excellent_word_fills_good_tier():
     )
 
 
-def test_advise_draft_without_excellent_word_keeps_baseline_food():
-    """★ 不带关键词时：C/D 仍然不进 suggested_plan.food（回归旧行为）。"""
+def test_advise_draft_default_fills_good_tier():
+    """★ 2026-10-18 AI-food-default-excellent：玩家问题里**不含**
+    "优秀/吃好/优质"等词时，编译器**默认**就给优秀档 —— C/D 必须非零。
+    这才能证明默认路径通了（旧的「不带关键词 → 基准档」已作废）。"""
     session = _mid_session(cash=10000.0)
     current = _mid_current_plan()
     fake = FakeClient(result=llm_client.LLMResult(
         ok=True, model="fake-kimi",
-        content=json.dumps({"why": "保持基准。"}, ensure_ascii=False),
+        content=json.dumps({"why": "默认就按优秀档补。"}, ensure_ascii=False),
     ))
     out = ai_host.advise(
-        session, "p1", "帮我起草本季",
+        session, "p1", "帮我起草本季计划",
+        client=fake, draft=True, current_plan=current,
+    )
+    assert out["ok"] is True
+    plan = out["suggested_plan"]
+    assert plan is not None
+    assert plan["food"].get("C", 0) > 0, (
+        f"默认（不带关键词）时 C 必须补到优秀档：{plan['food']}"
+    )
+    assert plan["food"].get("D", 0) > 0, (
+        f"默认（不带关键词）时 D 必须补到优秀档：{plan['food']}"
+    )
+    # A/B 也应到优秀档（只补不足）
+    assert plan["food"].get("A", 0) > 0 and plan["food"].get("B", 0) > 0
+
+
+def test_advise_draft_baseline_word_skips_good_tier():
+    """★ 2026-10-18 AI-food-default-excellent：玩家**明说**「只要基准档」
+    时，编译器退回基准档 —— C/D 不得进 suggested_plan.food，A/B 仍补。"""
+    session = _mid_session(cash=10000.0)
+    current = _mid_current_plan()
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps({"why": "玩家只要基准档。"}, ensure_ascii=False),
+    ))
+    out = ai_host.advise(
+        session, "p1", "只要基准档就行",
         client=fake, draft=True, current_plan=current,
     )
     assert out["ok"] is True
     plan = out["suggested_plan"]
     assert plan is not None
     assert "C" not in plan["food"] and "D" not in plan["food"], (
-        f"不带关键词时不许自动加 C/D：{plan['food']}"
+        f"明说「只要基准档」时不许加 C/D：{plan['food']}"
     )
-    # A/B 仍应补到基准档（旧的 default_baseline_food 行为不变）
+    # A/B 仍应补到基准档
     assert plan["food"].get("A", 0) > 0 and plan["food"].get("B", 0) > 0
 
 

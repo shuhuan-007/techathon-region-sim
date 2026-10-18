@@ -107,6 +107,9 @@ _TYPE_ALIASES: dict[str, PlotType] = {
 _U_LADDER: tuple[float, ...] = (1.0, 0.75, 0.5, 0.25, 0.0)
 
 #: 口粮缩减阶梯
+#  2026-10-18 AI-food-default-excellent: `_shrink_until_ok` 现金不足时，
+#  沿本阶梯把 food 从（默认的）优秀档往下乘系数，直到试算跑得通——
+#  1.0 = 全额（默认优秀档全额）、0.75/0.5/0.25 依次缩量、0.0 = 不买口粮。
 _FOOD_LADDER: tuple[float, ...] = (1.0, 0.75, 0.5, 0.25, 0.0)
 
 
@@ -729,11 +732,12 @@ def _fill_good_food(
 ) -> dict[str, float]:
     """按**优秀档**把 A/B/C/D 四样口粮补齐（只补不足，不削已有）。
 
-    2026-10-18 用户反馈：AI 不知道什么是「优秀档」，更不懂得把闲钱花在
-    优秀口粮上。玩家问题里带「优秀 / 吃好 / 优质 / 优秀档」时，
-    `compile_draft(include_excellent_food=True)` 会在 `_fill_baseline_food`
-    之后调本函数：按 `good_quota × F_优秀`（compute_population 的
-    good_food）把四样口粮补到优秀档需求。
+    2026-10-18 AI-food-default-excellent：根因修复——AI 助手不会把口粮
+    补到优秀档的根因是「默认不触发」。本函数由
+    `compile_draft(include_excellent_food=True)`（默认 True）在
+    `_fill_baseline_food` 之后调用：按 `good_quota × F_优秀`
+    （compute_population 的 good_food）把四样口粮补到优秀档需求。
+    玩家明说「只要基准档/吃饱就行」时调用方才传 False 跳过本步。
 
     ⚠️ 只补不足，不削已有；现金不够由后续 `_shrink_until_ok` 缩量，
     本函数不特殊处理。
@@ -1105,7 +1109,10 @@ def compile_draft(
     max_validate_rounds: int = 3,
     auto_place: bool = True,
     protected_build_ids: Optional[set[str]] = None,
-    include_excellent_food: bool = False,
+    # 2026-10-18 AI-food-default-excellent: 默认 True —— 口径改为
+    # 「默认按优秀档补口粮，让玩家拿 H=1.0」；仅玩家明说「只要基准档/
+    # 吃饱就行」时调用方才传 False（见 server.ai_host._wants_baseline_only）。
+    include_excellent_food: bool = True,
 ) -> DraftCompileResult:
     """把模型回的 Plan 形状 JSON 编译成一份**真能跑**的 Plan。
 
@@ -1120,10 +1127,12 @@ def compile_draft(
     max_validate_rounds    : validate 不过时，按 issue target 丢坏项的最多轮数
     auto_place             : 空地新建若零邻接加成，是否自动换到推荐格
                              （默认开；关掉 = 完全照模型给的坐标）
-    include_excellent_food : 玩家问题带「优秀 / 吃好 / 优质 / 优秀档」时置 True。
-                             在基准档补齐之后，再按 `good_quota × F_优秀`
-                             把 A/B/C/D 补到**优秀档**（只补不足，不削已有；
-                             现金不够由后续 `_shrink_until_ok` 缩量）。
+    include_excellent_food : 默认 True（2026-10-18 改默认——AI 助手不会把
+                             口粮补到优秀档的根因）。在基准档补齐之后，按
+                             `good_quota × F_优秀` 把 A/B/C/D 补到**优秀档**
+                             （只补不足，不削已有；现金不够由后续
+                             `_shrink_until_ok` 缩量）。仅玩家明说「只要
+                             基准档/吃饱就行」时调用方才传 False。
 
     返回 `DraftCompileResult`；`ok=True` 时保证：
 
@@ -1219,8 +1228,10 @@ def compile_draft(
     # ★ 模型经常只给 A、忘了 B；基准档必须 A+B 同时有，否则永远吃不饱。
     if default_baseline_food:
         food = _fill_baseline_food(food, state, player_id, cfg, notes)
-    # ★ 2026-10-18：玩家明确要「优秀 / 吃好 / 优质」→ 把四样口粮补到优秀档。
-    #   只补不足、不削已有；现金不够由后续 shrink 缩量，不做特殊处理。
+    # ★ 2026-10-18 AI-food-default-excellent：默认 True —— 「默认按优秀档
+    #   补四样口粮 A/B/C/D」写进编译器。只补不足、不削已有；现金不够由
+    #   后续 `_shrink_until_ok` × `_FOOD_LADDER` 缩量，不做特殊处理。
+    #   玩家明说「只要基准档/吃饱就行」时调用方传 False 才会跳过本步。
     if include_excellent_food:
         food = _fill_good_food(food, state, player_id, cfg, notes)
 

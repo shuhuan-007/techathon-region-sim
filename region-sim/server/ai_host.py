@@ -371,10 +371,12 @@ def advise(
         #      · 同理，plot_plans 空且 food 空才补基准口粮；写了就原样保留。
         #    `current_plan` 为空 → 旧路径，一个参数都不加（默认 True）。
         editing = plan_has_content(current_plan)
-        # ★ 2026-10-18：玩家问题里带「优秀 / 吃好 / 优质 / 优秀档」→
-        #   让编译器在补完基准档 A+B 之后，再把 A/B/C/D 四样补到优秀档
-        #   （只补不足，不削已有；现金不够照常由缩量处理）。
-        include_excellent_food = _wants_excellent_food(question)
+        # ★ 2026-10-18 AI-food-default-excellent：
+        #   编译器默认就把口粮补到优秀档（include_excellent_food 默认 True），
+        #   只有玩家**明说**「只要基准 / 吃饱就行 / 不用优秀」时才关掉，
+        #   走基准档 A+B。原 `_wants_excellent_food` 的正向判断会**永远覆盖**
+        #   编译器新默认值（玩家不说"优秀"就强制 False），已废弃于本判断点。
+        include_excellent_food = not _wants_baseline_only(question)
         protected_ids: set[str] = set()
         # 编辑模式的两个默认值：
         #   · 玩家**已经写了** plot_plans → 绝不替他补/改未提到的地块；
@@ -776,6 +778,20 @@ _CANCEL_WORDS: tuple[str, ...] = ("取消", "撤销", "删", "移除", "不要",
 #: 问题里带这些词时，draft 会给 compile_draft 传 include_excellent_food=True，
 #: 让编译器把 A/B/C/D 四样口粮按 good_quota × F_优秀 补到优秀档。
 _EXCELLENT_FOOD_WORDS: tuple[str, ...] = ("优秀", "吃好", "优质", "优秀档")
+
+
+#: 2026-10-18 AI-food-default-excellent：编译器默认就补到优秀档，
+#: 玩家**明说**「只要基准档 / 吃饱就行」才关退回基准档 A+B。
+_BASELINE_FOOD_WORDS: tuple[str, ...] = (
+    "只要基准", "基准档", "吃饱就行", "够吃就行", "不用优秀",
+    "不要优秀", "不追求优秀", "基础档", "基本档",
+)
+
+
+def _wants_baseline_only(question: Optional[str]) -> bool:
+    """玩家明说「只要基准档/吃饱就行」——此时编译器才不该补到优秀档。"""
+    s = str(question or "")
+    return any(w in s for w in _BASELINE_FOOD_WORDS)
 
 
 def _wants_excellent_food(question: Optional[str]) -> bool:
