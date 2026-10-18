@@ -1321,6 +1321,34 @@ def compile_draft(
             notes=notes, preview=None, settle_error=settle_error,
         )
 
+    # ── 7. H=1.0 兜底检测（只读、不改 Plan）──
+    # 2026-10-18 AI-food-H-check：意图是优秀档（include_excellent_food=True）
+    # 但 preview 显示 H<1.0，说明 `_fill_good_food` 补的目标量被后续缩量砍掉了
+    # （多半是现金不够）。这里**只追加一条 note 暴露问题**，不改 Plan 本身——
+    # 玩家/调用方有权知道"想要优秀但没拿到"。
+    if include_excellent_food and preview:
+        food_info = preview.get("food") or {}
+        h = food_info.get("happiness")
+        if h is not None and float(h) < 1.0 - 1e-9:
+            from engine.population import compute_population
+
+            pop = compute_population(state, player_id, {}, cfg)
+            quotas = cfg.food.good_quota or {}
+            gaps: list[str] = []
+            for g, quota in sorted(quotas.items()):
+                want = float(quota) * pop.good_food
+                if want <= 0:
+                    continue
+                current = float(plan.food.get(g, 0.0) or 0.0)
+                if current + 1e-6 < want:
+                    gaps.append(f"{g} 缺 {want - current:.2f}")
+            if gaps:
+                _append_note(
+                    notes,
+                    f"按优秀档仍缺 {('、'.join(gaps))}（H={float(h):.2f} < 1.0，"
+                    "受现金约束保留低档；想拿 H=1.0 需更多现金或削减建造/采购）。",
+                )
+
     return DraftCompileResult(
         ok=True, plan=plan, issues=[], notes=notes,
         preview=preview, settle_error="",

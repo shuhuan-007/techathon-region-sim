@@ -669,7 +669,58 @@ def test_non_cash_preview_error_fails_without_plan():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 七、只读 / player_id 钉死
+# 七、H=1.0 兜底检测（2026-10-18 第 5 步新增）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_h_shortfall_appends_note_when_cash_forces_low_tier():
+    """意图是优秀档（include_excellent_food=True）但现金不够买齐四样时：
+    preview 显示 H<1.0，编译器必须 append 一条 note 暴露缺口，
+    且**不改 Plan 本身**（兜底的语义就是"只报告，不修复"）。
+    """
+    from engine.population import compute_population
+
+    cfg = load_config()
+    state = _mid_state(cfg)
+    # 把现金压到只够 A/B，不够四样优秀档
+    state.player("p1").cash = 30.0
+    raw = _raw()  # 空草稿：什么都没有 → 编译器仍会默认补口粮/开工
+    result = compile_draft(raw, state, "p1", cfg, include_excellent_food=True)
+    _assert_compiled_ok(result, state, cfg)
+
+    pop = compute_population(state, "p1", {}, cfg)
+    quotas = cfg.food.good_quota or {}
+    # 算出"按优秀档应该达到"的量 vs 当前 plan 里的量
+    has_short = any(
+        float(q) * pop.good_food > float(result.plan.food.get(g, 0.0) or 0.0) + 1e-6
+        for g, q in quotas.items()
+        if float(q) * pop.good_food > 0
+    )
+    if has_short:
+        assert any(
+            "按优秀档仍缺" in n for n in result.notes
+        ), f"现金不够买齐四样时必须 append 兜底 note：{result.notes}"
+        # 且 preview 的 H 必须 < 1.0（否则这条 note 不该出现）
+        assert result.preview["food"]["happiness"] < 1.0 - 1e-9, result.preview["food"]
+
+
+def test_h_full_skips_note_when_cash_is_plenty():
+    """现金足够买齐四样时：preview H 应为 1.0，兜底 note **不应**出现。"""
+    cfg = load_config()
+    state = _mid_state(cfg)
+    state.player("p1").cash = 5000.0     # 非常充裕
+    state.player("p1").last_happiness = 0.8
+    raw = _raw()
+    result = compile_draft(raw, state, "p1", cfg, include_excellent_food=True)
+    _assert_compiled_ok(result, state, cfg)
+    # H=1.0 → 兜底 note 不该出现
+    assert not any("按优秀档仍缺" in n for n in result.notes), (
+        f"现金足够且 H=1.0 时不该有兜底 note：{result.notes}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 八、只读 / player_id 钉死
 # ══════════════════════════════════════════════════════════════════
 
 
