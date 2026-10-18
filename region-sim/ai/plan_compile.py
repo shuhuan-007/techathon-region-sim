@@ -720,6 +720,47 @@ def _fill_baseline_food(
     return food
 
 
+def _fill_good_food(
+    food: dict[str, float],
+    state: GameState,
+    player_id: str,
+    cfg: Config,
+    notes: list[str],
+) -> dict[str, float]:
+    """按**优秀档**把 A/B/C/D 四样口粮补齐（只补不足，不削已有）。
+
+    2026-10-18 用户反馈：AI 不知道什么是「优秀档」，更不懂得把闲钱花在
+    优秀口粮上。玩家问题里带「优秀 / 吃好 / 优质 / 优秀档」时，
+    `compile_draft(include_excellent_food=True)` 会在 `_fill_baseline_food`
+    之后调本函数：按 `good_quota × F_优秀`（compute_population 的
+    good_food）把四样口粮补到优秀档需求。
+
+    ⚠️ 只补不足，不削已有；现金不够由后续 `_shrink_until_ok` 缩量，
+    本函数不特殊处理。
+    """
+    from engine.population import compute_population
+
+    pop = compute_population(state, player_id, {}, cfg)
+    if pop.good_food <= 0:
+        return food
+    quotas = cfg.food.good_quota or {}
+    if not quotas:
+        return food
+    added: dict[str, float] = {}
+    for g, quota in quotas.items():
+        want = float(quota) * pop.good_food
+        if want <= 0:
+            continue
+        current = float(food.get(g, 0.0) or 0.0)
+        if current + 1e-9 < want:
+            food[g] = round(want, 6)
+            added[g] = round(want - current, 6)
+    if added:
+        parts = "、".join(f"{g}×{q:.2f}" for g, q in sorted(added.items()))
+        _append_note(notes, f"按优秀档补口粮：{parts}。")
+    return food
+
+
 def _cap_food_to_need(
     food: dict[str, float],
     state: GameState,
@@ -1064,6 +1105,7 @@ def compile_draft(
     max_validate_rounds: int = 3,
     auto_place: bool = True,
     protected_build_ids: Optional[set[str]] = None,
+    include_excellent_food: bool = False,
 ) -> DraftCompileResult:
     """把模型回的 Plan 形状 JSON 编译成一份**真能跑**的 Plan。
 
@@ -1078,6 +1120,10 @@ def compile_draft(
     max_validate_rounds    : validate 不过时，按 issue target 丢坏项的最多轮数
     auto_place             : 空地新建若零邻接加成，是否自动换到推荐格
                              （默认开；关掉 = 完全照模型给的坐标）
+    include_excellent_food : 玩家问题带「优秀 / 吃好 / 优质 / 优秀档」时置 True。
+                             在基准档补齐之后，再按 `good_quota × F_优秀`
+                             把 A/B/C/D 补到**优秀档**（只补不足，不削已有；
+                             现金不够由后续 `_shrink_until_ok` 缩量）。
 
     返回 `DraftCompileResult`；`ok=True` 时保证：
 
@@ -1173,6 +1219,10 @@ def compile_draft(
     # ★ 模型经常只给 A、忘了 B；基准档必须 A+B 同时有，否则永远吃不饱。
     if default_baseline_food:
         food = _fill_baseline_food(food, state, player_id, cfg, notes)
+    # ★ 2026-10-18：玩家明确要「优秀 / 吃好 / 优质」→ 把四样口粮补到优秀档。
+    #   只补不足、不削已有；现金不够由后续 shrink 缩量，不做特殊处理。
+    if include_excellent_food:
+        food = _fill_good_food(food, state, player_id, cfg, notes)
 
     # ── 5. 模型可能带的合同 / 其它字段：单人局一律丢弃 ──
     if raw.get("contracts"):

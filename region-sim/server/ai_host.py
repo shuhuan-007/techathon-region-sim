@@ -70,7 +70,11 @@ DEFAULT_RULE_KEY = "11.4"
 _SYSTEM_PREAMBLE = (
     "你是区域经营游戏的 AI 秘书，只管解释、试算、起草；提交永远由玩家走 /api/submit，你无 commit，也不得声称执行过任何操作。\n"
     "回答默认 **1–3 句**，先给结论/关键数字/公式；除非玩家明确要求详细，不要写长段落，不要复述局面。\n"
-    "口粮口径：F_基准/F_优秀是**等效篮位数，不是人数**；需求 = 配比 × F（A/B 基准档，A/B/C/D 优秀档）。\n"
+    "口粮口径：F_基准/F_优秀是**等效篮位数，不是人数**；需求 = 配比 × F。"
+    "合格档（基准档）= A+B 两样必须同时有；优秀档 = A/B/C/D 四样按优秀档数值配。"
+    "只填 A/B 两样 = 只到合格档，算不上优秀。\n"
+    "预算口径：现金充裕时优先扩建/升级/买优秀口粮，不要只留现金；"
+    "但计划必须过 validate+preview，超预算由引擎缩量。\n"
     "用数字分三种：\n"
     "① 局面/试算里已有的数字：原样引用，不得改动、不得凑整冒充原值。\n"
     "② 自己推算的数字：允许，但必须说明「这是推算」，写清依据（用了哪个已有数字、什么算法/口径），必要时写明假设。\n"
@@ -367,6 +371,10 @@ def advise(
         #      · 同理，plot_plans 空且 food 空才补基准口粮；写了就原样保留。
         #    `current_plan` 为空 → 旧路径，一个参数都不加（默认 True）。
         editing = plan_has_content(current_plan)
+        # ★ 2026-10-18：玩家问题里带「优秀 / 吃好 / 优质 / 优秀档」→
+        #   让编译器在补完基准档 A+B 之后，再把 A/B/C/D 四样补到优秀档
+        #   （只补不足，不削已有；现金不够照常由缩量处理）。
+        include_excellent_food = _wants_excellent_food(question)
         protected_ids: set[str] = set()
         # 编辑模式的两个默认值：
         #   · 玩家**已经写了** plot_plans → 绝不替他补/改未提到的地块；
@@ -408,10 +416,12 @@ def advise(
                         #   按 plot_id 对不上，缩量时还是会把它删掉（真跑抓到）。
                         auto_place=False,
                         protected_build_ids=protected_ids,
+                        include_excellent_food=include_excellent_food,
                     )
                 else:
                     compiled = compile_draft(
-                        obj, session.state, player_id, session.cfg
+                        obj, session.state, player_id, session.cfg,
+                        include_excellent_food=include_excellent_food,
                     )
             except Exception as e:  # noqa: BLE001 —— 编译器自己都不能崩
                 compiled = None
@@ -506,8 +516,11 @@ _DRAFT_JSON_INSTRUCTION = (
     "· ★ 开局（自己 0–1 块地、现金够 1000+）优先规划 **3–4 块地**——"
     "至少 1 农业 + 1 资源 + 1 工业，**不要只给 2 块**就收手；"
     "总成本仍必须 ≤ 现金，引擎会给超预算的部分缩量；\n"
-    "· 口粮**至少写 A、B**（基准档必须同时有；只写 A 会永远吃不饱）；想冲优秀档再按 "
-    "A/B/C/D 四样填；新建成地块会增加人口/胃口，口粮要跟着加；\n"
+    "· 口粮：合格档（基准档）= A+B 两样必须同时有（只写 A 会永远吃不饱）；"
+    "优秀档 = A/B/C/D **四样**按 [口粮规则] 的优秀档数值都填——只填 A/B 仅算合格档，"
+    "算不上优秀；新建成地块会增加人口/胃口，口粮要跟着加；\n"
+    "· 预算：现金充裕时优先扩建/升级/买优秀口粮，不要只留现金；"
+    "但计划必须过 validate+preview，超预算由引擎缩量；\n"
     "· 用不到的字段可以省略或留空，但 **player_id 必须写「{player_id}」**。\n"
     "★ 两个**可选**字段（玩家要撤销 / 要一句解释时很有用）：\n"
     '· "why": "一句话：做了什么 + 为什么"（**只进聊天摘要，不参与规则**）；\n'
@@ -757,6 +770,18 @@ def _ensure_rule_answer(
 
 
 _CANCEL_WORDS: tuple[str, ...] = ("取消", "撤销", "删", "移除", "不要", "停掉")
+
+#: 2026-10-18 ★ 优秀口粮意图（确定性解析，不依赖模型）：
+#: 用户反馈「AI 不会填优秀口粮（甚至不知道什么是优秀）」。
+#: 问题里带这些词时，draft 会给 compile_draft 传 include_excellent_food=True，
+#: 让编译器把 A/B/C/D 四样口粮按 good_quota × F_优秀 补到优秀档。
+_EXCELLENT_FOOD_WORDS: tuple[str, ...] = ("优秀", "吃好", "优质", "优秀档")
+
+
+def _wants_excellent_food(question: Optional[str]) -> bool:
+    """问题里有没有「想要优秀档口粮」的意图（确定性关键词，不传模型猜）。"""
+    s = str(question or "")
+    return any(w in s for w in _EXCELLENT_FOOD_WORDS)
 
 
 def _explicit_cancel_ids(

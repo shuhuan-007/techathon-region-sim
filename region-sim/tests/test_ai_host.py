@@ -1071,6 +1071,103 @@ def test_draft_instruction_mentions_why_and_remove_builds():
     )
 
 
+def test_wants_excellent_food_keyword_detection():
+    """★ 2026-10-18：意图词「优秀 / 吃好 / 优质 / 优秀档」必须
+    确定性命中 / 不命中，不交给模型猜。"""
+    assert ai_host._wants_excellent_food("想给居民吃好一点") is True
+    assert ai_host._wants_excellent_food("口粮想达到优秀档") is True
+    assert ai_host._wants_excellent_food("想冲优质口粮") is True
+    assert ai_host._wants_excellent_food("想吃优秀口粮") is True
+    assert ai_host._wants_excellent_food("帮我起草本季计划") is False
+    assert ai_host._wants_excellent_food(None) is False
+    assert ai_host._wants_excellent_food("") is False
+
+
+def test_advise_draft_with_excellent_word_fills_good_tier():
+    """★ 2026-10-18：问题里带「优秀」时，advise(draft=True) 应让编译器
+    把 A/B/C/D 四样口粮补到优秀档；从最终返回的 `suggested_plan.food` 看，
+    C/D 必须非零（基准档根本不填 C/D）。
+    """
+    session = _mid_session(cash=10000.0)   # 中局 + 足现金，避免缩量把口粮砍掉
+    current = _mid_current_plan()
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps({"why": "按优秀档补口粮。"}, ensure_ascii=False),
+    ))
+    out = ai_host.advise(
+        session, "p1", "想给居民吃优秀档的口粮",
+        client=fake, draft=True, current_plan=current,
+    )
+    assert out["ok"] is True, out
+    plan = out["suggested_plan"]
+    assert plan is not None, f"应编译成功：issues={out.get('plan_issues')}"
+    assert plan["food"].get("C", 0) > 0, (
+        f"带「优秀」意图时 C 必须补到优秀档：{plan['food']}"
+    )
+    assert plan["food"].get("D", 0) > 0, (
+        f"带「优秀」意图时 D 必须补到优秀档：{plan['food']}"
+    )
+    assert any("优秀档" in n for n in (out.get("plan_notes") or [])), (
+        f"plan_notes 必须含「优秀档」说明：{out.get('plan_notes')}"
+    )
+
+
+def test_advise_draft_without_excellent_word_keeps_baseline_food():
+    """★ 不带关键词时：C/D 仍然不进 suggested_plan.food（回归旧行为）。"""
+    session = _mid_session(cash=10000.0)
+    current = _mid_current_plan()
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps({"why": "保持基准。"}, ensure_ascii=False),
+    ))
+    out = ai_host.advise(
+        session, "p1", "帮我起草本季",
+        client=fake, draft=True, current_plan=current,
+    )
+    assert out["ok"] is True
+    plan = out["suggested_plan"]
+    assert plan is not None
+    assert "C" not in plan["food"] and "D" not in plan["food"], (
+        f"不带关键词时不许自动加 C/D：{plan['food']}"
+    )
+    # A/B 仍应补到基准档（旧的 default_baseline_food 行为不变）
+    assert plan["food"].get("A", 0) > 0 and plan["food"].get("B", 0) > 0
+
+
+def test_draft_instruction_explains_excellent_and_budget():
+    """★ 起草指令必须明写「优秀档四样」+「只填 A/B 仅合格」+「现金要花出去」。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient(result=llm_client.LLMResult(
+        ok=True, model="fake-kimi",
+        content=json.dumps(_valid_draft_json(), ensure_ascii=False),
+    ))
+    ai_host.advise(session, "p1", "帮我起草", client=fake, draft=True)
+    user = fake.calls[0][1]["content"]
+    assert "优秀档" in user, f"起草指令缺优秀档说明：{user[-800:]}"
+    assert "四样" in user or "A/B/C/D" in user, (
+        f"起草指令缺「优秀档四样」：{user[-800:]}"
+    )
+    assert "合格" in user, f"起草指令缺「只 A/B 仅合格」：{user[-800:]}"
+
+
+def test_system_preamble_mentions_excellent_tier_and_spending_budget():
+    """★ system preamble 明写：① 合格档 A+B / 优秀档四样；
+    ② 现金充裕时优先扩建/升级/买优秀口粮。"""
+    app = _fresh_app()
+    session = _fresh_session(app)
+    fake = FakeClient()
+    ai_host.advise(session, "p1", client=fake)
+    system = fake.calls[0][0]["content"]
+    assert "优秀档" in system, f"system 缺优秀档说明：{system}"
+    assert "A/B/C/D" in system, f"system 缺优秀档四样：{system}"
+    assert "合格" in system, f"system 缺「只 A/B 仅合格」：{system}"
+    assert "扩建" in system or "升级" in system, (
+        f"system 缺「现金要花出去」：{system}"
+    )
+    assert "缩量" in system, f"system 缺「超预算由引擎缩量」：{system}"
+
+
 def test_answer_mode_sends_rule_excerpts_for_mechanism_questions():
     """问「粮食怎么算」（draft=False）→ user message 带 `[规则摘录]` 与 §3.3 原文。"""
     app = _fresh_app()

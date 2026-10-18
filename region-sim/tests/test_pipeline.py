@@ -376,10 +376,13 @@ def test_food_comes_from_own_production_first():
     r = st.raw_reports["p1"]
 
     produced_a = r.production[0].output_qty          # A × 5
-    assert r.bought_breakdown["household_food_from_own"] == {"A": 1.2}, "A 由自产顶上"
+    own_eaten = r.food.deducted["A"]
+    assert r.bought_breakdown["household_food_from_own"] == {"A": own_eaten}, (
+        "只有居民**实际吃掉**的自产粮才从供给里扣；多申报的余量应继续可售"
+    )
     assert r.bought_breakdown["household_food_shortfall"] == {"B": 0.6}, "B 自家没有 → 缺口"
-    assert abs(r.sold["A"] - (produced_a - 1.2)) < TOL, (
-        "★ 只有余量进公开市场：X_t = 产出 − 自产顶上"
+    assert abs(r.sold["A"] - (produced_a - own_eaten)) < TOL, (
+        "★ 余量进公开市场：X_t = 产出 − 居民实际吃掉的自产粮"
     )
     assert r.food.happiness > 0.0, "有口粮 → H > 0"
 

@@ -226,6 +226,94 @@ def test_prompt_is_sent_as_system_message():
 
 
 # ══════════════════════════════════════════════════════════════════
+# 五.bis、2026-10-18：货币单位清洗 + 字段口径钉死（用户反馈回归）
+# ══════════════════════════════════════════════════════════════════
+#
+# 用户反馈两条：
+#   ① 财报解读出现了"元"这种货币单位 —— news.md / report.md 提示词已写死
+#     "金额、价格一律只写裸数字，绝对不得出现 元/人民币/¥/$"；
+#     narrate.py 的 `_strip_currency_units` 是最后一道清洗兜底。
+#   ② 报告把 `discarded`（玩家申报口粮超出居民实际消耗的剩余）说成了
+#     "农业产出被清除/未售出" —— 但产出其实全部按 P_t 卖出/被居民吃掉。
+#     report.md 必须补字段口径：discarded ≠ 产出；unsold_cleared 才是清仓；
+#     food.deducted 是居民实际吃掉的部分。
+
+
+def test_strip_currency_units_strips_yuan_and_symbols():
+    """★ 清洗兜底：元 / 人民币 / ¥ / ￥ / $ 全部剥掉，只剩裸数字。"""
+    cases = [
+        ("期末现金 1200 元", "期末现金 1200"),
+        ("期末现金 1200元", "期末现金 1200"),
+        ("价格 23.52 人民币", "价格 23.52"),
+        ("收入 ¥ 104.00", "收入 104.00"),
+        ("收入 ￥104.00", "收入 104.00"),
+        ("均价 $ 5.5", "均价 5.5"),
+    ]
+    for src, want in cases:
+        got = N._strip_currency_units(src)
+        assert got == want, f"{src!r} 应清洗成 {want!r}，实得 {got!r}"
+
+
+def test_news_body_and_headline_strip_yuan():
+    """★ news 路：模型在 headline / body 里写了"元"，出来必须是裸数字。"""
+    dirty = ('{"headline": "期末现金 978 元", '
+             '"body": "本季扣款 222 元，期初现金 1200 元。", '
+             '"facts_used": {"cash_after": 978.0}}')
+    out = N.narrate_news({"quarter": 3}, client=FakeClient(dirty))
+    assert out["ok"] is True
+    assert "元" not in out["headline"], f"headline 里的「元」必须被剥掉：{out['headline']!r}"
+    assert "元" not in out["body"], f"body 里的「元」必须被剥掉：{out['body']!r}"
+    assert "978" in out["headline"] and "222" in out["body"]
+
+
+def test_report_text_strip_yuan():
+    """★ report 路：模型在 Markdown 正文里写了"元"，出来必须被清洗。"""
+    dirty_md = ("# 第3季度财报解读\n\n"
+                "- 期初现金 1200 元，期末现金 978 元\n"
+                "- 本季扣款 222 元")
+    out = N.narrate_report({"quarter": 3}, client=FakeClient(dirty_md))
+    assert out["ok"] is True
+    assert "元" not in out["text"], f"report 正文里的「元」必须被剥掉：{out['text']!r}"
+    assert "1200" in out["text"] and "978" in out["text"] and "222" in out["text"]
+
+
+def test_report_prompt_forbids_currency_units():
+    """★ report 提示词**文本本身**必须钉死"禁用 元/人民币/¥/$"——
+    不能只靠清洗兜底（用户原话："不能只靠清洗"）。"""
+    rep = N.load_prompt("report")
+    for token in ("元", "人民币", "¥", "$"):
+        assert token in rep, f"report 提示词里找不到禁用单位 {token!r}（提示词被改了？）"
+    # 必须是"禁用"语境，而不只是顺带提到单位
+    assert ("只写裸数字" in rep) or ("不得出现" in rep), \
+        "report 提示词必须写死「金额/价格只写裸数字 / 不得出现货币单位」"
+
+
+def test_report_prompt_nails_discarded_unsold_cleared_deducted():
+    """★ report 提示词必须把 discarded / unsold_cleared / food.deducted 三个
+    口径钉死（2026-10-18 用户拍板）：
+
+      · discarded  = 玩家申报买入口粮超出居民实际消耗的剩余；
+                     不是产出，不得写成"未售出/清除产出"
+      · unsold_cleared = 价格触底卖不掉被清理的商品（"未售出清仓"）；
+                         为空 → 产出已全部卖出/被居民吃掉，不得说剩余产出被处理
+      · food.deducted = 居民实际吃掉的口粮
+    """
+    rep = N.load_prompt("report")
+    for token in ("discarded", "unsold_cleared", "food.deducted"):
+        assert token in rep, f"report 提示词缺 {token!r} 字段口径"
+    # 方向：discarded 落到「口粮剩」；unsold_cleared 指向「未售出清仓」
+    assert "口粮" in rep, "discarded 必须落到「口粮剩」而不是产出"
+    assert "未售出" in rep or "清仓" in rep, "unsold_cleared 必须指向「未售出清仓」"
+    # ★★ 反向红线（用户反馈的核心）：discarded ≠ 产出被清除/未售出 ——
+    #    提示词里必须**显式否定**这种误读，不能让模型脑补。
+    #    找一个「discarded」出现的窗口，里面要有否定语把它从"产出/未售出"切开。
+    for neg in ("不是生产出来的商品", "不是产出", "不得写成", "不得说", "不得混用"):
+        assert neg in rep, (
+            f"report 提示词必须用否定句切开 discarded 与产出/未售出的关系（缺 {neg!r}）"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
 # 六、2026-10-17 加固回归：空正文策略 / 超时默认 300 / 诊断字段 / 重试闸
 # ══════════════════════════════════════════════════════════════════
 

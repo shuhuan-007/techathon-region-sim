@@ -859,9 +859,10 @@ def _food_rule_line(cap: dict) -> str:
 
     return (
         f"[口粮规则] 人口={_display_num(population.get('population', 0))} "
-        f"F_基准={_display_num(rule.get('baseline_food', 0))} → 基准档 {pairs(baseline)}；"
-        f"F_优秀={_display_num(rule.get('good_food', 0))} → 优秀档 {pairs(good)}；"
-        f"food 至少写 A、B（基准档必须同时有）；多买会被丢弃（没有仓库）。"
+        f"F_基准={_display_num(rule.get('baseline_food', 0))} → 合格档 A+B {pairs(baseline)}；"
+        f"F_优秀={_display_num(rule.get('good_food', 0))} → 优秀档 A/B/C/D {pairs(good)}；"
+        f"合格档必须 A+B 同时有；只想合格填 A/B，想优秀四项都按上面的优秀档数值填；"
+        f"多买会被丢弃（没有仓库）。"
     )
 
 

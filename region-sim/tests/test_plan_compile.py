@@ -334,6 +334,89 @@ def test_model_food_is_not_overwritten():
     assert "C" not in result.plan.food and "D" not in result.plan.food
 
 
+def test_include_excellent_food_fills_good_quota_for_all_four():
+    """★ 2026-10-18 用户反馈：AI 不知道什么是「优秀档」，不懂得把闲钱花出去。
+
+    `include_excellent_food=True` 时，compile_draft 必须在基准档补齐之后，
+    再把 A/B/C/D **四样**口粮按 `good_quota × F_优秀` 补到优秀档
+    （只补不足，不削已有），并留「按优秀档补口粮」note。
+    """
+    cfg = load_config()
+    state = _mid_state(cfg)
+    # mid 局现金 416：优秀档口粮 + 5 块地全开工可能超预算 → 缩量阶梯会先砍建造再降
+    # u%；但它**不是**先动口粮（`_FOOD_LADDER` 是先降 u%、最后才动口粮）。
+    # 所以现金不是本测试的核心 —— 把现金留足，避开 shrink 干扰，直接看数值。
+    state.player("p1").cash = 10000.0
+
+    from engine.population import compute_population
+    pop = compute_population(state, "p1", {}, cfg)
+
+    result = compile_draft(_raw(), state, "p1", cfg, include_excellent_food=True)
+    _assert_compiled_ok(result, state, cfg)
+
+    # 四样口粮都必须达到优秀档需求：good_quota[g] × F_优秀
+    for g, quota in cfg.food.good_quota.items():
+        want = quota * pop.good_food
+        got = result.plan.food.get(g, 0.0)
+        assert abs(got - want) < TOL, (
+            f"include_excellent_food=True 时口粮 {g} 应补到优秀档 {want}，实得 {got}"
+        )
+    # 与基准档的区分：C/D 基准档没有、优秀档必须有
+    assert result.plan.food.get("C", 0.0) > 0, "优秀档必须有 C"
+    assert result.plan.food.get("D", 0.0) > 0, "优秀档必须有 D"
+    assert any("按优秀档补口粮" in n for n in result.notes), (
+        f"必须留下「按优秀档补口粮」的说明：{result.notes}"
+    )
+
+
+def test_default_does_not_fill_good_tier_regression():
+    """★ 不传 include_excellent_food（默认 False）→ 只补基准档 A+B，不碰 C/D。
+
+    老行为回归：2026-10-18 之前 compile_draft 永远不会自己加 C/D，
+    现在加一个开关也不能把默认行为改掉。
+    """
+    cfg = load_config()
+    state = _mid_state(cfg)
+    state.player("p1").cash = 10000.0
+
+    result = compile_draft(_raw(), state, "p1", cfg)
+    _assert_compiled_ok(result, state, cfg)
+    assert "C" not in result.plan.food, "默认不许自动加 C"
+    assert "D" not in result.plan.food, "默认不许自动加 D"
+    assert not any("按优秀档补口粮" in n for n in result.notes), (
+        f"默认不该出现优秀档 note：{result.notes}"
+    )
+    # A/B 仍按基准档补（基准档只到 A+B 就是合格，不是优秀）
+    from engine.population import compute_population
+    pop = compute_population(state, "p1", {}, cfg)
+    for g, quota in cfg.food.baseline_quota.items():
+        assert abs(result.plan.food[g] - quota * pop.baseline_food) < TOL
+
+
+def test_include_excellent_food_does_not_cut_existing_food():
+    """开关只补不足、不削已有：模型给了高于优秀档的 A，不能压回（也压不回，
+    因为 `_cap_food_to_need` 已经反复压过）。"""
+    cfg = load_config()
+    state = _mid_state(cfg)
+    state.player("p1").cash = 10000.0
+
+    from engine.population import compute_population
+    pop = compute_population(state, "p1", {}, cfg)
+    # 模型给 A 是优秀档需要量的 2 倍 —— 但 `_cap_food_to_need` 会把它压回上限。
+    # 所以这里选择的策略：给一个**低于**上限、但**高于**基准档的 A；
+    # 期望开关把它**再补到上限**（只向上，不向下）。
+    model_a = 0.6 * pop.good_food * cfg.food.good_quota["A"]
+    result = compile_draft(
+        _raw(food={"A": model_a}), state, "p1", cfg,
+        include_excellent_food=True,
+    )
+    _assert_compiled_ok(result, state, cfg)
+    want_a = cfg.food.good_quota["A"] * pop.good_food
+    assert abs(result.plan.food["A"] - want_a) < TOL, (
+        f"开关应该把 A 补到优秀档 {want_a}，实得 {result.plan.food['A']}"
+    )
+
+
 def test_excess_food_is_capped_to_good_need():
     """真跑里模型把“22 人”写成 `food: {"A": 22}` —— 必须压回优秀档上限。
 

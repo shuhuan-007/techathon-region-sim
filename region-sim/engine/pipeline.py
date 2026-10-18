@@ -442,13 +442,22 @@ def _run_body(
         #   ④ 自产顶上那部分**不进公开市场**      ← 从 X_t 扣掉（见下）
         produced = P.merge_outputs(outcomes[player_id])
         food_want = {g: q for g, q in plan.food.items() if q > 0}
+        # ★ 2026-10-18 修正：自产口粮只从供给里扣**居民实际吃掉的量**；
+        #   申报量大于实际消耗时，多出来的自产粮继续作为市场供给卖掉，
+#   不再“先扣光申报量、吃不完再丢弃”（用户：所有产出都是可出售的）。
+        pop = populations[player_id]
+        feed_plan = S.plan_food_deduction(
+            food_want, pop.baseline_food, pop.good_food,
+            cfg, state.players[player_id].last_happiness,
+        )
         food_from_own: dict[str, float] = {}
         food_shortfall: dict[str, float] = {}
         for g, want in food_want.items():
-            own = min(produced.get(g, 0.0), want)
-            if own > 0:
-                food_from_own[g] = own
-            gap = want - own
+            own_total = min(produced.get(g, 0.0), want)
+            own_eaten = min(own_total, feed_plan.deducted.get(g, 0.0))
+            if own_eaten > 1e-12:
+                food_from_own[g] = own_eaten
+            gap = want - own_total
             if gap > 1e-12:
                 food_shortfall[g] = gap
 

@@ -490,25 +490,9 @@ def _plots(
     if trial is not None:
         out_by_plot = {o.plot_id: o for o in trial.production}
 
-    # ★ 2026-10-18 旧存档兼容：name=None 的 RUNNING 地块在**前端展示层**惰性补名
-    #    （不写回 state，保持存档往返幂等——见 test_storage roundtrip 硬要求）。
-    #    新建/完工仍走 pipeline 钩、持久落 Plot.name。
-    from engine.naming import assign_plot_name
-    import copy as _copy
-    naming_state = state  # 原名即够用就直接用，避免无谓拷贝
-    needs_fallback = any(
-        p.name is None and p.is_running for p in player.plots.values()
-    )
-    if needs_fallback:
-        # 只给展示层补：临时拷一份只动 name，避免污染 GameState（即使外部再 save 也无感）
-        naming_state = _copy.deepcopy(state)
-
     rows: list[dict] = []
     for pid in sorted(player.plots):
         plot = player.plots[pid]
-        display_plot = naming_state.player(player_id).plots[pid] if needs_fallback else plot
-        if display_plot.name is None and display_plot.is_running:
-            assign_plot_name(naming_state, player_id, display_plot, cfg)
         u = u_map.get(pid, 0.0) if plan is not None else None
 
         # 效率：**不开工也算** —— 玩家想知道"这块地效率多少、该不该开"
@@ -543,8 +527,8 @@ def _plots(
             "status": plot.status.value,
             "product": plot.product,
             # ★ 2026-10-18 地块中文名（UI/3D 悬浮牌用，引擎不外溢）
-            #   取 display_plot.name——旧档没名字时展示层刚补的暂名也走这条路
-            "name": display_plot.name,
+            #   None（旧档/未完工）→ UI 兜底 plot_id。
+            "name": plot.name,
             "u": u,
             "efficiency": eff,
             "output_preview": preview_block,

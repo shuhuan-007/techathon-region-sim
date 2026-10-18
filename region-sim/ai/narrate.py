@@ -206,6 +206,21 @@ def _diag_of(result: Any) -> dict:
     return out
 
 
+def _strip_currency_units(text: str) -> str:
+    """删掉模型爱加的货币单位（元/人民币/¥/￥/$）；只保留裸数字。
+
+    ⚠️ 这是**最后一道兜底**，不是免死金牌：news.md / report.md 提示词里
+    已明确"金额、价格一律只写裸数字，绝对不得出现 元/人民币/¥/$"——
+    清洗只是兜住漏网之鱼，**绝不**因此放松提示词约束。
+    （2026-10-18 用户反馈：之前的财报解读里冒过"元"。）
+    """
+    if not isinstance(text, str):
+        return text
+    out = re.sub(r"\s*(?:人民币|元|¥|￥|\$)\s*", " ", text)
+    out = re.sub(r"\s+([，。；、])", r"\1", out)
+    return out.strip()
+
+
 def _generate(
     kind: str,
     payload: dict,
@@ -277,7 +292,7 @@ def _generate(
                 "quarter": quarter,
                 "ok": True,
                 "model": model,
-                "text": str(content).strip(),
+                "text": _strip_currency_units(str(content).strip()),
                 "facts_used": {},          # 纯 Markdown 返回值里没有溯源表
                 "warning": "模型按提示词返回了 Markdown（非 JSON），已按正文接收；"
                            "本份没有 facts_used 溯源。",
@@ -312,8 +327,8 @@ def _generate(
             return _failure(kind, quarter, "bad_response",
                             "JSON 解析成功但缺 headline / body（或类型不对）。",
                             model=model)
-        base["headline"] = headline
-        base["body"] = body
+        base["headline"] = _strip_currency_units(headline)
+        base["body"] = _strip_currency_units(body)
     else:
         text = obj.get("text")
         if not isinstance(text, str):
@@ -327,7 +342,7 @@ def _generate(
         if not isinstance(text, str):
             return _failure(kind, quarter, "bad_response",
                             "JSON 解析成功但没有正文（缺 text）。", model=model)
-        base["text"] = text
+        base["text"] = _strip_currency_units(text)
 
     return base
 

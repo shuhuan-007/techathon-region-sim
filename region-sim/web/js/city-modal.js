@@ -63,6 +63,8 @@ window.APP = window.APP || {};
   let _plotGroup = null;
   let _wasteGroup = null;      // 简陋荒地（一块薄片 box，不占 gltf）
   let _roadGroup = null;       /* v15 拍板：平面道路（地块 mesh 间隙下） */
+  let _labelGroup = null;      /* ★ 2026-10-18 地块名悬浮牌（canvas→texture→plane 躺平） */
+  let _labelVisible = true;    /* 开关：默认开；checkbox 可关 */
   let _enabled = true;
   let _failedUrls = {};
   let _rafId = 0;              // animation frame id
@@ -241,7 +243,70 @@ window.APP = window.APP || {};
     _scene.add(_wasteGroup);
     _roadGroup = new THREE.Group();
     _scene.add(_roadGroup);
+    _labelGroup = new THREE.Group();
+    _labelGroup.visible = _labelVisible;      // checkbox 可关
+    _scene.add(_labelGroup);
     _gltfLoader = new THREE.GLTFLoader();
+  }
+
+  /* ★ 2026-10-18 CanvasTexture 厂：把 plot.name 画成躺平的悬浮牌
+     - canvas 256×64；名字越长字号越小（2→44px, 3→40px, 4→34px, ≥5→26px）。
+     - 返回 MeshBasicMaterial + PlaneGeometry(0.6, 0.15) 的 Mesh。
+     - rotation.x = -PI/2 → 平行于地面；plot 放 model 顶上方 0.22。
+     - depthTest: true → 走近的建筑会自然挡住后面的牌子（用户要"悬浮"不"UI条"）。
+     - 字号命名规则是"愿意密一点就小一点"，写死生效即好；不必做自适应真拟合。 */
+  function _makeLabelMesh(name, plotColor){
+    if (!name) return null;
+    const W = 256, H = 64;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+    /* 半透明圆角底（略暗，方便白字看清） */
+    const radius = 12;
+    const rx = 4, ry = 6, rw = W - 8, rh = H - 12;
+    ctx.fillStyle = 'rgba(12, 16, 24, 0.62)';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(rx, ry, rw, rh, radius);
+    else ctx.rect(rx, ry, rw, rh);
+    ctx.fill();
+
+    const n = String(name).length;
+    const fontSize = n <= 2 ? 44 : n === 3 ? 40 : n === 4 ? 34 : 26;
+    ctx.font = `600 ${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = plotColor || '#f0f4ff';
+    ctx.fillText(name, W / 2, H / 2 + 1);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const geo = new THREE.PlaneGeometry(0.6, 0.15);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;   // 躺平，平行于地面
+    return mesh;
+  }
+
+  /* 按 plot.plot_type 给标签配色（淡色按类） */
+  function _labelColorFor(plot){
+    const t = plot && plot.plot_type;
+    const prod = plot && plot.product;
+    if (prod === '研究' || (t === 'industry' && plot.level === 2 && prod === '研究')) return '#b5e3ff';  // 研究 淡蓝
+    switch (t){
+      case 'agriculture': return '#c6f6c9';   // 淡绿
+      case 'resource':    return '#ffd9a8';   // 淡橙
+      case 'industry':    return '#ffbfbf';   // 淡红
+      case 'service':     return '#e3d0ff';   // 淡紫
+      default:            return '#f0f4ff';
+    }
   }
 
   /* 异步加载一份 glb（独立缓存 + 15s timeout 防悬挂）。 */
@@ -405,6 +470,15 @@ window.APP = window.APP || {};
         _roadGroup.remove(_roadGroup.children[0]);
       }
     }
+    if (_labelGroup){
+      while (_labelGroup.children.length){
+        const m = _labelGroup.children[0];
+        _labelGroup.remove(m);
+        if (m.material && m.material.map) m.material.map.dispose();
+        if (m.material) m.material.dispose();
+        if (m.geometry) m.geometry.dispose();
+      }
+    }
 
     const cellById = {};
     (MAP.cells || []).forEach(c => { if (c && c.plot_id) cellById[c.plot_id] = c; });
@@ -487,6 +561,15 @@ window.APP = window.APP || {};
           _placeGlb(gltf, x, z);
         }).catch(() => {/* 已 warn，静默 */})
       );
+      /* ★ 2026-10-18 悬浮地块名：躺平 Plane + canvas→texture；
+         constructing 也亮（名字在新建时就分配，旧档读不到时留白）。 */
+      if (_labelGroup && p.name){
+        const labelMesh = _makeLabelMesh(p.name, _labelColorFor(p));
+        if (labelMesh){
+          labelMesh.position.set(x, 0.55, z);
+          _labelGroup.add(labelMesh);
+        }
+      }
     });
 
     if (tasks.length){
@@ -678,6 +761,15 @@ window.APP = window.APP || {};
     if (m){
       m.addEventListener('click', (e) => {
         if (e.target === m) _close();
+      });
+    }
+    /* ★ 2026-10-18 悬浮名开关 */
+    const lt = document.getElementById('cm-label-toggle');
+    if (lt){
+      lt.checked = _labelVisible;
+      lt.addEventListener('change', () => {
+        _labelVisible = !!lt.checked;
+        if (_labelGroup) _labelGroup.visible = _labelVisible;
       });
     }
   }
