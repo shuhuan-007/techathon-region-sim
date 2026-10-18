@@ -89,15 +89,21 @@
     color:#3a4a5c; font-weight:400;
   }
 
-  /* 文字层级 */
+  /* 文字层级（★ 2026-10-18 两段式：第一行 zone 中文名 / 第二行 N级,
+     不再轮播产物；product 已删。两行紧凑 line-height,8-9px 字号塞进 cell。） */
   .cell .lt{
-    font-size:11px; font-weight:600; letter-spacing:.2px;
+    font-size:9px; font-weight:600; letter-spacing:.2px;
     color:var(--ink); text-shadow:0 1px 2px rgba(0,0,0,.5);
+    line-height:1.1; margin:0; padding:0;
   }
   .cell .sub{
-    font-size:9px; color:var(--dim); opacity:.95;
+    font-size:8px; color:var(--dim); opacity:.95;
     font-variant-numeric:tabular-nums;
+    line-height:1.1; margin-top:1px; padding:0;
   }
+  /* 有 icon(emoji)时，让文字再小一点,给 emoji 留位 */
+  .cell .icon ~ .lt{ font-size:8px; }
+  .cell .icon ~ .sub{ font-size:7px; opacity:.92; }
 
   /* 状态：running（微弱呼吸 + 顶部 accent 线） */
   .cell.running{

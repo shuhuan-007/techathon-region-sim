@@ -38,6 +38,9 @@
     POST /api/end_quarter          → 结算这一季
     POST /api/next_quarter         → 看完月报进入下一季
     GET  /api/report?game=&player= → 上一季完整财报
+    POST /api/save_slot            → 把当前局快照另存为 game@slot
+    POST /api/load_slot            → 从 slot 恢复，挂载成新局
+    GET  /api/slots?game=          → 列出该局名下全部 slot 元数据
 
 ═══════════════════════════════════════════════════════════════════
 错误怎么回
@@ -465,6 +468,113 @@ class App:
         return {"ok": True,
                 "state": session.state_for(player_id, with_narratives=False)}
 
+    def finale(self, params: dict) -> dict:
+        """`GET /api/finale` —— 终局总览 + 终局叙事并联（B 单接力）。
+
+        两键并联（**互不影响**）：
+
+            `finale`    —— `session.finale_overview(player_id)`，引擎概览，
+                            秒出、只读、**永远是权威**；
+            `narrative` —— `session.finale_narrative(player_id)`，四键
+                            终局叙事（headline/body/charts/facts_used），
+                            模型可用走模型、不可用走引擎兜底模板。
+
+        ⚠️ **B 单红线**：`narrative` 生成中断（异常）**绝不能拖垮 overview**——
+           即便 `finale_narrative` 整个炸了，`finale` 键仍要 200 原样给；
+           narrative 位则如实给一个 `ok:True + 四键 + warning` 的兜底
+           dict（终局界面必须永远能开）。`finale_narrative` 自身就带两层
+           兜底（引擎层 `generate_finale_report` + 会话层异常收网），
+           通常到不了这里；这里是最后一道。
+        """
+        session = self.registry.get(_need(params, "game"))
+        player_id = params.get("player", "p1")
+        try:
+            narrative = session.finale_narrative(player_id)
+        except Exception as e:  # noqa: BLE001
+            # 最后兜底：给前端一份"形状齐、原值少、明说异常"的极简叙事。
+            # （B 单要求四键永远在；overview 另拿、不受影响。）
+            ov_for_fallback = session.finale_overview(player_id)
+            total = int(ov_for_fallback.get("total_quarters") or 20)
+            narrative = {
+                "ok": True,
+                "headline": f"《{player_id}的{total}季经营终局报告（异常兜底）》",
+                "body": (
+                    "终局叙事生成在服务端异常；本键只给出最小合规形状。"
+                    "请查阅 `/api/finale` 的 `finale` 键（引擎概览、完整原值）。"
+                ),
+                "charts": [],
+                "facts_used": {
+                    "player_id": player_id,
+                    "total_quarters": total,
+                },
+                "source": "error_app_fallback",
+                "warning": f"finale_narrative crashed: {type(e).__name__}: {e}",
+            }
+        return {
+            "ok": True,
+            "finale": session.finale_overview(player_id),
+            "narrative": narrative,
+        }
+
+    # ── 多档存档（slot） ────────────────────────────────
+
+    def save_slot(self, body: dict) -> dict:
+        """`POST /api/save_slot` —— 把当前局**另存一份快照**为 `game@slot`。
+
+        body: `{game, slot, player?}`
+        返回：`{ok, slot_id, game_id, slot}`
+        """
+        game_id = _need(body, "game")
+        slot = _need(body, "slot")
+        # player 参数当前不参与（快照是整局，不是按人），收下不校验，
+        # 让前端可以保持与 /api/end_quarter 一致的 body 形状。
+        _player = body.get("player", "p1")       # noqa: F841
+        slot_id = self.registry.save_slot(game_id, slot)
+        return {"ok": True, "slot_id": slot_id,
+                "game_id": game_id, "slot": slot}
+
+    def load_slot(self, body: dict) -> dict:
+        """`POST /api/load_slot` —— 从 slot **挂载成新局**（原 slot 档不动）。
+
+        body: `{game, slot, player?, as?}`
+          · `game` + `slot` 一起定位要恢复的存档：`{game}@{slot}`；
+            也允许直接给完整 `slot_id`（含 `@`）进 `game` 字段 —— 此时
+            `slot` 字段被忽略（前端更直观的一种传法）。
+          · `as` 可选；缺省时给 `<slot_id>-replay`（撞名再追加数字）。
+        返回：`{ok, game_id, slot_id, state}`
+        """
+        game_or_slot_id = _need(body, "game")
+        player_id = body.get("player", "p1")
+        if "@" in game_or_slot_id:
+            slot_id = game_or_slot_id
+        else:
+            slot = _need(body, "slot")
+            slot_id = f"{game_or_slot_id}@{slot}"
+
+        as_game_id = body.get("as") or f"{slot_id}-replay"
+        # 撞名再追加数字直至空闲（registry 已有检查，这里只为
+        # 给玩家一个可用的新名字）。
+        suffix = 2
+        base = as_game_id
+        while self.registry.storage.exists(as_game_id) \
+                or as_game_id in self.registry._sessions:  # noqa: SLF001
+            as_game_id = f"{base}-{suffix}"
+            suffix += 1
+
+        sess = self.registry.load_slot_as(slot_id, as_game_id)
+        return {
+            "ok": True,
+            "game_id": as_game_id,
+            "slot_id": slot_id,
+            "state": sess.state_for(player_id),
+        }
+
+    def slots(self, params: dict) -> dict:
+        """`GET /api/slots?game=X` —— 列出 X 局名下全部 slot 的元数据。"""
+        game_id = _need(params, "game")
+        return {"ok": True, "game_id": game_id,
+                "slots": self.registry.list_slots(game_id)}
+
     def build_options(self, params: dict) -> dict:
         """建造面板的下拉选项（**前端零计算**）。
 
@@ -583,6 +693,10 @@ ROUTES: dict[str, tuple[str, bool, str]] = {
     "/api/ai/advise":     ("POST", True,  "advise"),
     "/api/end_quarter":   ("POST", True,  "end_quarter"),
     "/api/next_quarter":  ("POST", True,  "next_quarter"),
+    "/api/finale":        ("GET",  False, "finale"),
+    "/api/save_slot":     ("POST", True,  "save_slot"),
+    "/api/load_slot":     ("POST", True,  "load_slot"),
+    "/api/slots":         ("GET",  False, "slots"),
 }
 
 

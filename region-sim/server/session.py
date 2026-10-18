@@ -47,9 +47,11 @@ if TYPE_CHECKING:                       # 只为类型标注，运行时不 impo
     from storage.base import Storage
 
 from engine import report, validate
+from engine.clock import is_game_over
 from engine.loader import Config
-from engine.models import GameState, Plan, PlotType, SessionPhase
+from engine.models import GameState, Plan, PlotType, SessionPhase, WorldPhase
 from engine.pipeline import QuarterReport, SettlementError, advance, preview
+from server import slots as _slots
 
 # ⚠️ `PlanRejected` 在这里**故意显式重导出**：调用方只需要 import
 #    `server.session` 就能同时 catch `Conflict` 与 `PlanRejected`，
@@ -163,6 +165,23 @@ class GameSession:
         #   本来就用 cfg.market，这里对它是恒等操作。
         if getattr(self.cfg, "market", None):
             self.state.world.market = copy.deepcopy(self.cfg.market)
+
+        # ★ 2026-10-19 修（终局验收抓到的真 bug）：**读档后 phase 没跟着世界状态走**。
+        #
+        #   现象：读一个已终局（`world.phase == FINISHED`）的存档，
+        #         session.phase 却是默认的 `COLLECTING` —— 于是界面上
+        #         ① 不弹终局 overlay（前端只在 finished 时弹）、
+        #         ② 「推进本季度」居然可点、
+        #         ③ 顶栏季度显示成 `3 / 2`（超过总局数）。
+        #   根因：`registry.get()` 读档时只传 `state/cfg/storage/game_id`，
+        #         没有传 phase；而 dataclass 默认值是 COLLECTING。
+        #   修法：在这里按**世界状态**推断一次 —— 存档是世界状态的一部分，
+        #         `WorldPhase.FINISHED` 是它的权威终局标记。
+        #   ⚠️ 只做「FINISHED → FINISHED」这一条单向推断：
+        #      其他 phase（RUNNING 等）一律保持默认 COLLECTING，
+        #      因为"行动阶段/结算阶段"是**会话内**的临时状态，不该从存档恢复。
+        if getattr(self.state.world, "phase", None) is WorldPhase.FINISHED:
+            self.phase = SessionPhase.FINISHED
 
     # ── ★ 补贴（2026-10-18 S1 用户拍板：季度初发放、不进结算）────────
 
@@ -496,6 +515,12 @@ class GameSession:
         服务层与前端要做的事完全不同。
         """
         with self.lock:                       # ★ 提交也串行
+            # ★ 终局只读守卫（2026-10-18「20 季终局」）：
+            #   已结束的局**不接受任何写操作**——可看地图/上季报告，无操作入口。
+            if self.phase is SessionPhase.FINISHED:
+                raise Conflict(
+                    "本局已到第 20 季终局，只读回望，不再接受操作。"
+                )
             if self.phase is not SessionPhase.COLLECTING:
                 raise Conflict(
                     f"当前不在行动阶段（{self.phase.value}），不能提交计划"
@@ -521,6 +546,11 @@ class GameSession:
     def end_quarter(self, player_id: str) -> Optional[QuarterReport]:
         """结束季度。**收齐所有计划才结算**（红线 3）。"""
         with self.lock:                       # ★ 整个结算在锁内
+            # ★ 终局只读守卫（同 `submit`）：FINISHED 之后**不再**有下一季。
+            if self.phase is SessionPhase.FINISHED:
+                raise Conflict(
+                    "本局已到第 20 季终局，只读回望，不再接受操作。"
+                )
             if self.phase is not SessionPhase.COLLECTING:
                 raise Conflict(f"当前不在行动阶段（{self.phase.value}）")
             if player_id not in self.plans:
@@ -568,12 +598,41 @@ class GameSession:
         self.plans.clear()
         self.phase = SessionPhase.REPORT
 
+        # ★ 2026-10-18「20 季终局」：advance 已把 quarter 从 N 推到 N+1。
+        #   `is_game_over(quarter, total)` ⇔ `quarter > total`（clock.py）。
+        #   到终点 → 世界状态切 FINISHED、会话状态切 FINISHED：
+        #   **终局只读**——可看地图与上季报告，没有 submit/end/next 任何操作入口。
+        if is_game_over(self.state.world.quarter, self.state.world.total_quarters):
+            self.state.world.phase = WorldPhase.FINISHED
+            self.phase = SessionPhase.FINISHED
+
         # ★ 2026-10-18 S1：季度推进完（`advance` 已把 `quarter +1`）→
         #   立刻发**新一季度**的季初补贴。锁内、结算之后、存档之前，
         #   保证"落盘的现金"含这笔。幂等来自"每次 _resolve 恰好这一行调一次"。
         self.credit_opening_subsidy()
 
         self._save_unlocked()          # ★ 结算完立刻全量快照（锁内）
+
+        # ★ 2026-10-18 多档自动存档：把"上一季末"快照另存一份为
+        #   `<game_id>@q<N-1>`（N-1 是**结算前**那季，`advance` 已 `+1`）。
+        #   这是玩家"想回到某一季再试一次"的最低成本兜底 ——
+        #   静默失败：slot 落不下来不影响主档，只留一行 stderr。
+        if self.storage is not None:
+            settle_quarter = self.state.world.quarter - 1
+            if settle_quarter >= 0:
+                auto_slot_id = _slots.auto_quarter_slot_id(
+                    self.game_id, settle_quarter
+                )
+                try:
+                    self.storage.save(auto_slot_id, self.state)
+                except Exception as e:  # noqa: BLE001
+                    import sys
+                    print(
+                        f"[slots] 自动季度档 {auto_slot_id!r} 落盘失败 "
+                        f"（{type(e).__name__}: {e}）—— 主档不受影响。",
+                        file=sys.stderr,
+                    )
+
         first = sorted(self.state.raw_reports)[0]
         return self.state.raw_reports[first]
 
@@ -598,6 +657,146 @@ class GameSession:
     def start_next_quarter(self) -> None:
         """月报看完 → 回到行动阶段（§三 的循环）。"""
         with self.lock:
+            # ★ 终局只读守卫：已经 FINISHED 就**没有下一季**。
+            if self.phase is SessionPhase.FINISHED:
+                raise Conflict("本局已终局，没有下一季。")
             if self.phase is not SessionPhase.REPORT:
                 raise Conflict(f"只有月报阶段才能进入下一季（当前 {self.phase.value}）")
             self.phase = SessionPhase.COLLECTING
+
+    # ── ★ 终局只读查询（2026-10-18「20 季终局」）─────────────────
+
+    def history_for(self, player_id: str) -> list:
+        """该玩家**逐季**财报 dict 列表（按季升序）。
+
+        原样转发 `state.history`，**不补、不插、不造数** ——
+        缺季如实缺着（由 `finale_overview.missing_quarters` 显式披露）。
+        """
+        with self.lock:
+            return list(self.state.history.get(player_id, []) or [])
+
+    def is_game_over(self) -> bool:
+        """当前局是否已到总季数（clock.is_game_over 的锁内只读封装）。"""
+        with self.lock:
+            return is_game_over(
+                self.state.world.quarter, self.state.world.total_quarters
+            )
+
+    def finale_overview(self, player_id: str) -> dict:
+        """终局总览（**只读聚合**，全部由存档/状态真实值组成，**不新增派生指标**）。
+
+        `/api/finale` 的引擎概览就是从这里秒出；模型正文由另一路接，
+        本方法不生成任何叙事。
+
+        `missing_quarters` / `history_complete` 是**披露**而不修饰：
+        有缺季就明示出来，让玩家/前端知道这局的历史断在哪。
+        """
+        with self.lock:
+            history = list(self.state.history.get(player_id, []) or [])
+            gdp_quarters = [
+                r.get("quarter")
+                for r in history
+                if isinstance(r.get("value_added"), (int, float))
+            ]
+            completed = len(gdp_quarters)
+            game_over = is_game_over(
+                self.state.world.quarter, self.state.world.total_quarters
+            )
+            # 规则：没打完的局**不能**自称"历史完整"；打完的局要求至少
+            # total_quarters 行（即 1..total 每季都有一行）。
+            full = (not game_over) or completed >= self.state.world.total_quarters
+            missing = [
+                q
+                for q in range(1, self.state.world.total_quarters + 1)
+                if q not in set(gdp_quarters)
+            ]
+            return {
+                "scope": "player",
+                "player_id": player_id,
+                "quarter": self.state.world.quarter,
+                "total_quarters": self.state.world.total_quarters,
+                "game_over": game_over,
+                "quarters_completed": completed,
+                "missing_quarters": missing,   # 缺失季明示，供报告披露
+                "history_complete": full,
+                "final_report": (
+                    self.state.report.get(player_id)
+                    if isinstance(self.state.report, dict)
+                    else None
+                ),
+                "history": history,
+            }
+
+    # ── ★ 终局叙事（2026-10-18 B 单接力）─────────────────────
+
+    def finale_narrative(self, player_id: str) -> dict:
+        """终局报告叙事。**`/api/finale` 的并联键；走错不开就模板兜底。**
+
+        三步（**锁内**拿总览，**锁外**调模型/兜底——模型可能 1–3 分钟，
+        占着锁会让结算/提交/状态全卡住）：
+          1. `overview = self.finale_overview(player_id)`（只读，锁内）；
+          2. 惰性 `from engine.finale import generate_finale_report` 并调用
+             （`generate_finale_report` 内部先试 `narrate_finale_report`，
+             败了/离线在引擎侧已兜底为规则化模板）；这一步**不在锁里**；
+          3. 自己再兜一层异常——generate_finale_report 本身就该不抛，
+             但万一它抛了，这里**绝不能让 /api/finale 跟着 500**：
+             原样返回一个 `{"ok": True, "finale": None, "warning": ...}`
+             **不够好**（B 单红线：四键必须齐）。所以这里拼一份
+             **极简兜底 dict**：headline 用 player_id + total_quarters，
+             body 明说「叙事生成器未就绪」+ 贴 overview.game_over /
+             quarters_completed 两个原值，charts/facts_used 给 []({})
+             （**不是四键齐的 fail-safe**： B 单钉的是 `engine/finale.py`
+             的 `generate_finale_report` —— 它在，才是正常路径；这里
+             只是「generate_finale_report 炸了我们还能挤出什么」的
+             最后一道兜底，宁缺毋滥：缺键就明说）。"
+        """
+        overview = self.finale_overview(player_id)   # 锁内只读
+
+        # —— 锁外：模型/兜底。generate_finale_report 契约不抛，
+        #    但**绝不信**，兜一层让它也炸不坏 /api/finale。
+        try:
+            from engine.finale import generate_finale_report  # 惰性
+        except Exception as e:  # noqa: BLE001
+            return {
+                "ok": True,
+                "headline": f"《{player_id}的终局报告（生成器未就绪）》",
+                "body": (
+                    "终局报告生成器（`engine/finale.py`）尚未落盘；本次无法生成"
+                    "正文。引擎层终局概览（`/api/finale` 的 `finale` 键）依然"
+                    "可用。"
+                ),
+                "charts": [],
+                "facts_used": {},
+                "source": "error_no_engine",
+                "warning": f"finale_narrative._import_failed: {type(e).__name__}: {e}",
+            }
+        try:
+            # client=None：走 narrate 内部「离线闸 → _default_client」；
+            # 离线（NARRATE_OFFLINE 默认 False 之外的任意开启值）时
+            # narrate_finale_report 返回 ok:False → 引擎侧自动走
+            # deterministic_body 兜底（终局界面必须永远能开）。
+            return generate_finale_report(overview, self.cfg, client=None)
+        except Exception as e:  # noqa: BLE001
+            total = int(overview.get("total_quarters") or 20)
+            q_done = int(overview.get("quarters_completed") or 0)
+            game_over = bool(overview.get("game_over"))
+            pid = overview.get("player_id") or player_id
+            return {
+                "ok": True,
+                "headline": f"《{pid}的{total}季经营终局报告（兜底）》",
+                "body": (
+                    "终局报告正文生成器中途异常；以下由原样搬运的"
+                    f"引擎概览原值给出：已结算 {q_done}/{total} 季，"
+                    f"game_over={game_over}。详情请查看"
+                    " `/api/finale` 的 `finale` 键（完整原值）。"
+                ),
+                "charts": [],
+                "facts_used": {
+                    "player_id": pid,
+                    "quarters_completed": q_done,
+                    "total_quarters": total,
+                    "game_over": game_over,
+                },
+                "source": "error_generate_crashed",
+                "warning": f"generate_finale_report crashed: {type(e).__name__}: {e}",
+            }

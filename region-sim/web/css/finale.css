@@ -1,0 +1,230 @@
+/* ══════════════════════════════════════════════════════════════
+   finale.css —— 终局结算界面（全屏 overlay + 只读锁视觉）独立样式。
+
+   ★ 独立文件、独立选择器命名空间（#finale-overlay / .finale-locked）。
+     不改 app.css / tiles.css 一行；不抢既有 class 名。
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── 全屏遮罩 ────────────────────────────────────────────── */
+#finale-overlay{
+  position: fixed;
+  inset: 0;
+  z-index: 2000;                       /* 高于 #report-modal(999) 和 #state-loading */
+  background: rgba(6, 10, 18, 0.78);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+/* ── 内容盒 ─────────────────────────────────────────────── */
+#finale-overlay .finale-box{
+  background: var(--panel, #11151c);
+  color: inherit;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  max-width: 1180px;
+  width: 100%;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 20px 24px 22px;
+  box-shadow: 0 18px 60px rgba(0,0,0,0.55);
+  position: relative;
+}
+
+/* ── 顶部条（标题 + ✕）───────────────────────────────────── */
+#finale-overlay .finale-top{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+#finale-overlay .finale-top h2{
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+#finale-overlay .finale-x{
+  margin-left: auto;
+  background: transparent;
+  color: inherit;
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 8px;
+  width: 36px;
+  height: 36px;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  flex: 0 0 auto;
+  transition: background .15s;
+}
+#finale-overlay .finale-x:hover{
+  background: rgba(255,255,255,0.08);
+}
+
+/* ── 标头（headline）────────────────────────────────────── */
+#finale-overlay .finale-headline{
+  font-size: 22px;
+  font-weight: 700;
+  margin: 4px 0 12px;
+  color: #f2d27a;
+  letter-spacing: 0.3px;
+}
+
+/* ── 正文（miniMD 输出）─────────────────────────────────── */
+#finale-overlay .finale-body{
+  font-size: 14px;
+  line-height: 1.75;
+  color: #d5dde8;
+  margin-bottom: 18px;
+}
+#finale-overlay .finale-body h1,
+#finale-overlay .finale-body h2,
+#finale-overlay .finale-body h3,
+#finale-overlay .finale-body h4{
+  color: #ecf2fa;
+  margin: 14px 0 8px;
+}
+#finale-overlay .finale-body h1{font-size: 19px;}
+#finale-overlay .finale-body h2{font-size: 17px;}
+#finale-overlay .finale-body h3{font-size: 15px;}
+#finale-overlay .finale-body p{margin: 6px 0;}
+#finale-overlay .finale-body ul,
+#finale-overlay .finale-body ol{margin: 6px 0 6px 22px;}
+#finale-overlay .finale-body strong{color: #f2d27a;}
+#finale-overlay .finale-body code{
+  background: rgba(255,255,255,0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+#finale-overlay .finale-body-fallback{color: #9aa8bc;}
+
+/* ── 双曲线区 ───────────────────────────────────────────── */
+#finale-overlay .finale-charts{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin: 10px 0 18px;
+}
+@media (max-width: 900px){
+  #finale-overlay .finale-charts{grid-template-columns: 1fr;}
+}
+#finale-overlay .finale-chart-card{
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+#finale-overlay .finale-chart-title{
+  font-size: 13px;
+  font-weight: 600;
+  color: #cfe2ff;
+  margin-bottom: 8px;
+}
+#finale-overlay .finale-chart-svg{
+  width: 100%;
+  height: auto;
+  display: block;
+}
+#finale-overlay .finale-grid line{
+  stroke: rgba(255,255,255,0.08);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+#finale-overlay .finale-grid .finale-grid-v{
+  stroke: rgba(255,255,255,0.05);
+}
+#finale-overlay .finale-ylbl,
+#finale-overlay .finale-xlbl{
+  fill: #93a3ba;
+  font-size: 11px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+#finale-overlay .finale-stroke{
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+#finale-overlay .finale-dot{
+  stroke: #0b0e14;
+  stroke-width: 1;
+}
+
+/* ── 完整数据表 ─────────────────────────────────────────── */
+#finale-overlay .finale-table-wrap{
+  margin: 4px 0 12px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 10px;
+  padding: 10px 12px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+#finale-overlay .finale-table{
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+#finale-overlay .finale-table th,
+#finale-overlay .finale-table td{
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  text-align: left;
+  white-space: nowrap;
+}
+#finale-overlay .finale-table th.num,
+#finale-overlay .finale-table td.num{
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+#finale-overlay .finale-table thead th{
+  color: #9fb8dc;
+  font-weight: 600;
+  background: rgba(255,255,255,0.04);
+  position: sticky;
+  top: -10px;
+  z-index: 1;
+}
+
+/* ── 警告条 ─────────────────────────────────────────────── */
+#finale-overlay .finale-warn{
+  background: rgba(240, 180, 60, 0.12);
+  border-left: 3px solid #e3b341;
+  color: #f6d28a;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  margin: 10px 0;
+}
+
+/* ── 底部按钮行 ─────────────────────────────────────────── */
+#finale-overlay .finale-foot{
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+#finale-overlay .finale-foot button{
+  padding: 8px 18px;
+  font-size: 14px;
+}
+
+/* ── 只读锁视觉（作用于被禁按钮 / 输入 / 选择） ─────────── */
+.finale-locked{
+  opacity: 0.38 !important;
+  cursor: not-allowed !important;
+  pointer-events: auto;                 /* 还允许点击守卫拦截，避免 silent noop */
+}
+.finale-locked:hover{
+  filter: none !important;
+  transform: none !important;
+}

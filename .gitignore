@@ -31,3 +31,6 @@ region-sim/tools/_gen_*.log
 .scratch/
 # 运行用的 glb（含 pbr 彩色版 + 在建.glb），体积约 540MB 不入仓
 region-sim/web/assets/plots/*.glb
+
+# 临时调试产物归档（2026-10-18 收尾清理）
+docs/99-历史版本/_临时产物-*/

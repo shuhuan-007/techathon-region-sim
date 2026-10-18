@@ -125,32 +125,25 @@ window.APP = window.APP || {};
   }
 
   function _open(){
-    const m = document.getElementById('city-modal');
-    if (!m) return;
-    m.classList.remove('hidden');
+    /* v17:不再有 modal——3D 是 #map-view-3d pane,open = 切到 3D tab。
+       注意既不操作 .hidden,也不读 #city-modal（已删）,只激活渲染。 */
     _isOpen = true;
     _ensureRenderer();
+    /* renderer 首次构建后才需要把 canvas 物理搬到 wrap 里——
+       _ensureRenderer 内部已经做了搬移 + ResizeObserver 连线。 */
     window.__cityScene = _scene;  /* 供 citySky 挂屏 */
     _renderCity();
     _startLoop();
-    /* 数据飞字层：只读 STATE、零侵入 */
     if (window.APP && APP.cityTicker && APP.cityTicker.start) APP.cityTicker.start();
-    /* 天上报表层 —— v14（2026-10-18）：整套代码保留，开关默认关。
-       city-modal-sky.js 里设 _SKY_ENABLED=false 才不在此触发。
-       恢复 = 改 city-modal-sky.js:78 那个 const。 */
     if (window.APP && APP.citySky && APP.citySky._SKY_ENABLED && APP.citySky.open) APP.citySky.open();
   }
 
   function _close(){
-    const m = document.getElementById('city-modal');
-    if (m) m.classList.add('hidden');
+    /* v17:保留 renderer/gltf cache,停 loop + 停 ticker,省 GPU。 */
     _isOpen = false;
     _stopLoop();
     if (window.APP && APP.cityTicker && APP.cityTicker.stop) APP.cityTicker.stop();
-    /* 屏开着的才需要 close；开关本身是 false 时调 close 也无害（_opened=false 直接 return） */
     if (window.APP && APP.citySky && APP.citySky._SKY_ENABLED && APP.citySky.close) APP.citySky.close();
-    /* 不 destroy gltf cache——下次打开还能复用；不清 _plotGroup，让
-       下次打开瞬间可以一次性把旧场面替换掉而不是空白闪烁。 */
   }
 
   function _startLoop(){
@@ -170,6 +163,47 @@ window.APP = window.APP || {};
     }
   }
 
+  /* ★ 2026-10-18 v17 · 自适应大小
+     ─────────────────────────────────────────────────────────────
+     原方案：canvas width=1200 height=750 写死在 HTML,renderer.setSize 固定。
+     问题：嵌进 panel 后 panel 宽会变（响应式 .grid minmax(340px,1fr)），
+           固定 1200×750 要么溢出要么被裁。
+     现方案：
+       · CSS 给 #map-3d-canvas-wrap 一个 aspect-ratio 宽高比 + width:100%；
+       · canvas CSS 100%×100% inset:0 悬在 wrap 内；
+       · ResizeObserver 听 wrap 的 clientW/H,同步调用：
+           renderer.setSize(w, h, false)   ← 第 3 参 updateStyle=false,不改 CSS 只改 buffer
+           camera.aspect = w/h; camera.updateProjectionMatrix()
+       · window resize 由 wrap 尺寸自动传导触发,不用单独监听。 */
+  function _resizeToWrap(){
+    if (!_renderer || !_camera) return;
+    const wrap = document.getElementById('map-3d-canvas-wrap');
+    if (!wrap) return;
+    const w = wrap.clientWidth  || 800;
+    const h = wrap.clientHeight || 500;
+    _renderer.setSize(w, h, /*updateStyle*/false);
+    _camera.aspect = w / h;
+    _camera.updateProjectionMatrix();
+    /* 立即渲一帧——防止切 tab 后 loop 没起跑前用户看到旧尺寸模糊画面 */
+    if (_scene) _renderer.render(_scene, _camera);
+  }
+
+  let _roBound = false;
+  function _attachResizeHandler(){
+    if (_roBound) return;
+    _roBound = true;
+    /* ResizeObserver 标准 API,Chrome/Edge/Firefox 全支持 */
+    if (typeof ResizeObserver !== 'undefined'){
+      const wrap = document.getElementById('map-3d-canvas-wrap');
+      if (wrap){
+        const ro = new ResizeObserver(() => { if (_isOpen) _resizeToWrap(); });
+        ro.observe(wrap);
+      }
+    }
+    /* 兜底：window resize 也触发一次（保险,便宜） */
+    window.addEventListener('resize', () => { if (_isOpen) _resizeToWrap(); });
+  }
+
   function _ensureRenderer(){
     if (_renderer || !_enabled) return;
     if (typeof THREE === 'undefined' || !THREE.GLTFLoader){
@@ -182,13 +216,24 @@ window.APP = window.APP || {};
     }
     _canvas = document.getElementById('city-canvas');
     if (!_canvas){ _enabled = false; return; }
+
+    /* ★ 2026-10-18 v17 · 主区 tab 化改造：
+       canvas 物理位置从 #city-modal（已删）搬到 #map-3d-canvas-wrap。
+       renderer/scene/camera/controls 全套保留，gltfCache 一并保活 —
+       切 tab 时**不**重建 WebGL context,只 pause/resume loop。 */
+    const wrap = document.getElementById('map-3d-canvas-wrap');
+    if (wrap && _canvas.parentElement !== wrap){
+      wrap.appendChild(_canvas);
+    }
+
     try {
       _renderer = new THREE.WebGLRenderer({
         canvas: _canvas, antialias: true, alpha: false,
         powerPreference: 'low-power',
       });
       _renderer.setPixelRatio(1);
-      _renderer.setSize(CANVAS_W, CANVAS_H, /*updateStyle*/false);
+      /* v17:初始尺寸由 _attachResizeHandler 内的 RO 第一次触发时设置 —
+         这里不主动 setSize,避免在 DOM 尚未 layout 时拿到 0×0。 */
       _renderer.setClearColor(0x12161c, 1);
       _renderer.shadowMap.enabled = true;
       _renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -198,6 +243,12 @@ window.APP = window.APP || {};
       console.warn('[cityModal] WebGLRenderer 构造失败:', e);
       _enabled = false; return;
     }
+
+    /* v17:尺寸自适应。canvas 现在 CSS 是 width/height:100% inset:0,悬在
+       #map-3d-canvas-wrap 里;由 ResizeObserver 听 wrap 的尺寸变化、调
+       renderer.setSize + camera.aspect。window resize 不用再显式监听 —
+       wrap 是 panel 子元素,panel 行宽变→wrap 变→RO 触发。 */
+    _attachResizeHandler();
 
     _scene = new THREE.Scene();
 
@@ -217,8 +268,11 @@ window.APP = window.APP || {};
     _scene.add(dir);
     _scene.add(new THREE.HemisphereLight(0x87ceeb, 0x5c4a3a, 0.3));
 
-    /* 透视相机 */
-    _camera = new THREE.PerspectiveCamera(45, CANVAS_W / CANVAS_H, 0.1, 200);
+    /* 透视相机（v17:aspect 从 wrap 真实尺寸取,后续 RO 会自动修正）*/
+    const wrapEl = document.getElementById('map-3d-canvas-wrap');
+    const initW = (wrapEl && wrapEl.clientWidth)  || CANVAS_W;
+    const initH = (wrapEl && wrapEl.clientHeight) || CANVAS_H;
+    _camera = new THREE.PerspectiveCamera(45, initW / initH, 0.1, 200);
     /* 比拍板的 (10,11,10) 略近略低一点,让 1×1 cell 里的 3×3 子模型
        有足够像素可辨。距离≈10.6,极角≈40°（俯视但不顶视）。 */
     _camera.position.set(10.5, 7.5, 10.5);
@@ -247,6 +301,64 @@ window.APP = window.APP || {};
     _labelGroup.visible = _labelVisible;      // checkbox 可关
     _scene.add(_labelGroup);
     _gltfLoader = new THREE.GLTFLoader();
+
+    /* ★ 2026-10-18 · 3D canvas click = 选定对应 2D 格 —— raycast 点击选择
+       ─────────────────────────────────────────────────────────────────
+       底层约束：地块本体是渲染图不是按钮，点击后的处理**只走既有的 2D
+       selectPlot 钩子**（selected = pid; renderMap(); renderBuildPanel();），
+       3D 只是另一个"点击入口"，不另起一套选中逻辑。
+
+       判定：mousedown 记 clientX/Y，mouseup 时位移 < 5px 才算 click，
+       否则是 OrbitControls 拖拽（用户在旋转/平移视角）。保证 50ms 内解决
+       —— raycast 一次遍历 _plotGroup.children 里几十个 subRoot，几 ms 内搞定。
+
+       命中后取 mesh → 沿 parent 链往上找 userData.plot_id（_placeGlb 时存的）；
+       没击中任何 plot / 击中空地 → **不做事，别乱取消选择**。
+       空地本来就没有建造面板联动语义。 */
+    let _mdX = 0, _mdY = 0;
+    _canvas.addEventListener('mousedown', (e) => {
+      _mdX = e.clientX; _mdY = e.clientY;
+    });
+    _canvas.addEventListener('mouseup', (e) => {
+      /* 位移 >= 5px → 视为拖拽（OrbitControls），不做选择 */
+      if (Math.abs(e.clientX - _mdX) >= 5 || Math.abs(e.clientY - _mdY) >= 5) return;
+      /* 左键才触发选择，中/右键留给 OrbitControls 平移/缩放 */
+      if (e.button !== 0) return;
+      _raycastSelectAt(e.clientX, e.clientY);
+    });
+  }
+
+  /* click → 命中 plot.subRoot → 沿 parent 链取 userData.plot_id → 调 2D 钩子 */
+  function _raycastSelectAt(clientX, clientY){
+    if (!_canvas || !_camera || !_scene || !_plotGroup) return;
+    const rect = _canvas.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return;
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera({ x: ndcX, y: ndcY }, _camera);
+    /* recursive=true：命中 _plotGroup 下任意深度的子 mesh；
+       只要 plot 层（_plotGroup），不算 _wasteGroup/_roadGroup/_labelGroup。 */
+    const hits = raycaster.intersectObjects(_plotGroup.children, true);
+    if (!hits || !hits.length) return;   /* 没击中任何 plot → 不做事 */
+    /* 沿 parent 链往上找 userData.plot_id —— 可能是最深层 mesh、Group、
+       inst wrapper、或 subRoot（我们把 plot_id 存在 subRoot 上）。 */
+    let node = hits[0].object;
+    let plotId = null;
+    while (node){
+      if (node.userData && node.userData.plot_id != null){
+        plotId = node.userData.plot_id; break;
+      }
+      node = node.parent;
+    }
+    if (plotId == null) return;          /* 击中的是 plotGroup 下但没有 plot_id → 不做事 */
+    /* ★ 只走 2D 既有 selectPlot 钩子，不另起一套 —— api.js 里全局 `selected`
+       map.js 里全局 `renderMap`，panel.js 里全局 `renderBuildPanel`。 */
+    if (typeof selected !== 'undefined'){
+      selected = plotId;
+      if (typeof renderMap === 'function') renderMap();
+      if (typeof renderBuildPanel === 'function') renderBuildPanel();
+    }
   }
 
   /* ★ 2026-10-18 CanvasTexture 厂：把 plot.name 画成躺平的悬浮牌
@@ -351,8 +463,12 @@ window.APP = window.APP || {};
      底盘也在 y=0 平面）；
      scale = (0.95 * CELL_SPACING) / horizSpan。
      2026-10-18 拍板：constructing 用专用 `在建.glb`（_renderCity 选 key），
-     不再走"灰化同款"分支，asGray 参数与 MeshBasicMaterial 0x888888 已删。 */
-  function _placeGlb(gltf, x, z){
+     不再走"灰化同款"分支，asGray 参数与 MeshBasicMaterial 0x888888 已删。
+     ★ 2026-10-18 · click raycast：新参数 plotId 会写到每个 subRoot.userData.plot_id,
+     3D canvas click → raycaster → 沿 parent 链找 userData.plot_id →
+     调用 2D 既有 selectPlot 钩子（selected + renderMap + renderBuildPanel）。
+     3D 只是"另一个点击入口"，不另起一套选中逻辑。 */
+  function _placeGlb(gltf, x, z, plotId){
     const inst = gltf.scene.clone(true);
     /* 阴影开关（全模型 cast+receive）。 */
     inst.traverse(o => {
@@ -410,6 +526,9 @@ window.APP = window.APP || {};
       wrapper.add(inst);
       wrapper.scale.setScalar(scale);
       wrapper.position.set(x, size.y * scale / 2, z);
+      /* ★ 2026-10-18 · raycast 选择：把 plot_id 记到 wrapper.userData,
+         click 时 raycaster 命中任意子 mesh 后沿 parent 链找它。 */
+      if (plotId != null) wrapper.userData.plot_id = plotId;
       _plotGroup.add(wrapper);
     } else {
       /* glb 只一件 → 克隆 9 件摆 3×3。子 cell 间距 = CELL_SPACING/3,
@@ -442,6 +561,10 @@ window.APP = window.APP || {};
             size.y * scale / 2,
             z + offsets[jj]
           );
+          /* ★ 2026-10-18 · raycast 选择：把 plot_id 写到每个 3×3 子阵根
+             subRoot.userData.plot_id —— click 时 raycaster 命中任意子 mesh
+             后沿 parent 链找到 userData.plot_id。 */
+          if (plotId != null) subRoot.userData.plot_id = plotId;
           _plotGroup.add(subRoot);
         }
       }
@@ -559,7 +682,9 @@ window.APP = window.APP || {};
       placedCells.push({ row: newR, col: newC });
       tasks.push(
         _loadGlb(key).then(gltf => {
-          _placeGlb(gltf, x, z);
+          /* ★ 2026-10-18 · 把 plot_id 透传到 _placeGlb → subRoot.userData,
+             click raycast 命中后能反向拿到 2D 选中钩子需要的 plot_id。 */
+          _placeGlb(gltf, x, z, pid);
         }).catch(() => {/* 已 warn，静默 */})
       );
       /* ★ 2026-10-18 悬浮地块名：躺平 Plane + canvas→texture；
@@ -829,7 +954,8 @@ window.APP = window.APP || {};
     const cz = view ? view.cz : GRID_CENTER;
     const side = view ? view.side : 10;
     const half = side / 2;
-    const aspect = CANVAS_W / CANVAS_H;
+    /* v17:aspect 用相机当前实际值（每次 RO resize 都会刷新 camera.aspect）*/
+    const aspect = _camera.aspect || (CANVAS_W / CANVAS_H);
     const tanHalfFov = Math.tan((_camera.fov * Math.PI / 180) / 2);
     /* 纵边要容纳 half → d1；横边要容纳 half → d2（横 fov 更大,d2 更小）。
        取 max 保证两边都内切。 */
@@ -863,48 +989,15 @@ window.APP = window.APP || {};
     _qr_applyCamera(px + dx * R, lift, pz + dz * R, cx, 1.0, cz);
   }
 
-  /* 把俩新按钮插到 .cm-head（紧贴 ✕ 前），样式 = inline 版 .cm-close。
-     只能改 city-modal.js 这一个文件 → 容器/按钮 JS 里懒创建，inline style 复刻
-     的 .cm-close 视觉：var(--panel2) 底 / var(--line) 边 / 6px 圆角 / hover 换色。 */
+  /* ★ 2026-10-18 v17 · 不再 JS 懒创建按钮/容器：
+     index.html 已经预置 #btn-cm-top / #btn-cm-street / #btn-cm-png 在
+     .map-3d-controls 里。这里只做事件绑,不再找 #city-modal .cm-head。 */
   function _ensureQrButtons(){
-    const head = document.querySelector('#city-modal .cm-head');
-    if (!head) return;
-    if (document.getElementById('btn-cm-top')) return;
-    const closeBtn = document.getElementById('btn-city-close');
-
-    const wrap = document.createElement('div');
-    wrap.id = 'cm-qr-buttons';
-    wrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-right:8px;';
-
-    const styleFor = b => {
-      b.style.cssText =
-        'background:var(--panel2);color:var(--ink);' +
-        'border:1px solid var(--line);border-radius:6px;' +
-        'padding:4px 10px;cursor:pointer;font-size:13px;font-weight:500;' +
-        'transition:background 0.15s;';
-      b.addEventListener('mouseenter', () => { b.style.background = 'var(--line)'; });
-      b.addEventListener('mouseleave', () => { b.style.background = 'var(--panel2)'; });
-    };
-
-    const topBtn = document.createElement('button');
-    topBtn.id = 'btn-cm-top';
-    topBtn.textContent = '📐 俯视';
-    topBtn.title = '切到垂直俯视图（拖拽鼠标可回自由视角）';
-    styleFor(topBtn);
-    topBtn.addEventListener('click', _qr_goTopView);
-
-    const stBtn = document.createElement('button');
-    stBtn.id = 'btn-cm-street';
-    stBtn.textContent = '🏙 街景';
-    stBtn.title = '随机挑一栋建成的楼,从楼顶外一点看全城';
-    styleFor(stBtn);
-    stBtn.addEventListener('click', _qr_goStreetView);
-
     /* ③ 截图:强制渲染一帧后抓 PNG buffer(不依赖 preserveDrawingBuffer)。
        下载名带 game_id + 时间戳,便于多档分类。*/
     function _qr_exportPng(){
       if (!_renderer || !_scene || !_camera) return;
-      _renderer.render(_scene, _camera);          /* 强制刷一帧 */
+      _renderer.render(_scene, _camera);
       const url = _renderer.domElement.toDataURL('image/png');
       const a = document.createElement('a');
       const gid = (typeof STATE !== 'undefined' && STATE && STATE.game_id) ? STATE.game_id : 'city';
@@ -915,37 +1008,46 @@ window.APP = window.APP || {};
       a.click();
       a.remove();
     }
-
-    const pngBtn = document.createElement('button');
-    pngBtn.id = 'btn-cm-png';
-    pngBtn.textContent = '📷 截图';
-    pngBtn.title = '把当前 3D 画面导出为 PNG';
-    styleFor(pngBtn);
-    pngBtn.addEventListener('click', _qr_exportPng);
-
-    wrap.appendChild(topBtn);
-    wrap.appendChild(stBtn);
-    wrap.appendChild(pngBtn);
-    if (closeBtn && closeBtn.parentElement === head) head.insertBefore(wrap, closeBtn);
-    else head.appendChild(wrap);
+    const topBtn = document.getElementById('btn-cm-top');
+    if (topBtn && !topBtn._cmBound){ topBtn._cmBound = true; topBtn.addEventListener('click', _qr_goTopView); }
+    const stBtn = document.getElementById('btn-cm-street');
+    if (stBtn && !stBtn._cmBound){ stBtn._cmBound = true; stBtn.addEventListener('click', _qr_goStreetView); }
+    const pngBtn = document.getElementById('btn-cm-png');
+    if (pngBtn && !pngBtn._cmBound){ pngBtn._cmBound = true; pngBtn.addEventListener('click', _qr_exportPng); }
   }
 
   function _bind(){
-    const btn = document.getElementById('btn-city-view');
-    if (btn) btn.onclick = _open;
-    const closeBtn = document.getElementById('btn-city-close');
-    if (closeBtn) closeBtn.onclick = _close;
-    document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') _close();
-    });
-    /* 点击 modal 背景也关闭（除了 canvas box） */
-    const m = document.getElementById('city-modal');
-    if (m){
-      m.addEventListener('click', (e) => {
-        if (e.target === m) _close();
-      });
+    /* ★ 2026-10-18 v17 · tab 切换是 2D/3D 唯一入口。
+       - 旧 btn-city-view / btn-city-close 已从 index.html 删除;
+       - Esc 关闭、点遮罩关闭也一并删除（modal 语义没了）;
+       - tab 切换走 _switchTab;切到 3D 触发 _open（含 lazy init + resize + start loop）,
+         切回 2D 触发 _close（_stopLoop + 停 ticker）,renderer/gltf 不销毁保活。 */
+    const tab2d = document.getElementById('tab-map-2d');
+    const tab3d = document.getElementById('tab-map-3d');
+    const pane2d = document.getElementById('map-view-2d');
+    const pane3d = document.getElementById('map-view-3d');
+
+    function _switchTab(to3d){
+      if (tab2d){ tab2d.classList.toggle('active', !to3d); tab2d.setAttribute('aria-selected', String(!to3d)); }
+      if (tab3d){ tab3d.classList.toggle('active',  to3d); tab3d.setAttribute('aria-selected', String(to3d)); }
+      if (pane2d) pane2d.hidden =  to3d;
+      if (pane3d) pane3d.hidden = !to3d;
+      /* 切到 3D 时 wrap 从 hidden → 有尺寸 → renderer.setSize 必须等
+         浏览器先 layout。requestAnimationFrame 是最稳的"layout 完成"信号。 */
+      if (to3d){
+        /* 先 _open（lazy init renderer;如果已经在 open 状态就跳过重建）*/
+        if (!_isOpen) _open();
+        /* 再等一帧做 resize —— RO 也会补一发,但这是双保险 */
+        requestAnimationFrame(() => { _resizeToWrap(); _renderFrame(); });
+      } else {
+        if (_isOpen) _close();
+      }
     }
-    /* ★ 2026-10-18 悬浮名开关 */
+
+    if (tab2d) tab2d.addEventListener('click', () => _switchTab(false));
+    if (tab3d) tab3d.addEventListener('click', () => _switchTab(true));
+
+    /* ★ 2026-10-18 悬浮名开关（id 保留,位置搬到 .map-3d-controls） */
     const lt = document.getElementById('cm-label-toggle');
     if (lt){
       lt.checked = _labelVisible;
@@ -954,8 +1056,10 @@ window.APP = window.APP || {};
         if (_labelGroup) _labelGroup.visible = _labelVisible;
       });
     }
-    /* ★ 2026-10-18 机位切换：俯视 / 街景（只改本文件,JS 懒创建注入 .cm-head） */
+    /* ★ 2026-10-18 机位切换:俯视 / 街景 / 截图 —— 按钮 index.html 预置 */
     _ensureQrButtons();
+
+    /* 默认 2D:确保初始 hidden/active 态正确（HTML 里已写死 2D active）,不记住上次 tab。 */
   }
 
   if (document.readyState === 'loading'){

@@ -18,6 +18,8 @@ $("btn-new").onclick = async () => {
     toast(`已开新局 ${gid}`, "ok");
     aiGreet();
     await refreshGames(); await refresh();
+    /* 2026-10-18 拍板：开局成功后自动收起 setup 面板（index.html 里监听） */
+    window.dispatchEvent(new Event('rg:session-started'));
   }catch(e){ fail(e); }
 };
 
@@ -27,6 +29,8 @@ $("btn-load").onclick = async () => {
   GAME = gid; resetPlan(); selected = null;
   AI_LOG.length = 0;             // 换档 → 秘书对话也从零开始
   $("main").classList.remove("hidden");
+  /* 2026-10-18 拍板：读档成功后自动收起 setup 面板 */
+  window.dispatchEvent(new Event('rg:session-started'));
   aiGreet();
   await refresh();
 };
@@ -75,6 +79,7 @@ async function refresh(){
        不阻塞 refresh 主流程；同季只弹一次（localStorage）。失败静默。 */
     try{ maybeShowQuarterReport(); }catch(_e){ /* modal 失败不影响主界面 */ }
     loadNarratives();                 // 不 await：数字先显示，叙事慢慢来
+    try{ applyFinishedState(); }catch(_e){ /* ★ 终局界面自身异常不连累 refresh */ }
   }catch(e){
     fail(e);
     /* 加载失败：人话已 toast；如果加载态曾显形又被撤下，
@@ -93,6 +98,8 @@ function renderAll(){
   renderBuilds();        // ★ 已排建设（本季草稿，逐条可撤销）
   renderQuota(); renderQuote();
   renderNarr();          // ★ 新闻 + 财报解读（引擎/服务层给什么就显示什么）
+  /* ★ 2026-10-18 折叠：换档/刷新后同步"本季安排" panel 折叠状态。 */
+  applyPlotsCollapseState();
 }
 
 /* ── 顶栏 ─────────────────────────────────────────────── */
@@ -115,7 +122,7 @@ function renderTop(){
                   ? SIM.last.efficiency : null;
   $("s-eff").textContent = effShow == null ? "—" : "×" + fmt(effShow);
 
-  const phaseName = {collecting:"行动阶段", resolving:"结算中", report:"月报阶段"}[s.phase] || s.phase;
+  const phaseName = {collecting:"行动阶段", resolving:"结算中", report:"月报阶段", finished:"🏁 终局（只读）"}[s.phase] || s.phase;
   $("s-phase").textContent = phaseName;
 
   /* ★ 2026-10-18：月报阶段并入行动阶段 —— 结算完自动进入下一季，
@@ -129,10 +136,12 @@ function renderTop(){
   renderPreviewLine();
 }
 
-/* 研究地块内部是 industry L2 product='研究'；展示时按“研究”而不是“工业”。 */
+/* 研究地块内部是 industry L2 product='研究'；展示时按“研究”而不是“工业”。
+   ★ 2026-10-18 · UI：地块列改显示完整二字 zone 名（农业/资源/工业/服务/研究），
+   不再用「农」「资」单字简写。统一从 api.js 的 ZONE_CN 取。 */
 function plotDisplayType(p){
   if (p && String(p.product || "") === "研究") return "研究";
-  return TYPE_CN[p.plot_type] || p.plot_type || "";
+  return ZONE_CN[p.plot_type] || TYPE_CN[p.plot_type] || p.plot_type || "";
 }
 
 /* ── 地块安排(开工比例)───────────────────────────────── */
@@ -1145,6 +1154,7 @@ $("btn-settle").onclick = async () => {
          结算路径漏了）。不阻塞；同季只弹一次。 */
       try{ maybeShowQuarterReport(); }catch(_e){ /* modal 失败不影响结算 */ }
       loadNarratives();             // 不 await：数字已显示，叙事后台来
+      try{ applyFinishedState(); }catch(_e){ /* ★ 终局界面自身异常不连累结算 */ }
     }else{
       toast("已结算；界面刷新失败，请刷新页面或点「推进本季度」", "warn");
     }
@@ -1616,3 +1626,58 @@ function maybeShowQuarterReport(){
     if (window.localStorage) localStorage.setItem(key, "1");
   }catch(_e){ /* 静默 */ }
 }
+
+/* ══════════════════════════════════════════════════════════
+   折叠：本季安排 panel（表格 + runall/stopall + 已排建设）
+   ──────────────────────────────────────────────────────────
+   · 按钮 #btn-plots-collapse（▾/▸ 切换）控制 #plots-collapse-body 显隐。
+   · 状态写 localStorage —— key `rg_plots_collapse_<game_id>`（"1"=收起,
+     未存过 / 存其他值 = 默认**展开**）。换档 GAME 变 → 各自记忆各自的。
+   · 打开时机：GAME 已就绪（btn-new / btn-load 把 main 从 hidden 撤销后）
+     refresh() 里挂一次 applyPlotsCollapseState() 即同步到 UI；
+     按钮 onclick 只负责 toggle。 */
+function _plotsCollapseKey(){
+  return "rg_plots_collapse_" + (GAME != null ? String(GAME) : "_");
+}
+function _readPlotsCollapsed(){
+  try{
+    if (!window.localStorage) return false;
+    return localStorage.getItem(_plotsCollapseKey()) === "1";
+  }catch(_e){ return false; }
+}
+function _writePlotsCollapsed(collapsed){
+  try{
+    if (!window.localStorage) return;
+    if (collapsed) localStorage.setItem(_plotsCollapseKey(), "1");
+    else localStorage.removeItem(_plotsCollapseKey());
+  }catch(_e){ /* 静默 */ }
+}
+function applyPlotsCollapseState(){
+  const btn = document.getElementById("btn-plots-collapse");
+  const body = document.getElementById("plots-collapse-body");
+  if (!btn || !body) return;
+  const collapsed = _readPlotsCollapsed();
+  body.classList.toggle("collapsed", collapsed);
+  btn.textContent = collapsed ? "▸" : "▾";
+  btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+/* 挂按钮钩子（只在 DOM ready 后挂一次；GAME 变了不影响按钮钩子本身,
+   只是 applyPlotsCollapseState 读到的 key 变了）。 */
+(function _bindPlotsCollapse(){
+  const bind = () => {
+    const btn = document.getElementById("btn-plots-collapse");
+    if (!btn) return;
+    if (btn._plotsCollapseBound) return;
+    btn._plotsCollapseBound = true;
+    btn.addEventListener("click", () => {
+      const collapsed = !_readPlotsCollapsed();
+      _writePlotsCollapsed(collapsed);
+      applyPlotsCollapseState();
+    });
+  };
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", bind);
+  } else {
+    bind();
+  }
+})();

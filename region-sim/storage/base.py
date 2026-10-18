@@ -64,7 +64,8 @@ from engine.models import GameState
 
 #: 存档格式版本。**改动存档结构时必须 +1**，并在 `_migrate()` 里加一条分支。
 #: ⚠️ 不要拿它当"游戏版本"用 —— 它只描述**文件长什么样**。
-SCHEMA_VERSION = 1
+#: v2（2026-10-18）：`GameState.history`（逐季财报历史）随状态进档。
+SCHEMA_VERSION = 2
 
 
 class StorageError(Exception):
@@ -116,7 +117,7 @@ class Storage(Protocol):
 
 import re
 
-_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SAFE_ID = re.compile(r"^[A-Za-z0-9_@-]{1,64}$")
 
 
 def check_game_id(game_id: str) -> str:
@@ -127,15 +128,19 @@ def check_game_id(game_id: str) -> str:
         JsonFileStorage("saves").load("../../../../etc/passwd")
 
     如果不校验，`game_id` 就成了**任意文件读取**（写更危险）的入口。
-    所以只允许 `[A-Za-z0-9_-]`、长度 1–64。
+    所以只允许 `[A-Za-z0-9_@-]`、长度 1–64。
 
-    ⚠️ 中文 / 空格 / 点 / 斜杠**一律拒绝**，而不是"转义后放行" ——
+    ⚠️ **@ 的取舍（2026-10-18 多档存档）**：`@` 用于 slot 命名
+       （`<game_id>@<slot_name>`，见 `server/slots.py`）。它**不是路径
+       分隔符**（在 POSIX / Windows 都是普通文件名字符）、无法表达 `..`
+       或 `/`，因此**不扩大攻击面**；这是把"多档"表示成"派生 game_id"
+       的关键。中文 / 空格 / 点 / 斜杠**仍一律拒绝** ——
        转义规则在不同文件系统上不一样，拒绝才是可预测的。
     """
     if not isinstance(game_id, str) or not _SAFE_ID.match(game_id):
         raise ValueError(
             f"非法的 game_id：{game_id!r}\n"
-            f"  → 只允许字母/数字/下划线/连字符，长度 1–64。\n"
+            f"  → 只允许字母/数字/下划线/连字符/@，长度 1–64。\n"
             f"  ⚠️ game_id 会变成文件名，不校验等于开了任意文件读写。"
         )
     return game_id
@@ -156,6 +161,13 @@ def pack(game_id: str, state: GameState, saved_at: str) -> dict:
         "state": state.to_dict(),
         # ★ 上一季财报单独存 —— `GameState.to_dict()` 里没有它（见模块头）
         "report": dict(state.report or {}),
+        # ★ v2：逐季财报历史（终局曲线/20 行指标表的唯一来源）。
+        #   与 `report` 同层：GameState.to_dict() 含 history，但这里仍**单列**
+        #   一份顶层快照，便于不还原 GameState 也能直读整条时间线（peek 等）。
+        "history": {
+            pid: [dict(r) for r in rows]
+            for pid, rows in (state.history or {}).items()
+        },
     }
 
 
@@ -184,4 +196,12 @@ def unpack(data: dict) -> GameState:
     state = GameState.from_dict(data["state"])
     # ★ 把上一季财报放回去 —— 不还原的话读档后"上季报告"是空的
     state.report = dict(data.get("report") or {})
+    # ★ v2：把逐季财报历史放回去。**不造数**：v1 老档没有顶层 "history" 键、
+    #   且 state["state"] 里也没内嵌 → `data.get("history")` 为 None → 按 `{}` 处理。
+    #   （`GameState.from_dict` 在内嵌 history 时也已吃进；这里以顶层键为准覆盖一次，
+    #     与 `report` 字段同一口径：顶层键才是权威来源。）
+    state.history = {
+        pid: [dict(r) for r in rows]
+        for pid, rows in (data.get("history") or {}).items()
+    }
     return state

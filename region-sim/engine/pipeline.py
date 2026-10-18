@@ -773,6 +773,13 @@ def _run_body(
     state.report = {pid: r.to_dict() for pid, r in reports.items()}
     state.raw_reports = reports
 
+    # ★ 终局曲线与 20 行指标表的唯一来源：把本季财报**追加**到
+    #   `state.history[player_id]`（按季升序自然堆积）。
+    #   advance 与 preview 共用：preview 跑在深拷贝副本上，history 会随
+    #   deepcopy 复制+追加到副本上（正是期望行为，不污染正本、不必特判）。
+    for player_id, rep in reports.items():
+        state.history.setdefault(player_id, []).append(rep.to_dict())
+
     state.world.quarter += 1
     return state
 

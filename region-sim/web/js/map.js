@@ -1,4 +1,4 @@
-﻿/* ══════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════
    map.js —— 地图渲染相关:
      · displayPlots(): 把 STATE.plots 与 MAP.virtual_plots 合成视图
      · renderMap():    地块格子渲染(含 planned 草稿显影 + data-asset)
@@ -62,19 +62,30 @@ function renderMap(){
     if (!p && !cellStatus && !planned){
       inner = `+`;
     } else if (planned && !p && !cellStatus){
-      /* 待建格：类型短码 + "待建"，产物也写上（比如"农·A"）。 */
+      /* 待建格：类型完整中文名 + "待建"。产物不再显示
+         （★ 2026-10-18 两段式拍板：上一行 zone 中文名、下一行 N 级）。 */
       const pt = planned.plot_type;
-      const prod = planned.product;
-      inner = `<span class="lt">${TYPE_CN[pt] || "?"}·待建</span>`
-            + `<span class="sub">${prod || "（未选产出）"}</span>`;
+      const zoneName = ZONE_CN[pt] || TYPE_CN[pt] || "?";
+      inner = `<span class="lt">${zoneName}</span>`
+            + `<span class="sub">待建</span>`;
     } else {
+      /* ★ 2026-10-18 · 两段式重构：
+           · 上一行(.lt): zone 完整中文名（**农业** / **资源** / **工业** / **服务** / **研究**）,
+             不再是单字简写；
+           · 下一行(.sub): 等级（**1级** / **2级** / **3级**）,
+             施工中也照常显示（比如"1级→2级"），不再显示产物。
+           · research 是 industry L2 product='研究' 的特殊化，
+             展示层归到"研究"zone（与 plotDisplayType 同一口径）。 */
       const pt = c.plot_type || (p && p.plot_type);
+      const prod = (p && p.product) || c.product;
+      const isResearch = (String(prod || "") === "研究");
+      const zoneName = isResearch ? ZONE_CN.research
+                                  : (ZONE_CN[pt] || TYPE_CN[pt] || "?");
       const lvl = (p && p.level != null) ? p.level : (c.level != null ? c.level : 0);
       const tgt = (p && p.target_level != null) ? p.target_level : lvl;
-      const lvlTxt = isConstructing ? `${lvl}→${tgt}` : `${lvl}`;
-      const prod = (p && p.product) || c.product;
-      inner = `<span class="lt">${TYPE_CN[pt] || "?"}${lvlTxt}</span>`
-            + `<span class="sub">${prod || (isConstructing ? "在建" : "—")}</span>`;
+      const lvlTxt = isConstructing ? `${lvl}级→${tgt}级` : `${lvl}级`;
+      inner = `<span class="lt">${zoneName}</span>`
+            + `<span class="sub">${lvlTxt}</span>`;
 
       /* ★ S6 E 四分量悬停 tooltip —— 引擎给就显示、没给就不渲染。
            数据源：STATE.plots[i].efficiency（engine/efficiency.py:86-100 to_dict()），

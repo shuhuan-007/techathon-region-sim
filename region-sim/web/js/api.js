@@ -22,6 +22,17 @@ let plan = emptyPlan();
 const TYPE_CN = {agriculture:"农", resource:"资", industry:"工",
                  service:"服", research:"研"};
 
+/* ★ 中文 zone 全名（集中定义,以后加 zone 只改这一处）——
+   表格"地块"列、地图 cell 第一行、3D cell 悬浮字 都用这一份完整二字名。
+   短码 TYPE_CN 仍保留,只用于紧凑行内"农 已用 2/3"之类的行内文案。 */
+const ZONE_CN = {
+  agriculture: "农业",
+  resource:    "资源",
+  industry:    "工业",
+  service:     "服务",
+  research:    "研究",
+};
+
 function emptyPlan(){
   return { plot_plans:{}, purchases:{}, food:{}, builds:[], contracts:[] };
 }
@@ -320,9 +331,17 @@ function streamSettlementLines(lines, intervalMs){
  */
 function settleEnabled(s){
   if (!s) return false;
+  if (s.phase === "finished") return false;   /* ★ 2026-10-18 终局：永远不可点 */
   if (s.phase !== "collecting") return false;
   /* 已经提交过（can_settle 为真）当然也能点 */
   return true;
+}
+
+/* ★ 2026-10-18 · 终局界面：拉终局总览（GET /api/finale，只读）。
+   契约：{ok, finale, narrative}；narrative 可能 null / 缺失（B 线还没好）。
+   失败把异常原样抛，调用方（finale.js）自己会兜"N/A 自构"。 */
+async function fetchFinale(game, player){
+  return api("GET", "/api/finale", null, {game, player});
 }
 
 const _SL_BTNS = ["btn-settle","btn-next","btn-runall","btn-stopall","btn-load","btn-new","btn-ai-send"];

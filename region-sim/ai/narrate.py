@@ -27,6 +27,12 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 #: kind → 提示词文件名。
 _PROMPT_FILES = {"news": "news.md", "report": "report.md"}
 
+# ★ 2026-10-18 终局报告：单独**追加一行**注册，而不是把上面那两个的
+#   字面字典改成「包含 finale 的 dict」—— 这样既有 news/report 两路
+#   的代码行完全不动，回归测试（tests/test_narrate.py）一字都不用改。
+#   `load_prompt(kind)` 走 `_PROMPT_FILES.get(kind)`，与追加与否无关。
+_PROMPT_FILES["finale"] = "finale.md"
+
 #: ⚠️ **默认在线**（2026-10-18 用户要求：财报/新闻必须能生成）。
 #: 测试全部注入 FakeClient；要强制离线调试，显式设 `NARRATE_OFFLINE=1`。
 #:
@@ -369,3 +375,184 @@ def narrate_report(report_dict: Optional[dict], cfg: Any = None, *,
     quarter = (report_dict.get("quarter")
                if isinstance(report_dict, dict) else None)
     return _generate("report", report_dict, quarter=quarter, client=client)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 三、终局报告入口（2026-10-18 追加，**不改既有函数体**）
+# ══════════════════════════════════════════════════════════════════
+#
+# 契约（与 engine/finale.py 与子代理 C 前端同钉）：
+#     · facts 是 `build_finale_facts(overview)` 返回的事实包。
+#     · 输出四顶层键：headline / body / charts / facts_used（缺一键即 bad_response）。
+#     · charts **恰好 2 个对象**，每个 points 长度 = total_quarters（或 20）、
+#       quarter 严格 1..N 升序、unit 必为 null。
+#     · headline / body 走 `_strip_currency_units`。
+#     · 失败兜底**不在这里做**——offline/model_unavailable/bad_response 如实
+#       返回给调用方（engine/finale.py::generate_finale_report 接到后再回落
+#       到 deterministic_body）。
+
+
+def _validate_finale_charts(charts: Any, total_quarters: Optional[int]) -> tuple[bool, str]:
+    """终局 charts 形状校验。返回 (是否合法, 不合法原因)。
+
+    合法要求：
+        · 是 list 且 **恰好 2 个对象**；
+        · 每个对象含 id/title/metric/unit/points 五键，unit 必须为 None，
+          metric ∈ {"gdp", "happiness"}；
+        · points 是 list，长度 = total_quarters（缺省 20）；
+        · points[i]["quarter"] == i+1（严格 1..N 升序）；
+        · 每个点的 value 可为 None 或 int/float（不补 0、不插值由引擎做，这里只管形状）。
+    """
+    N = int(total_quarters or 20)
+    if not isinstance(charts, list) or len(charts) != 2:
+        return False, f"charts 必须是恰好 2 个对象的数组，实得 {type(charts).__name__}"
+    want_metrics = ("gdp", "happiness")
+    for i, ch in enumerate(charts):
+        if not isinstance(ch, dict):
+            return False, f"charts[{i}] 不是对象"
+        for k in ("id", "title", "metric", "points"):
+            if k not in ch:
+                return False, f"charts[{i}] 缺键 {k!r}"
+        if ch.get("metric") not in want_metrics:
+            return False, f"charts[{i}].metric 必须是 'gdp'/'happiness'，实得 {ch.get('metric')!r}"
+        if ch.get("unit") is not None:
+            return False, f"charts[{i}].unit 必须为 null，实得 {ch.get('unit')!r}"
+        pts = ch.get("points")
+        if not isinstance(pts, list) or len(pts) != N:
+            return False, (f"charts[{i}].points 必须是长度 {N} 的数组，"
+                           f"实得 {0 if not isinstance(pts, list) else len(pts)}")
+        for j, p in enumerate(pts):
+            if not isinstance(p, dict) or p.get("quarter") != j + 1:
+                return False, f"charts[{i}].points[{j}] 的 quarter 必须是 {j+1}（升序）"
+            v = p.get("value")
+            if v is not None and not isinstance(v, (int, float)):
+                return False, f"charts[{i}].points[{j}].value 必须为 null 或数值"
+    if charts[0].get("metric") != "gdp" or charts[1].get("metric") != "happiness":
+        return False, "charts 顺序必须是 GDP 在前、幸福度在后"
+    return True, ""
+
+
+def narrate_finale_report(facts: Optional[dict], cfg: Any = None, *,
+                          client: Optional[Callable] = None) -> Optional[dict]:
+    """终局报告。`facts` 为 None → **返回 None**（参照 news 的做法）。
+
+    返回 dict（ok=True 分支）含四个顶层键::
+
+        headline / body / charts / facts_used
+        + ok=True, model=...
+        （ charts/facts_used 只作形状校验——最终采用的**引擎版**
+           由调用方 engine/finale.py::generate_finale_report 替换回去。）
+
+    失败统一走 `_failure`：
+        · `offline` / `model_unavailable` / `client_crashed` / `prompt_missing`
+        · `bad_response`：解析不出 JSON / 顶层不是对象 / 缺四键之一 /
+          charts 形状不合法（`detail` 指明哪一项不妥）。
+    """
+    if facts is None:
+        return None
+    quarter = facts.get("total_quarters") if isinstance(facts, dict) else None
+
+    # ⚠️ 为什么不复用 `_generate("finale", ...)`：
+    #    `_generate` 的尾部按 kind 二分（"news" 抽 headline/body、else 抽 text），
+    #    不认识 finale 的四键形状（headline/body/charts/facts_used）。
+    #    把它塞进通用函数就要**改 `_generate` 的函数体**——违背本任务
+    #    「不改既有函数体」的红线。所以 finale **单走这条路**，
+    #    只调用、不改写既有辅助函数（load_prompt / parse_model_json /
+    #    _failure / _strip_currency_units / _diag_of），形状校验走
+    #    `_validate_finale_charts`（本文件新增的私有函数，同样只加不改）。
+    #
+    # —— 离线 / client 缺失：与 `_generate` 完全相同的判定 ——
+    if client is None and is_offline():
+        return _failure(
+            "finale", quarter, "offline",
+            "离线模式（默认）：这次没有真调模型。要真跑请在启动进程时设 "
+            "NARRATE_OFFLINE=0。",
+        )
+    if client is None:
+        try:
+            client = _default_client()
+        except Exception as e:  # noqa: BLE001
+            return _failure("finale", quarter, "client_unavailable",
+                            f"取不到模型客户端（{type(e).__name__}：{e}）。")
+
+    try:
+        prompt = load_prompt("finale")
+    except NarrateError as e:
+        return _failure("finale", quarter, "prompt_missing", str(e))
+
+    payload_text = json.dumps(facts, ensure_ascii=False)
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": payload_text},
+    ]
+
+    try:
+        raw = client.chat_completions(messages)
+    except Exception as e:  # noqa: BLE001
+        return _failure("finale", quarter, "client_crashed",
+                        f"模型客户端抛了异常（{type(e).__name__}：{e}）。")
+
+    ok = raw.get("ok") if isinstance(raw, dict) else getattr(raw, "ok", False)
+    model = (raw.get("model") if isinstance(raw, dict)
+             else getattr(raw, "model", "")) or ""
+    diag = _diag_of(raw)
+    if not ok:
+        err = (raw.get("error") if isinstance(raw, dict)
+               else getattr(raw, "error", "")) or "model_unavailable"
+        detail = (raw.get("detail") if isinstance(raw, dict)
+                  else getattr(raw, "detail", "")) or "模型没给出可用回答。"
+        return _failure("finale", quarter, str(err), str(detail),
+                        model=model, diag=diag)
+
+    content = (raw.get("content") if isinstance(raw, dict)
+               else getattr(raw, "content", "")) or ""
+    obj, problem = parse_model_json(content)
+    if obj is None:
+        return _failure("finale", quarter, "bad_response",
+                        f"{problem}。原文前 200 字：{str(content).strip()[:200]}",
+                        model=model, diag=diag)
+
+    # ── 四键齐全校验（**缺一即 bad_response，绝不降级**）─────────
+    missing: list[str] = []
+    for k in ("headline", "body", "charts", "facts_used"):
+        if k not in obj:
+            missing.append(k)
+    if missing:
+        return _failure(
+            "finale", quarter, "bad_response",
+            f"JSON 解析成功但缺四顶层键：{', '.join(missing)}。",
+            model=model, diag=diag)
+
+    headline = obj["headline"]
+    body = obj["body"]
+    charts = obj["charts"]
+    facts_used = obj["facts_used"]
+
+    if not isinstance(headline, str) or not isinstance(body, str):
+        return _failure("finale", quarter, "bad_response",
+                        "headline 与 body 必须是字符串。", model=model, diag=diag)
+    if not isinstance(facts_used, dict):
+        return _failure("finale", quarter, "bad_response",
+                        "facts_used 必须是对象。", model=model, diag=diag)
+
+    total_q = facts.get("total_quarters") if isinstance(facts, dict) else None
+    ok_charts, why = _validate_finale_charts(charts, total_q)
+    if not ok_charts:
+        return _failure("finale", quarter, "bad_response",
+                        f"charts 形状不合法：{why}", model=model, diag=diag)
+
+    out = {
+        "kind": "finale",
+        "quarter": quarter,
+        "ok": True,
+        "model": model,
+        "headline": _strip_currency_units(headline),
+        "body": _strip_currency_units(body),
+        "charts": charts,
+        "facts_used": facts_used,
+        "facts_used_source": "model",   # 提醒调用方：这里是模型给的，**不可信**
+    }
+    if problem:
+        out["warning"] = problem
+    out.update(diag)
+    return out

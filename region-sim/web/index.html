@@ -6,6 +6,7 @@
 <title>区域发展模拟</title>
 <link rel="stylesheet" href="/static/css/app.css">
 <link rel="stylesheet" href="/static/css/tiles.css">
+<link rel="stylesheet" href="/static/css/finale.css">  <!-- ★ 2026-10-18 终局结算 overlay 独立样式 -->
 </head>
 <body>
 <div class="wrap">
@@ -20,13 +21,14 @@
     <div class="stat stat-pop"><span class="k">👥 岗位 / 人口</span><span class="v" id="s-pop">—</span></div>
     <div class="stat stat-eff"><span class="k">⚡ 平均效率</span><span class="v" id="s-eff">—</span></div>
     <div class="spacer"></div>
+    <button id="btn-setup-toggle" class="setup-toggle" title="开新局 / 读档">⚙ 开局·读档</button>
     <span class="pill" id="s-phase">—</span>
     <button id="btn-report">📋 上季报告</button>
     <button id="btn-next" class="hidden">下一季 ▶</button>
     <button id="btn-settle" class="primary btn-lg" disabled>▶ 推进本季度</button>
   </header>
 
-  <div id="setup" class="panel">
+  <div id="setup" class="panel hidden">
     <h2>🎮 开局 / 读档</h2>
     <div class="setup-grid">
 
@@ -62,16 +64,35 @@
   <div id="main" class="hidden">
     <div class="grid">
 
-      <!-- 左：地图 + 建造 -->
-      <div>
+      <!-- 左：地图 + 建造（全屏按钮作用到这个 wrapper） -->
+      <div id="left-col">
         <div class="panel">
-          <div class="row">
+          <div class="row map-tab-head">
             <h2 style="margin:0">🗺️ 地图 10 × 10</h2>
             <div class="spacer"></div>
-            <button id="btn-city-view">🏙️ 3D 城市</button>
+            <button id="btn-map-fullscreen" class="map-3d-btn" title="左栏全屏（含地图+建造面板），Esc/再点退出">⛶ 全屏</button>
+            <div class="map-tabs" role="tablist" aria-label="2D/3D 视图切换">
+              <button id="tab-map-2d" class="map-tab active" role="tab" aria-selected="true">🗺️ 2D</button>
+              <button id="tab-map-3d" class="map-tab" role="tab" aria-selected="false">🏙️ 3D</button>
+            </div>
             <span class="muted" id="map-hint">点格子选择</span>
           </div>
-          <div id="map"></div>
+          <div id="map-view-2d" class="map-tab-pane active" role="tabpanel" aria-labelledby="tab-map-2d">
+            <div id="map"></div>
+          </div>
+          <div id="map-view-3d" class="map-tab-pane" role="tabpanel" aria-labelledby="tab-map-3d" hidden>
+            <div class="map-3d-controls">
+              <label class="map-3d-label-toggle">
+                <input type="checkbox" id="cm-label-toggle" checked />
+                悬浮名
+              </label>
+              <button id="btn-cm-top" class="map-3d-btn" title="切到垂直俯视图（拖拽鼠标可回自由视角）">📐 俯视</button>
+              <button id="btn-cm-street" class="map-3d-btn" title="随机挑一栋建成的楼,从楼顶外一点看全城">🏙 街景</button>
+              <button id="btn-cm-png" class="map-3d-btn" title="把当前 3D 画面导出为 PNG">📷 截图</button>
+            </div>
+            <div id="map-3d-canvas-wrap"></div>
+            <div class="map-3d-foot muted">🖱️ 左键旋转 · 滚轮缩放 · 右键平移</div>
+          </div>
         </div>
 
         <div class="panel">
@@ -104,18 +125,23 @@
 
       <!-- 中：地块安排 + 口粮 + 报告 -->
       <div>
-        <div class="panel">
-          <h2>📋 本季安排</h2>
-          <table><thead><tr>
-            <th>地块</th><th>状态</th><th class="num">效率</th><th>开工</th>
-          </tr></thead><tbody id="plots-body"></tbody></table>
-          <div class="row" style="margin-top:8px">
-            <button id="btn-runall">全部满开工</button>
-            <button id="btn-stopall">全部停工</button>
+        <div class="panel" id="panel-plots">
+          <h2 id="plots-h2" class="collapse-h2">
+            <button id="btn-plots-collapse" class="collapse-btn" aria-expanded="true" title="收起 / 展开本季安排">▾</button>
+            <span>📋 本季安排</span>
+          </h2>
+          <div id="plots-collapse-body">
+            <table><thead><tr>
+              <th>地块</th><th>状态</th><th class="num">效率</th><th>开工</th>
+            </tr></thead><tbody id="plots-body"></tbody></table>
+            <div class="row" style="margin-top:8px">
+              <button id="btn-runall">全部满开工</button>
+              <button id="btn-stopall">全部停工</button>
+            </div>
+            <!-- ★ 已排建设（本地草稿）：逐条可撤销，只删草稿、不提交、不动地块 -->
+            <p class="muted" style="margin:12px 0 4px">🏗️ 已排建设（可撤销）</p>
+            <div id="builds-body" class="muted"></div>
           </div>
-          <!-- ★ 已排建设（本地草稿）：逐条可撤销，只删草稿、不提交、不动地块 -->
-          <p class="muted" style="margin:12px 0 4px">🏗️ 已排建设（可撤销）</p>
-          <div id="builds-body" class="muted"></div>
         </div>
 
         <div class="panel">
@@ -136,6 +162,24 @@
           <table><tbody id="proj-body"></tbody></table>
           <p class="muted" style="margin:8px 0 0" id="proj-note">—</p>
         </div>
+      </div>
+
+      <!-- ★ 右：AI 秘书侧栏 + 资讯/报告卡组（2026-10-18 拍板从中栏挪来） -->
+      <div>
+        <div class="panel" id="ai-panel">
+          <h2 style="margin:0 0 4px">🤖 AI 秘书</h2>
+          <p class="muted" style="margin:0 0 8px;font-size:12px">
+            问问题、要建议、让它起草本季计划都行 —— 它会直接帮你填到界面里，
+            <b>绝不自动提交</b>（改完自己点「▶ 推进本季度」）。
+          </p>
+          <div id="ai-chat"></div>
+          <div id="ai-input-row">
+            <textarea id="ai-input" rows="2"
+              placeholder="例：『这季先建什么？』『帮我起草一份，先建农业和口粮田』"></textarea>
+            <button id="btn-ai-send" class="primary btn-send" style="white-space:nowrap">发送 🚀</button>
+          </div>
+          <div id="ai-status" class="muted" style="margin:6px 0 0"></div>
+        </div>
 
         <!-- ★ 区域新闻（Q 结算后由 ai.narrate 生成；前端**只显示**，不算一个数） -->
         <div class="panel" id="news-panel">
@@ -153,22 +197,6 @@
           <h2>📄 上季报告</h2>
           <div id="report-body" class="muted">还没有结算过（第 1 季结算后出现）。</div>
         </div>
-      </div>
-
-      <!-- ★ 右：AI 秘书侧栏（一个聊天式对话框，§11.4：AI 只起草，提交永远是玩家的动作） -->
-      <div class="panel" id="ai-panel">
-        <h2 style="margin:0 0 4px">🤖 AI 秘书</h2>
-        <p class="muted" style="margin:0 0 8px;font-size:12px">
-          问问题、要建议、让它起草本季计划都行 —— 它会直接帮你填到界面里，
-          <b>绝不自动提交</b>（改完自己点「▶ 推进本季度」）。
-        </p>
-        <div id="ai-chat"></div>
-        <div id="ai-input-row">
-          <textarea id="ai-input" rows="2"
-            placeholder="例：『这季先建什么？』『帮我起草一份，先建农业和口粮田』"></textarea>
-          <button id="btn-ai-send" class="primary btn-send" style="white-space:nowrap">发送 🚀</button>
-        </div>
-        <div id="ai-status" class="muted" style="margin:6px 0 0"></div>
       </div>
     </div>
   </div>
@@ -214,18 +242,15 @@
   </div>
 </div>
 
-<!-- ★ 备用方案：全屏 3D 城市 modal（cell+3D 重叠死胡同退路,只读快照） -->
-<div id="city-modal" class="hidden">
-  <div class="cm-head">
-    <div class="t">🏙️ 3D 城市预览 · <span id="cm-subtitle">—</span></div>
-    <label id="cm-label-toggle-wrap" style="margin-left:auto;margin-right:12px;font-size:13px;display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none">
-      <input type="checkbox" id="cm-label-toggle" checked style="cursor:pointer" />
-      悬浮名
-    </label>
-    <button id="btn-city-close" class="cm-close">✕</button>
-  </div>
+<!-- ★ 2026-10-18 v17 改造：3D 城市预览从全屏模态改为左栏 panel 内嵌 tab 切换。
+     原 #city-modal 全屏 modal 容器已删；3D canvas 现在挂在 #map-view-3d pane 下的
+     #map-3d-canvas-wrap 容器内（见上方 panel）。下面这个 #city-modal 是 display:none
+     的"宿主",只为了让 city-modal-ticker.js（挂载 ticker 时会 getElementById('city-modal')）
+     与 city-modal.js `_ensureRenderer()` 首次抓 #city-canvas 有节点可寻 ——
+     `_ensureRenderer()` 抓到之后会立刻把 canvas 从本宿主搬到 #map-3d-canvas-wrap。
+     交互/视觉/HMR 上本宿主等价"不存在"。 -->
+<div id="city-modal" style="display:none !important">
   <canvas id="city-canvas" width="1200" height="750"></canvas>
-  <div class="cm-foot muted">🖱️ 左键旋转 · 滚轮缩放 · 右键平移 · Esc 关闭</div>
 </div>
 
 <script src="/static/js/vendor/three.min.js" charset="utf-8"></script>
@@ -234,10 +259,63 @@
 <script src="/static/js/state.js"></script>
 <script src="/static/js/api.js"></script>
 <script src="/static/js/map.js"></script>
+<script src="/static/js/finale.js"></script>  <!-- ★ 2026-10-18 终局结算界面；须在 panel.js 前加载，panel.js 才能调到 applyFinishedState -->
 <script src="/static/js/panel.js"></script>
 <script src="/static/js/main.js"></script>
 <script src="/static/js/city-modal.js?v=2"></script>
 <script src="/static/js/city-modal-ticker.js"></script>
 <script src="/static/js/city-modal-sky.js?v=1"></script>
+<script>
+/* 开局/读档面板切换（2026-10-18 拍板）：默认收起到 phase 旁按钮下,
+   点击切换;开局/读档成功后自动收起。与 panel.js 解耦,inline 独立。 */
+(function(){
+  const btn = document.getElementById('btn-setup-toggle');
+  const setup = document.getElementById('setup');
+  if (!btn || !setup) return;
+  function _open(){
+    setup.classList.remove('hidden');
+    document.body.classList.add('setup-open');
+    btn.setAttribute('aria-expanded', 'true');
+  }
+  function _close(){
+    setup.classList.add('hidden');
+    document.body.classList.remove('setup-open');
+    btn.setAttribute('aria-expanded', 'false');
+  }
+  btn.addEventListener('click', () => {
+    if (setup.classList.contains('hidden')) _open(); else _close();
+  });
+  /* 成功开局/读档后自动收起 —— 钩 panel.js 里 btn-new/btn-load 点击之后 */
+  window.addEventListener('rg:session-started', _close);
+  /* 兜底:点 main 区域 / Esc要点 也收起 */
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !setup.classList.contains('hidden')) _close();
+  });
+  btn.setAttribute('aria-expanded', 'false');
+})();
+</script>
+<script>
+/* 左栏全屏（含地图 + 建造面板）。2026-10-18 拍板，inline 独立、不污染 panel.js。
+   Fullscreen API 直接作用在 #left-col。 */
+(function(){
+  const btn   = document.getElementById('btn-map-fullscreen');
+  const col   = document.getElementById('left-col');
+  if (!btn || !col) return;
+  function _st(){
+    const on = !!document.fullscreenElement;
+    btn.textContent = on ? '⛶ 退出' : '⛶ 全屏';
+    btn.title = on ? '退出全屏（Esc/再点均可）' : '左栏全屏（含地图+建造面板），Esc/再点退出';
+  }
+  btn.addEventListener('click', () => {
+    if (document.fullscreenElement){
+      document.exitFullscreen().catch(()=>{});
+    } else if (col.requestFullscreen){
+      col.requestFullscreen().catch(()=>{});
+    }
+  });
+  document.addEventListener('fullscreenchange', _st);
+  _st();
+})();
+</script>
 </body>
 </html>

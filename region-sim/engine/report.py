@@ -61,6 +61,7 @@ from typing import Optional
 
 from engine import assets as _assets
 from engine import finance, news, production, validate
+from engine.clock import is_game_over
 from engine.loader import Config
 from engine.models import GameState, Plan, Plot, PlotStatus, PlotType
 from engine.pipeline import QuarterReport, SettlementError, preview
@@ -305,6 +306,12 @@ def build_state(
 
         # ── 本季收支预览 ──
         "projection": _projection(trial, trial_error, cfg),
+
+        # ── ★ 终局信号（2026-10-18「20 季终局」）──
+        #   只加不改：前端拿 `game_over` 与 `world_phase` 直接判断是否
+        #   切到终局只读界面；不在这里生成终局叙事。
+        "game_over": bool(is_game_over(state.world.quarter, state.world.total_quarters)),
+        "world_phase": state.world.phase.value,
     }
 
     # ── ★ 本季草稿里**未提交**建设指令的**折后现金报价**（2026-10-17）──

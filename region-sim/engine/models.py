@@ -106,6 +106,7 @@ class SessionPhase(str, Enum):
     """会话状态机（《回合流程与状态机》§一）。
 
         COLLECTING（收计划）→ RESOLVING（结算）→ REPORT（月报）→ 回到 COLLECTING
+                                                  ↘（已到总季数）FINISHED（终局只读）
 
     玩家动作**只有一个时点**：提交本季 Plan。
     单人 = 多人的特例：len(plans) == len(players) 提交即成立，无等待逻辑。
@@ -114,6 +115,9 @@ class SessionPhase(str, Enum):
     COLLECTING = "collecting"
     RESOLVING = "resolving"
     REPORT = "report"
+    # 终局只读：可看地图与上季报告，没有 submit/end/next 任何操作入口。
+    # 由 server/session.py::_resolve_unlocked 在 `is_game_over()` 为真时切入。
+    FINISHED = "finished"
 
 
 class WorldPhase(str, Enum):
@@ -820,6 +824,13 @@ class GameState:
     report: dict = field(default_factory=dict)
     raw_reports: dict = field(default_factory=dict, repr=False, compare=False)
 
+    # ★ 逐季财报历史（**进存档**）：键=player_id，值=按季升序的季度财报 dict
+    #   列表（每个元素是某一季 `QuarterReport.to_dict()`）。
+    #   由 `engine.pipeline._run_body` 在每次结算（含 preview 的副本）末尾追加。
+    #   是「20 季终局」曲线与 20 行指标表的**唯一来源**。
+    #   ⚠️ 与 `raw_reports` 不同：这个**进存档**，读档可复现整条时间线。
+    history: dict[str, list[dict]] = field(default_factory=dict)
+
     def player(self, player_id: str) -> PlayerState:
         """取某个玩家的私有状态。不存在时**报错**，不静默造一个。"""
         try:
@@ -866,6 +877,12 @@ class GameState:
             "players": {pid: p.to_dict() for pid, p in self.players.items()},
             # ★ 合同账本**进存档**（§7.2）：未履约义务不能因存档/读档丢失。
             "contracts": {cid: c.to_dict() for cid, c in self.contracts.items()},
+            # ★ 逐季财报历史**进存档**（终局曲线与 20 行指标表的唯一来源）。
+            #   深拷贝每一行 dict，避免运行时的浅共享把"读档后的历史"写坏。
+            "history": {
+                pid: [dict(r) for r in rows]
+                for pid, rows in self.history.items()
+            },
         }
 
     @classmethod
@@ -875,6 +892,11 @@ class GameState:
             players={pid: PlayerState.from_dict(p) for pid, p in data.get("players", {}).items()},
             # ⚠️ 兼容旧存档：没有 "contracts" 键 → 空账本（单人局本就为空）。
             contracts={cid: Contract.from_dict(c) for cid, c in data.get("contracts", {}).items()},
+            # ⚠️ 兼容旧存档：没有 "history" 键 → 空历史（不造数）。
+            history={
+                pid: [dict(r) for r in rows]
+                for pid, rows in (data.get("history") or {}).items()
+            },
         )
 
 
